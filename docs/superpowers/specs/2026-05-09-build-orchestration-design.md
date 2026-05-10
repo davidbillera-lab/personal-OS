@@ -94,7 +94,7 @@ components/
 9. Log cost to `model_costs` (handled inside `routeTask`)
 10. `revalidatePath('/orchestrate')`
 
-**Error handling:** If AI call fails or JSON parse fails, leave `generated_spec` null and surface an error toast via `useTransition` return value. Task stays in Pending tab; operator can retry.
+**Error handling:** If AI call fails or JSON parse fails, leave `generated_spec` null and return `{ error: string }` from the action. The client component checks the return value inside `startTransition` (using an async wrapper) and sets local error state shown inline below the Generate Spec button. Task stays in Pending tab; operator can retry.
 
 ---
 

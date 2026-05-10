@@ -44,3 +44,9 @@ coverage/
 
 # Misc
 *.pem
+
+# Scaffold temp dir (can be deleted when Windows releases the handle)
+nextinit/
+
+# Superpowers plugin workspace (local brainstorming artifacts)
+.superpowers/
