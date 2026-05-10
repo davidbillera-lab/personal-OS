@@ -1,3 +1,4 @@
+import Link from 'next/link'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import type { Project, KillCriteriaStatus, ProjectStage } from '@/lib/types'
@@ -70,14 +71,22 @@ export function ProjectCard({ project }: { project: Project }) {
           Updated {timeSince(project.last_update)}
         </p>
 
-        {project.local_path && (
-          <a
-            href={`vscode://file/${project.local_path}`}
-            className="mt-1 inline-flex items-center gap-1 text-[10px] font-medium text-blue-600 hover:text-blue-800"
+        <div className="flex items-center justify-between pt-1">
+          <Link
+            href={`/projects/${project.id}`}
+            className="text-[11px] font-medium text-foreground hover:underline"
           >
-            Open in VS Code →
-          </a>
-        )}
+            Open workspace →
+          </Link>
+          {project.local_path && (
+            <a
+              href={`vscode://file/${project.local_path}`}
+              className="text-[10px] text-muted-foreground hover:text-foreground"
+            >
+              Open in VS Code
+            </a>
+          )}
+        </div>
       </CardContent>
     </Card>
   )

@@ -28,8 +28,20 @@ export interface Project {
   blockers: string | null
   kill_criteria_status: KillCriteriaStatus | null
   exit_thesis: string | null
+  lead_model: string | null
+  lead_suggestions: string | null
+  suggestions_updated_at: string | null
   created_at: string
   updated_at: string
+}
+
+export interface ProjectChat {
+  id: string
+  project_id: string
+  role: 'user' | 'assistant'
+  content: string
+  model: string | null
+  created_at: string
 }
 
 export interface BrainDump {
@@ -139,6 +151,12 @@ export interface Database {
         Row: KillCriteriaCheck
         Insert: Omit<KillCriteriaCheck, 'id' | 'created_at'>
         Update: Partial<Omit<KillCriteriaCheck, 'id' | 'created_at'>>
+        Relationships: []
+      }
+      project_chats: {
+        Row: ProjectChat
+        Insert: Omit<ProjectChat, 'id' | 'created_at'>
+        Update: never
         Relationships: []
       }
     }
