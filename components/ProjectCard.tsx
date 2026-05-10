@@ -80,7 +80,7 @@ export function ProjectCard({ project }: { project: Project }) {
           </Link>
           {project.local_path && (
             <a
-              href={`vscode://file/${project.local_path}`}
+              href={`vscode://file/${project.local_path?.replace(/\\/g, '/')}`}
               className="text-[10px] text-muted-foreground hover:text-foreground"
             >
               Open in VS Code

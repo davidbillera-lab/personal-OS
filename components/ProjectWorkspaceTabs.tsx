@@ -9,7 +9,6 @@ const TABS = [
   { key: 'overview',    label: 'Overview' },
   { key: 'brain_dumps', label: 'Brain Dumps' },
   { key: 'tasks',       label: 'Tasks' },
-  { key: 'chat',        label: 'Chat' },
 ] as const
 
 type TabKey = typeof TABS[number]['key']
@@ -44,6 +43,7 @@ interface Props {
 
 export function ProjectWorkspaceTabs({ project, brainDumps, tasks, initialChats, claudeMd, decisionsMd }: Props) {
   const [activeTab, setActiveTab] = useState<TabKey>('overview')
+
   const [isPending, startTransition] = useTransition()
   const [suggestionsText, setSuggestionsText] = useState(project.lead_suggestions ?? '')
   const [suggestError, setSuggestError] = useState<string | null>(null)
@@ -73,7 +73,7 @@ export function ProjectWorkspaceTabs({ project, brainDumps, tasks, initialChats,
         <div className="flex items-center gap-2 shrink-0">
           {project.local_path && (
             <a
-              href={`vscode://file/${project.local_path}`}
+              href={`vscode://file/${project.local_path.replace(/\\/g, '/')}`}
               className="rounded border border-input px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:border-foreground/40"
             >
               Open in VS Code
@@ -82,175 +82,192 @@ export function ProjectWorkspaceTabs({ project, brainDumps, tasks, initialChats,
         </div>
       </div>
 
-      {/* Tab nav */}
-      <div className="flex gap-1 border-b border-border">
-        {TABS.map(({ key, label }) => (
-          <button
-            key={key}
-            onClick={() => setActiveTab(key)}
-            className={[
-              'px-3 py-1.5 text-sm font-medium rounded-t-md -mb-px border border-transparent transition-colors',
-              activeTab === key
-                ? 'border-border border-b-background bg-background text-foreground'
-                : 'text-muted-foreground hover:text-foreground',
-            ].join(' ')}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {/* Tab content */}
-      {activeTab === 'overview' && (
-        <div className="flex flex-col gap-6">
-          {/* Metadata grid */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            {[
-              { label: 'Stage',  value: project.stage },
-              { label: 'Tier',   value: `Tier ${project.tier}` },
-              { label: 'Status', value: project.status ?? '—' },
-              { label: 'Kill',   value: project.kill_criteria_status ?? '—' },
-            ].map(({ label, value }) => (
-              <div key={label} className="rounded-md border border-border bg-muted/30 px-3 py-2">
-                <p className="text-[10px] text-muted-foreground">{label}</p>
-                <p className="text-xs font-medium text-foreground">{value}</p>
-              </div>
+      {/* 2-column layout: tabs on left, chat always on right */}
+      <div className="flex gap-6 items-start">
+        {/* Left: tabbed content */}
+        <div className="flex flex-col gap-4 flex-1 min-w-0">
+          {/* Tab nav */}
+          <div className="flex gap-1 border-b border-border">
+            {TABS.map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => setActiveTab(key)}
+                className={[
+                  'px-3 py-1.5 text-sm font-medium rounded-t-md -mb-px border border-transparent transition-colors',
+                  activeTab === key
+                    ? 'border-border border-b-background bg-background text-foreground'
+                    : 'text-muted-foreground hover:text-foreground',
+                ].join(' ')}
+              >
+                {label}
+              </button>
             ))}
           </div>
 
-          {project.next_action && (
-            <div className="rounded-md bg-muted px-3 py-2 text-sm">
-              <span className="font-medium text-foreground">Next: </span>
-              <span className="text-muted-foreground">{project.next_action}</span>
-            </div>
-          )}
+          {/* Tab content */}
+          {activeTab === 'overview' && (
+            <div className="flex flex-col gap-6">
+              {/* Metadata grid */}
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {[
+                  { label: 'Stage',  value: project.stage },
+                  { label: 'Tier',   value: `Tier ${project.tier}` },
+                  { label: 'Status', value: project.status ?? '—' },
+                  { label: 'Kill',   value: project.kill_criteria_status ?? '—' },
+                ].map(({ label, value }) => (
+                  <div key={label} className="rounded-md border border-border bg-muted/30 px-3 py-2">
+                    <p className="text-[10px] text-muted-foreground">{label}</p>
+                    <p className="text-xs font-medium text-foreground">{value}</p>
+                  </div>
+                ))}
+              </div>
 
-          {project.blockers && (
-            <div className="rounded-md bg-red-50 px-3 py-2 text-sm">
-              <span className="font-medium text-red-700">Blocked: </span>
-              <span className="text-red-600">{project.blockers}</span>
-            </div>
-          )}
+              {project.next_action && (
+                <div className="rounded-md bg-muted px-3 py-2 text-sm">
+                  <span className="font-medium text-foreground">Next: </span>
+                  <span className="text-muted-foreground">{project.next_action}</span>
+                </div>
+              )}
 
-          {/* CLAUDE.md */}
-          {claudeMd && (
-            <div className="flex flex-col gap-2">
-              <h2 className="text-sm font-semibold">CLAUDE.md</h2>
-              <div className="rounded-md border border-border bg-muted/40 p-3 text-[11px] text-muted-foreground leading-relaxed max-h-64 overflow-y-auto whitespace-pre-wrap">
-                {claudeMd}
+              {project.blockers && (
+                <div className="rounded-md bg-red-50 px-3 py-2 text-sm">
+                  <span className="font-medium text-red-700">Blocked: </span>
+                  <span className="text-red-600">{project.blockers}</span>
+                </div>
+              )}
+
+              {/* CLAUDE.md */}
+              {claudeMd && (
+                <div className="flex flex-col gap-2">
+                  <h2 className="text-sm font-semibold">CLAUDE.md</h2>
+                  <div className="rounded-md border border-border bg-muted/40 p-3 text-[11px] text-muted-foreground leading-relaxed max-h-64 overflow-y-auto whitespace-pre-wrap">
+                    {claudeMd}
+                  </div>
+                </div>
+              )}
+
+              {/* decisions.md */}
+              {decisionsMd && (
+                <div className="flex flex-col gap-2">
+                  <h2 className="text-sm font-semibold">decisions.md</h2>
+                  <div className="rounded-md border border-border bg-muted/40 p-3 text-[11px] text-muted-foreground leading-relaxed max-h-64 overflow-y-auto whitespace-pre-wrap">
+                    {decisionsMd}
+                  </div>
+                </div>
+              )}
+
+              {/* AI Suggestions */}
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold">AI Suggestions</h2>
+                  <div className="flex items-center gap-2">
+                    {project.suggestions_updated_at && (
+                      <span className="text-[10px] text-muted-foreground/60">
+                        {timeSince(project.suggestions_updated_at)}
+                      </span>
+                    )}
+                    <button
+                      disabled={isPending}
+                      onClick={handleRefreshSuggestions}
+                      className="rounded border border-input px-3 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:border-foreground/40 disabled:opacity-50"
+                    >
+                      {isPending ? '…' : 'Refresh Suggestions'}
+                    </button>
+                  </div>
+                </div>
+
+                {suggestError && (
+                  <p className="text-[11px] text-red-600 bg-red-50 rounded px-2 py-1">{suggestError}</p>
+                )}
+
+                {suggestionsText ? (
+                  <div className="rounded-md border border-border bg-muted/40 p-3 text-[11px] text-muted-foreground leading-relaxed whitespace-pre-wrap">
+                    {suggestionsText}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground/60 italic">
+                    {isPending ? 'Generating suggestions…' : 'No suggestions yet. Click Refresh Suggestions to generate.'}
+                  </p>
+                )}
               </div>
             </div>
           )}
 
-          {/* decisions.md */}
-          {decisionsMd && (
-            <div className="flex flex-col gap-2">
-              <h2 className="text-sm font-semibold">decisions.md</h2>
-              <div className="rounded-md border border-border bg-muted/40 p-3 text-[11px] text-muted-foreground leading-relaxed max-h-64 overflow-y-auto whitespace-pre-wrap">
-                {decisionsMd}
-              </div>
+          {activeTab === 'brain_dumps' && (
+            <div className="flex flex-col gap-3">
+              {brainDumps.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-12">
+                  No brain dumps for this project yet.
+                </p>
+              ) : (
+                brainDumps.map(dump => (
+                  <div key={dump.id} className="rounded-md border border-border bg-card p-3 flex flex-col gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {dump.classified_type && (
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${dumpTypeColors[dump.classified_type] ?? 'bg-slate-100 text-slate-600'}`}>
+                          {dump.classified_type.replace('_', ' ')}
+                        </span>
+                      )}
+                      <span className="ml-auto text-[10px] text-muted-foreground/60">{timeSince(dump.created_at)}</span>
+                    </div>
+                    <p className="text-xs text-foreground leading-snug whitespace-pre-wrap">{dump.raw_text}</p>
+                    {dump.ai_summary && (
+                      <p className="text-[11px] text-muted-foreground italic">{dump.ai_summary}</p>
+                    )}
+                  </div>
+                ))
+              )}
             </div>
           )}
 
-          {/* AI Suggestions */}
+          {activeTab === 'tasks' && (
+            <div className="flex flex-col gap-3">
+              {tasks.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-12">
+                  No pending tasks. Head to <span className="font-medium text-foreground">Orchestrate</span> to manage tasks.
+                </p>
+              ) : (
+                tasks.map(task => (
+                  <div key={task.id} className="rounded-md border border-border bg-card p-3 flex flex-col gap-1.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {task.recommended_tool && (
+                        <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-slate-100 text-slate-700">
+                          {task.recommended_tool}
+                        </span>
+                      )}
+                      {task.complexity_tier != null && (
+                        <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-blue-100 text-blue-700">
+                          Tier {task.complexity_tier}
+                        </span>
+                      )}
+                      <span className="ml-auto text-[10px] text-muted-foreground/60">{timeSince(task.created_at)}</span>
+                    </div>
+                    <p className="text-sm font-medium leading-snug">{task.title}</p>
+                    {task.description && (
+                      <p className="text-[11px] text-muted-foreground">{task.description}</p>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Right: always-visible chat panel */}
+        <div className="w-[360px] shrink-0 sticky top-4">
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold">AI Suggestions</h2>
-              <div className="flex items-center gap-2">
-                {project.suggestions_updated_at && (
-                  <span className="text-[10px] text-muted-foreground/60">
-                    {timeSince(project.suggestions_updated_at)}
-                  </span>
-                )}
-                <button
-                  disabled={isPending}
-                  onClick={handleRefreshSuggestions}
-                  className="rounded border border-input px-3 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:border-foreground/40 disabled:opacity-50"
-                >
-                  {isPending ? '…' : 'Refresh Suggestions'}
-                </button>
-              </div>
+              <h2 className="text-sm font-semibold">Build Partner</h2>
+              {project.lead_model && (
+                <span className="text-[10px] text-muted-foreground/60">{project.lead_model}</span>
+              )}
             </div>
-
-            {suggestError && (
-              <p className="text-[11px] text-red-600 bg-red-50 rounded px-2 py-1">{suggestError}</p>
-            )}
-
-            {suggestionsText ? (
-              <div className="rounded-md border border-border bg-muted/40 p-3 text-[11px] text-muted-foreground leading-relaxed whitespace-pre-wrap">
-                {suggestionsText}
-              </div>
-            ) : (
-              <p className="text-[11px] text-muted-foreground/60 italic">
-                {isPending ? 'Generating suggestions…' : 'No suggestions yet. Click Refresh Suggestions to generate.'}
-              </p>
-            )}
+            <div className="rounded-md border border-border bg-card p-3">
+              <ProjectChat projectId={project.id} initialMessages={initialChats} />
+            </div>
           </div>
         </div>
-      )}
-
-      {activeTab === 'brain_dumps' && (
-        <div className="flex flex-col gap-3">
-          {brainDumps.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-12">
-              No brain dumps for this project yet.
-            </p>
-          ) : (
-            brainDumps.map(dump => (
-              <div key={dump.id} className="rounded-md border border-border bg-card p-3 flex flex-col gap-2">
-                <div className="flex items-center gap-2 flex-wrap">
-                  {dump.classified_type && (
-                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${dumpTypeColors[dump.classified_type] ?? 'bg-slate-100 text-slate-600'}`}>
-                      {dump.classified_type.replace('_', ' ')}
-                    </span>
-                  )}
-                  <span className="ml-auto text-[10px] text-muted-foreground/60">{timeSince(dump.created_at)}</span>
-                </div>
-                <p className="text-xs text-foreground leading-snug whitespace-pre-wrap">{dump.raw_text}</p>
-                {dump.ai_summary && (
-                  <p className="text-[11px] text-muted-foreground italic">{dump.ai_summary}</p>
-                )}
-              </div>
-            ))
-          )}
-        </div>
-      )}
-
-      {activeTab === 'tasks' && (
-        <div className="flex flex-col gap-3">
-          {tasks.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-12">
-              No pending tasks. Head to <span className="font-medium text-foreground">Orchestrate</span> to manage tasks.
-            </p>
-          ) : (
-            tasks.map(task => (
-              <div key={task.id} className="rounded-md border border-border bg-card p-3 flex flex-col gap-1.5">
-                <div className="flex items-center gap-2 flex-wrap">
-                  {task.recommended_tool && (
-                    <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-slate-100 text-slate-700">
-                      {task.recommended_tool}
-                    </span>
-                  )}
-                  {task.complexity_tier != null && (
-                    <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-blue-100 text-blue-700">
-                      Tier {task.complexity_tier}
-                    </span>
-                  )}
-                  <span className="ml-auto text-[10px] text-muted-foreground/60">{timeSince(task.created_at)}</span>
-                </div>
-                <p className="text-sm font-medium leading-snug">{task.title}</p>
-                {task.description && (
-                  <p className="text-[11px] text-muted-foreground">{task.description}</p>
-                )}
-              </div>
-            ))
-          )}
-        </div>
-      )}
-
-      {activeTab === 'chat' && (
-        <ProjectChat projectId={project.id} initialMessages={initialChats} />
-      )}
+      </div>
     </div>
   )
 }
