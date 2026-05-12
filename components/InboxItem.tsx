@@ -1,8 +1,8 @@
 'use client'
 
-import { useTransition } from 'react'
+import { useState, useTransition } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
-import { archiveDump, routeDump, promoteDump, reclassifyDump } from '@/app/(app)/inbox/actions'
+import { archiveDump, routeDump, promoteDump, promoteDumpAnyway, reclassifyDump } from '@/app/(app)/inbox/actions'
 import type { BrainDump, BrainDumpType, Project } from '@/lib/types'
 
 const typeColors: Record<BrainDumpType, string> = {
@@ -35,6 +35,7 @@ interface Props {
 
 export function InboxItem({ dump, projects }: Props) {
   const [isPending, startTransition] = useTransition()
+  const [warn, setWarn] = useState<string | null>(null)
 
   const displayText = dump.ai_summary ?? dump.raw_text
   const confidence = dump.classification_confidence != null
@@ -102,15 +103,19 @@ export function InboxItem({ dump, projects }: Props) {
           {/* Promote */}
           <button
             disabled={isPending}
-            onClick={() =>
-              startTransition(() =>
-                promoteDump(
+            onClick={() => {
+              setWarn(null)
+              startTransition(async () => {
+                const result = await promoteDump(
                   dump.id,
                   dump.project_id,
-                  dump.ai_summary ?? dump.raw_text.slice(0, 100)
+                  dump.ai_summary ?? dump.raw_text.slice(0, 100),
+                  dump.raw_text,
+                  dump.ai_summary
                 )
-              )
-            }
+                if (result.warn) setWarn(result.warn)
+              })
+            }}
             className="rounded bg-foreground px-3 py-1 text-[11px] font-medium text-background hover:bg-foreground/80 disabled:opacity-50"
           >
             {isPending ? '…' : 'Promote to task'}
@@ -125,6 +130,39 @@ export function InboxItem({ dump, projects }: Props) {
             Archive
           </button>
         </div>
+
+        {/* Validation warning */}
+        {warn && (
+          <div className="rounded-md bg-yellow-50 border border-yellow-200 px-3 py-2 flex flex-col gap-1.5">
+            <p className="text-[11px] text-yellow-800">
+              <span className="font-semibold">Flagged: </span>{warn}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                disabled={isPending}
+                onClick={() => {
+                  setWarn(null)
+                  startTransition(() =>
+                    promoteDumpAnyway(
+                      dump.id,
+                      dump.project_id,
+                      dump.ai_summary ?? dump.raw_text.slice(0, 100)
+                    )
+                  )
+                }}
+                className="rounded bg-yellow-700 px-3 py-1 text-[11px] font-medium text-white hover:bg-yellow-800 disabled:opacity-50"
+              >
+                {isPending ? '…' : 'Promote anyway'}
+              </button>
+              <button
+                onClick={() => setWarn(null)}
+                className="text-[11px] text-yellow-700 hover:text-yellow-900"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   )

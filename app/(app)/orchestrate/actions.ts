@@ -43,11 +43,13 @@ export async function generateSpec(taskId: string): Promise<{ error?: string }> 
 Given a task and project context, produce a structured implementation spec.
 Output valid JSON with exactly these fields:
 {
-  "spec": "markdown string with Goal, Context, Acceptance Criteria, and Notes sections",
+  "spec": "markdown string with these sections: ## Goal, ## Context, ## Acceptance Criteria, ## SCOPE (explicit list of files/directories this agent may touch), ## OFF-LIMITS (explicit list of files/directories this agent must NOT modify), ## Notes",
   "recommended_tool": "Claude Code" | "Codex" | "Manus" | "Lovable",
   "recommended_model": "model ID string",
   "complexity_tier": 1 | 2 | 3 | 4
-}`
+}
+
+SCOPE and OFF-LIMITS are required sections. Be explicit — list specific files, directories, or globs. If Lovable is recommended, OFF-LIMITS must include all directories with existing Claude Code history. If Claude Code is recommended, OFF-LIMITS must exclude any isolated UI-only pages appropriate for Lovable.`
 
   const prompt = [
     `Task: ${task.title}`,
@@ -131,5 +133,79 @@ export async function markDone(taskId: string): Promise<void> {
 export async function archiveTask(taskId: string): Promise<void> {
   const supabase = await createServerSupabaseClient()
   await supabase.from('tasks').update({ status: 'killed' }).eq('id', taskId)
+  revalidatePath('/orchestrate')
+}
+
+export async function claimTask(taskId: string, agentName: string): Promise<void> {
+  const supabase = await createServerSupabaseClient()
+
+  const { data: task } = await supabase
+    .from('tasks')
+    .select('project_id, title')
+    .eq('id', taskId)
+    .single()
+
+  const now = new Date().toISOString()
+
+  await supabase
+    .from('tasks')
+    .update({ agent_assigned_to: agentName, claimed_at: now })
+    .eq('id', taskId)
+
+  if (task?.project_id) {
+    await supabase
+      .from('projects')
+      .update({ current_agent: agentName })
+      .eq('id', task.project_id)
+  }
+
+  await supabase.from('agent_handoffs').insert({
+    project_id: task?.project_id ?? undefined,
+    task_id: taskId,
+    agent_name: agentName,
+    task_description: task?.title ?? null,
+    status: 'in_progress',
+  })
+
+  revalidatePath('/orchestrate')
+}
+
+export async function completeTask(
+  taskId: string,
+  commitUrl: string
+): Promise<void> {
+  const supabase = await createServerSupabaseClient()
+
+  const { data: task } = await supabase
+    .from('tasks')
+    .select('project_id, agent_assigned_to')
+    .eq('id', taskId)
+    .single()
+
+  const now = new Date().toISOString()
+
+  await supabase
+    .from('tasks')
+    .update({ status: 'review', completed_at: now })
+    .eq('id', taskId)
+
+  if (task?.project_id) {
+    await supabase
+      .from('projects')
+      .update({ current_agent: null })
+      .eq('id', task.project_id)
+  }
+
+  await supabase
+    .from('agent_handoffs')
+    .update({
+      status: 'done',
+      github_commit_url: commitUrl || null,
+      completed_at: now,
+      outcome: `Completed by ${task?.agent_assigned_to ?? 'agent'}`,
+    })
+    .eq('task_id', taskId)
+    .eq('status', 'in_progress')
+
   revalidatePath('/orchestrate')
 }

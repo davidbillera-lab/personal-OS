@@ -2,8 +2,10 @@
 
 import { useState, useTransition } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
-import { generateSpec, markDone, archiveTask } from '@/app/(app)/orchestrate/actions'
+import { generateSpec, markDone, archiveTask, claimTask, completeTask } from '@/app/(app)/orchestrate/actions'
 import type { Task, Project } from '@/lib/types'
+
+const AGENTS = ['Claude Code', 'Codex', 'Manus', 'Lovable', 'Cursor'] as const
 
 type TaskWithProject = Task & { project_name: string | null }
 
@@ -32,6 +34,8 @@ const tierColors: Record<number, string> = {
 export function OrchestrateItem({ task, projects }: Props) {
   const [isPending, startTransition] = useTransition()
   const [specError, setSpecError] = useState<string | null>(null)
+  const [commitUrl, setCommitUrl] = useState('')
+  const [showComplete, setShowComplete] = useState(false)
 
   const projectName =
     task.project_name ??
@@ -75,6 +79,11 @@ export function OrchestrateItem({ task, projects }: Props) {
               Tier {task.complexity_tier}
             </span>
           )}
+          {task.agent_assigned_to && (
+            <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-700">
+              {task.agent_assigned_to}
+            </span>
+          )}
           {projectName && (
             <span className="text-[10px] font-medium text-foreground/70">{projectName}</span>
           )}
@@ -115,6 +124,36 @@ export function OrchestrateItem({ task, projects }: Props) {
               >
                 Copy Prompt
               </button>
+
+              {/* Claim — only show if not yet claimed */}
+              {!task.agent_assigned_to && (
+                <select
+                  disabled={isPending}
+                  defaultValue=""
+                  onChange={e => {
+                    const agent = e.target.value
+                    if (agent) startTransition(() => claimTask(task.id, agent))
+                  }}
+                  className="rounded border border-input bg-background px-2 py-1 text-[11px] text-foreground disabled:opacity-50"
+                >
+                  <option value="">Claim for agent…</option>
+                  {AGENTS.map(a => (
+                    <option key={a} value={a}>{a}</option>
+                  ))}
+                </select>
+              )}
+
+              {/* Complete — only show if claimed */}
+              {task.agent_assigned_to && !showComplete && (
+                <button
+                  disabled={isPending}
+                  onClick={() => setShowComplete(true)}
+                  className="rounded border border-emerald-300 px-3 py-1 text-[11px] text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                >
+                  Complete
+                </button>
+              )}
+
               <button
                 disabled={isPending}
                 onClick={handleGenerateSpec}
@@ -139,6 +178,32 @@ export function OrchestrateItem({ task, projects }: Props) {
             Archive
           </button>
         </div>
+
+        {/* Complete flow */}
+        {showComplete && (
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={commitUrl}
+              onChange={e => setCommitUrl(e.target.value)}
+              placeholder="GitHub commit URL (optional)"
+              className="flex-1 rounded border border-input bg-background px-2 py-1 text-[11px] text-foreground placeholder:text-muted-foreground/50"
+            />
+            <button
+              disabled={isPending}
+              onClick={() => {
+                setShowComplete(false)
+                startTransition(() => completeTask(task.id, commitUrl))
+              }}
+              className="rounded bg-emerald-700 px-3 py-1 text-[11px] font-medium text-white hover:bg-emerald-800 disabled:opacity-50"
+            >
+              {isPending ? '…' : 'Confirm'}
+            </button>
+            <button onClick={() => setShowComplete(false)} className="text-[11px] text-muted-foreground hover:text-foreground">
+              Cancel
+            </button>
+          </div>
+        )}
       </CardContent>
     </Card>
   )

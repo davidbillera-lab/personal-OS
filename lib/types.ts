@@ -9,6 +9,8 @@ export type KillCriteriaStatus = 'pass' | 'warning' | 'fail' | 'exempt'
 export type BrainDumpType = 'idea' | 'task' | 'bug' | 'decision' | 'kill_candidate' | 'unclassified'
 export type BrainDumpStatus = 'inbox' | 'reviewed' | 'actioned' | 'archived' | 'spec_generated'
 export type TaskStatus = 'pending' | 'in_progress' | 'review' | 'done' | 'killed'
+export type AgentHandoffStatus = 'in_progress' | 'done' | 'failed' | 'review'
+export type IdeaValidationVerdict = 'proceed' | 'flag'
 export type KillVerdict = 'pass' | 'warning' | 'fail'
 
 export interface Project {
@@ -31,6 +33,7 @@ export interface Project {
   lead_model: string | null
   lead_suggestions: string | null
   suggestions_updated_at: string | null
+  current_agent: string | null
   created_at: string
   updated_at: string
 }
@@ -78,8 +81,31 @@ export interface Task {
   recommended_model: string | null
   generated_spec: string | null
   status: TaskStatus
+  agent_assigned_to: string | null
+  claimed_at: string | null
+  completed_at: string | null
   created_at: string
   updated_at: string
+}
+
+export interface AgentHandoff {
+  id: string
+  project_id: string
+  task_id: string | null
+  agent_name: string
+  task_description: string | null
+  outcome: string | null
+  github_commit_url: string | null
+  status: AgentHandoffStatus
+  started_at: string
+  completed_at: string | null
+  created_at: string
+}
+
+export interface IdeaValidationResult {
+  verdict: IdeaValidationVerdict
+  reason: string
+  is_internal: boolean
 }
 
 export interface ModelCost {
@@ -157,6 +183,12 @@ export interface Database {
         Row: ProjectChat
         Insert: Omit<ProjectChat, 'id' | 'created_at'>
         Update: never
+        Relationships: []
+      }
+      agent_handoffs: {
+        Row: AgentHandoff
+        Insert: Omit<AgentHandoff, 'id' | 'created_at' | 'started_at'>
+        Update: Partial<Omit<AgentHandoff, 'id' | 'created_at'>>
         Relationships: []
       }
     }

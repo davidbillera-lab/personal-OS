@@ -1,13 +1,28 @@
 import Link from 'next/link'
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { OrchestrateItem } from '@/components/OrchestrateItem'
-import type { Task, Project } from '@/lib/types'
+import type { Task, Project, AgentHandoff } from '@/lib/types'
 
 const TABS = [
   { key: 'pending',    label: 'Pending' },
   { key: 'spec_ready', label: 'Spec Ready' },
   { key: 'done',       label: 'Done' },
+  { key: 'handoffs',   label: 'Handoff Log' },
 ]
+
+const handoffStatusColors: Record<string, string> = {
+  in_progress: 'bg-blue-100 text-blue-700',
+  done:        'bg-green-100 text-green-700',
+  review:      'bg-yellow-100 text-yellow-700',
+  failed:      'bg-red-100 text-red-700',
+}
+
+function formatDate(iso: string | null): string {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleString('en-US', {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  })
+}
 
 interface Props {
   searchParams: Promise<{ tab?: string }>
@@ -19,9 +34,10 @@ export default async function OrchestratePage({ searchParams }: Props) {
 
   const supabase = await createServerSupabaseClient()
 
-  const [{ data: projects }, { data: tasks }] = await Promise.all([
+  const [{ data: projects }, { data: tasks }, { data: handoffs }] = await Promise.all([
     supabase.from('projects').select('id, name').order('name'),
     supabase.from('tasks').select('*').order('created_at', { ascending: false }),
+    supabase.from('agent_handoffs').select('*').order('created_at', { ascending: false }),
   ])
 
   const projectMap = new Map((projects ?? []).map(p => [p.id, p.name]))
@@ -60,7 +76,47 @@ export default async function OrchestratePage({ searchParams }: Props) {
         ))}
       </div>
 
-      {filtered.length === 0 ? (
+      {activeTab === 'handoffs' ? (
+        (handoffs ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground text-center py-12">No agent handoffs yet.</p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {(handoffs as AgentHandoff[]).map(h => (
+              <div key={h.id} className="rounded-lg border border-border bg-card px-4 py-3 flex flex-col gap-1.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${handoffStatusColors[h.status] ?? 'bg-slate-100 text-slate-600'}`}>
+                    {h.status.replace('_', ' ')}
+                  </span>
+                  <span className="text-[11px] font-semibold text-foreground">{h.agent_name}</span>
+                  {h.project_id && projectMap.get(h.project_id) && (
+                    <span className="text-[10px] text-muted-foreground">{projectMap.get(h.project_id)}</span>
+                  )}
+                  <span className="ml-auto text-[10px] text-muted-foreground/60">{formatDate(h.started_at)}</span>
+                </div>
+                {h.task_description && (
+                  <p className="text-[11px] text-foreground/80 leading-snug">{h.task_description}</p>
+                )}
+                {h.outcome && (
+                  <p className="text-[11px] text-muted-foreground italic">{h.outcome}</p>
+                )}
+                {h.github_commit_url && (
+                  <a
+                    href={h.github_commit_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[11px] text-blue-600 hover:underline truncate"
+                  >
+                    {h.github_commit_url}
+                  </a>
+                )}
+                {h.completed_at && (
+                  <p className="text-[10px] text-muted-foreground/60">Completed {formatDate(h.completed_at)}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )
+      ) : filtered.length === 0 ? (
         <p className="text-sm text-muted-foreground text-center py-12">
           No tasks in this tab yet.
         </p>
