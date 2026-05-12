@@ -5,7 +5,7 @@ import { createServerSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
 import type { ProjectChat } from '@/lib/types'
 
-export async function generateSuggestions(projectId: string): Promise<{ error?: string }> {
+export async function generateSuggestions(projectId: string): Promise<{ error?: string; suggestions?: string }> {
   const supabase = await createServerSupabaseClient()
 
   const { data: project } = await supabase
@@ -89,7 +89,7 @@ Start each suggestion with an action verb. Focus on the highest-leverage moves.`
     .eq('id', projectId)
 
   revalidatePath(`/projects/${projectId}`)
-  return {}
+  return { suggestions: raw }
 }
 
 export async function sendChatMessage(

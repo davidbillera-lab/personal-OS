@@ -55,7 +55,7 @@ export function ProjectWorkspaceTabs({ project, brainDumps, tasks, initialChats,
       if (result.error) {
         setSuggestError(result.error)
       } else {
-        setSuggestionsText('')
+        setSuggestionsText(result.suggestions ?? '')
       }
     })
   }
@@ -79,6 +79,12 @@ export function ProjectWorkspaceTabs({ project, brainDumps, tasks, initialChats,
               Open in VS Code
             </a>
           )}
+          <a
+            href={`/projects/${project.id}/edit`}
+            className="rounded border border-input px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:border-foreground/40"
+          >
+            Edit
+          </a>
         </div>
       </div>
 

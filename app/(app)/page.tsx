@@ -1,3 +1,4 @@
+import Link from 'next/link'
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { ProjectCard } from '@/components/ProjectCard'
 import { Button } from '@/components/ui/button'
@@ -39,6 +40,17 @@ export default async function DashboardPage() {
           </Button>
         </form>
       </section>
+
+      {/* Projects header */}
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-foreground">Projects</h2>
+        <Link
+          href="/projects/new"
+          className="rounded border border-input px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:border-foreground/40"
+        >
+          + New Project
+        </Link>
+      </div>
 
       {/* Three-tier project layout */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
