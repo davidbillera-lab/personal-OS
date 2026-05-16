@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mission-control": {
+      "type": "http",
+      "url": "https://personal-os-jsg1.vercel.app/api/mcp",
+      "headers": { "Authorization": "Bearer mc-api-key-personal-os-2026" }
+    }
+  }
+}

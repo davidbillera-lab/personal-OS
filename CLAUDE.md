@@ -4,6 +4,7 @@
 **Purpose:** Source of truth for what this project is, why it exists, what's been decided, and how any agent should work on it. Loaded automatically by Claude Code; should be referenced by Codex, Manus, and any other tool working in this repo.
 **Status:** Living document. Updated as decisions get made.
 **Read first:** `~/.claude/CLAUDE.md` (operator profile) before this file.
+mission_control_id: 698d6376-5819-400b-babc-cd664ee36c04
 
 ---
 
