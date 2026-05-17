@@ -50,3 +50,5 @@ nextinit/
 
 # Superpowers plugin workspace (local brainstorming artifacts)
 .superpowers/
+
+.vercel

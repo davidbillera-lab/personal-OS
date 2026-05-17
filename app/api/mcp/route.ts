@@ -1,5 +1,3 @@
-'use server'
-
 import { NextRequest, NextResponse } from 'next/server'
 import { MCP_TOOLS, callTool } from '@/lib/mcp-tools'
 
