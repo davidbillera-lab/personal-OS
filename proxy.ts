@@ -39,6 +39,11 @@ export async function proxy(request: NextRequest) {
     return supabaseResponse
   }
 
+  // API routes use their own auth (Bearer tokens etc.) — don't redirect
+  if (pathname.startsWith('/api')) {
+    return supabaseResponse
+  }
+
   // Protect everything else
   if (!user) {
     return NextResponse.redirect(new URL('/login', request.url))
