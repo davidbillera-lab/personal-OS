@@ -3,15 +3,30 @@
 import { useState, useTransition } from 'react'
 import { generateSuggestions } from '@/app/(app)/projects/[id]/actions'
 import { ProjectChat } from '@/components/ProjectChat'
-import type { Project, BrainDump, Task, ProjectChat as ProjectChatType } from '@/lib/types'
+import type { Project, BrainDump, Task, ProjectChat as ProjectChatType, AgentHandoff, ProjectHealth, HealthStatus } from '@/lib/types'
 
 const TABS = [
-  { key: 'overview',    label: 'Overview' },
-  { key: 'brain_dumps', label: 'Brain Dumps' },
-  { key: 'tasks',       label: 'Tasks' },
+  { key: 'mission_brief', label: 'Mission Brief' },
+  { key: 'brain_dumps',   label: 'Brain Dumps' },
+  { key: 'tasks',         label: 'Tasks' },
+  { key: 'handoff_log',   label: 'Handoff Log' },
 ] as const
 
 type TabKey = typeof TABS[number]['key']
+
+const HEALTH_DOT: Record<HealthStatus, string> = {
+  ok:      'bg-green-400',
+  warn:    'bg-yellow-400',
+  error:   'bg-red-400',
+  unknown: 'bg-gray-500',
+}
+
+const HANDOFF_STATUS_COLOR: Record<string, string> = {
+  in_progress: 'text-yellow-400',
+  done:        'text-green-400',
+  failed:      'text-red-400',
+  review:      'text-blue-400',
+}
 
 const dumpTypeColors: Record<string, string> = {
   idea:          'bg-blue-100 text-blue-700',
@@ -39,10 +54,12 @@ interface Props {
   initialChats: ProjectChatType[]
   claudeMd: string
   decisionsMd: string
+  handoffs: AgentHandoff[]
+  health: ProjectHealth | null
 }
 
-export function ProjectWorkspaceTabs({ project, brainDumps, tasks, initialChats, claudeMd, decisionsMd }: Props) {
-  const [activeTab, setActiveTab] = useState<TabKey>('overview')
+export function ProjectWorkspaceTabs({ project, brainDumps, tasks, initialChats, claudeMd, decisionsMd, handoffs, health }: Props) {
+  const [activeTab, setActiveTab] = useState<TabKey>('mission_brief')
 
   const [isPending, startTransition] = useTransition()
   const [suggestionsText, setSuggestionsText] = useState(project.lead_suggestions ?? '')
@@ -111,8 +128,25 @@ export function ProjectWorkspaceTabs({ project, brainDumps, tasks, initialChats,
           </div>
 
           {/* Tab content */}
-          {activeTab === 'overview' && (
+          {activeTab === 'mission_brief' && (
             <div className="flex flex-col gap-6">
+              {/* Health indicators */}
+              {health && (
+                <div className="flex items-center gap-4 rounded-md border border-border bg-muted/30 px-4 py-2.5">
+                  {([
+                    { label: 'GitHub',   status: health.github_status },
+                    { label: 'Vercel',   status: health.vercel_status },
+                    { label: 'Supabase', status: health.supabase_status },
+                  ] as { label: string; status: HealthStatus }[]).map(({ label, status }) => (
+                    <div key={label} className="flex items-center gap-1.5">
+                      <span className={`h-2 w-2 rounded-full ${HEALTH_DOT[status]}`} />
+                      <span className="text-xs text-muted-foreground">{label}</span>
+                      <span className="text-[10px] text-muted-foreground/50">{status}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {/* Metadata grid */}
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {[
@@ -252,6 +286,51 @@ export function ProjectWorkspaceTabs({ project, brainDumps, tasks, initialChats,
                     {task.description && (
                       <p className="text-[11px] text-muted-foreground">{task.description}</p>
                     )}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+          {activeTab === 'handoff_log' && (
+            <div className="flex flex-col gap-3">
+              {handoffs.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-12">
+                  No agent sessions yet for this project.
+                </p>
+              ) : (
+                handoffs.map(h => (
+                  <div key={h.id} className="rounded-md border border-border bg-card p-3 flex flex-col gap-1.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`text-xs font-medium ${HANDOFF_STATUS_COLOR[h.status] ?? 'text-muted-foreground'}`}>
+                        {h.agent_name}
+                      </span>
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                        {h.status.replace('_', ' ')}
+                      </span>
+                      <span className="ml-auto text-[10px] text-muted-foreground/60">{timeSince(h.started_at)}</span>
+                    </div>
+                    {h.task_description && (
+                      <p className="text-xs text-foreground leading-snug">{h.task_description}</p>
+                    )}
+                    {h.outcome && (
+                      <p className="text-[11px] text-muted-foreground">{h.outcome}</p>
+                    )}
+                    <div className="flex items-center gap-3 text-[10px] text-muted-foreground/60">
+                      {h.completed_at && (
+                        <span>Completed {timeSince(h.completed_at)}</span>
+                      )}
+                      {h.github_commit_url && (
+                        <a
+                          href={h.github_commit_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-400 hover:text-blue-300"
+                        >
+                          View commit →
+                        </a>
+                      )}
+                    </div>
                   </div>
                 ))
               )}

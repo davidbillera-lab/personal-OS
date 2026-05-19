@@ -1,4 +1,5 @@
 import { createServerSupabaseClient } from '@/lib/supabase'
+import { decrypt } from '@/lib/crypto'
 
 export interface McpTool {
   name: string
@@ -55,6 +56,18 @@ export const MCP_TOOLS: McpTool[] = [
         project_id: { type: 'string', description: 'UUID of the project' },
       },
       required: ['project_id'],
+    },
+  },
+  {
+    name: 'mc_get_credential',
+    description: 'Fetch a credential value by key name. Only returns credentials marked as MCP-accessible. Access is logged.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        key_name:   { type: 'string', description: 'The credential key name (e.g. ANTHROPIC_API_KEY)' },
+        agent_name: { type: 'string', description: 'Name of the agent requesting the credential (for audit log)' },
+      },
+      required: ['key_name'],
     },
   },
   {
@@ -182,6 +195,28 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
     const { error } = await supabase.from('projects').update(update).eq('id', project_id)
     if (error) throw new Error(error.message)
     return JSON.stringify({ ok: true })
+  }
+
+  if (name === 'mc_get_credential') {
+    const { key_name, agent_name } = args
+    if (!key_name) throw new Error('key_name is required')
+
+    const { data, error } = await supabase
+      .from('credentials')
+      .select('value, is_mcp_accessible')
+      .eq('key_name', key_name)
+      .single()
+
+    if (error || !data) throw new Error(`Credential not found: ${key_name}`)
+    if (!data.is_mcp_accessible) throw new Error(`Credential ${key_name} is not MCP-accessible`)
+
+    await supabase.from('credential_access_log').insert({
+      key_name,
+      accessed_by: agent_name ?? 'mcp',
+    })
+
+    const value = decrypt(data.value)
+    return JSON.stringify({ key_name, value })
   }
 
   throw new Error(`Unknown tool: ${name}`)

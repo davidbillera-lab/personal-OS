@@ -34,6 +34,9 @@ export interface Project {
   lead_suggestions: string | null
   suggestions_updated_at: string | null
   current_agent: string | null
+  vercel_url: string | null
+  supabase_project_id: string | null
+  github_repo: string | null
   created_at: string
   updated_at: string
 }
@@ -106,6 +109,38 @@ export interface IdeaValidationResult {
   verdict: IdeaValidationVerdict
   reason: string
   is_internal: boolean
+}
+
+export type CredentialTier = 'global' | 'project'
+export type HealthStatus = 'ok' | 'warn' | 'error' | 'unknown'
+
+export interface Credential {
+  id: string
+  name: string
+  key_name: string
+  value: string
+  tier: CredentialTier
+  project_id: string | null
+  is_mcp_accessible: boolean
+  notes: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ProjectHealth {
+  id: string
+  project_id: string
+  github_status: HealthStatus
+  vercel_status: HealthStatus
+  supabase_status: HealthStatus
+  checked_at: string
+}
+
+export interface CredentialAccessLog {
+  id: string
+  key_name: string
+  accessed_by: string
+  accessed_at: string
 }
 
 export interface ModelCost {
@@ -189,6 +224,24 @@ export interface Database {
         Row: AgentHandoff
         Insert: Omit<AgentHandoff, 'id' | 'created_at' | 'started_at'>
         Update: Partial<Omit<AgentHandoff, 'id' | 'created_at'>>
+        Relationships: []
+      }
+      credentials: {
+        Row: Credential
+        Insert: Omit<Credential, 'id' | 'created_at' | 'updated_at'>
+        Update: Partial<Omit<Credential, 'id' | 'created_at'>>
+        Relationships: []
+      }
+      credential_access_log: {
+        Row: CredentialAccessLog
+        Insert: Omit<CredentialAccessLog, 'id' | 'accessed_at'>
+        Update: never
+        Relationships: []
+      }
+      project_health: {
+        Row: ProjectHealth
+        Insert: Omit<ProjectHealth, 'id' | 'checked_at'>
+        Update: Partial<Omit<ProjectHealth, 'id'>>
         Relationships: []
       }
     }
