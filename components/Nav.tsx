@@ -10,6 +10,7 @@ const navLinks = [
   { href: '/', label: 'Dashboard' },
   { href: '/inbox', label: 'Inbox' },
   { href: '/orchestrate', label: 'Orchestrate' },
+  { href: '/vault', label: 'Vault' },
 ]
 
 export default function Nav({ userEmail }: { userEmail: string }) {
