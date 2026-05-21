@@ -16,21 +16,24 @@ export default function Nav({ userEmail }: { userEmail: string }) {
   const pathname = usePathname()
 
   return (
-    <header className="border-b border-border bg-background sticky top-0 z-10">
+    <header className="border-b border-white/[0.06] bg-black/40 backdrop-blur-xl sticky top-0 z-10">
       <div className="container mx-auto px-4 max-w-7xl">
         <div className="flex h-14 items-center justify-between gap-4">
           <div className="flex items-center gap-6">
-            <span className="font-semibold text-sm tracking-tight">Mission Control</span>
+            <span className="font-semibold text-sm tracking-tight text-white">
+              <span className="text-violet-400">M</span>ission{' '}
+              <span className="text-violet-400">C</span>ontrol
+            </span>
             <nav className="flex items-center gap-1">
               {navLinks.map(({ href, label }) => (
                 <Link
                   key={href}
                   href={href}
                   className={cn(
-                    'px-3 py-1.5 rounded-md text-sm font-medium transition-colors',
+                    'px-3 py-1.5 rounded-md text-sm font-medium transition-all duration-150',
                     pathname === href
-                      ? 'bg-accent text-accent-foreground'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-accent/50'
+                      ? 'bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/30'
+                      : 'text-gray-400 hover:text-gray-100 hover:bg-white/[0.06]'
                   )}
                 >
                   {label}
@@ -39,9 +42,9 @@ export default function Nav({ userEmail }: { userEmail: string }) {
             </nav>
           </div>
           <div className="flex items-center gap-3">
-            <span className="text-xs text-muted-foreground hidden sm:block">{userEmail}</span>
+            <span className="text-xs text-gray-500 hidden sm:block">{userEmail}</span>
             <form action={logout}>
-              <Button variant="ghost" size="sm" type="submit">
+              <Button variant="ghost" size="sm" type="submit" className="text-gray-400 hover:text-gray-100">
                 Sign out
               </Button>
             </form>
