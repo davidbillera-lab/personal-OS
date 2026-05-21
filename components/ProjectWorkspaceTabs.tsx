@@ -385,7 +385,7 @@ export function ProjectWorkspaceTabs({
   // Derived counts for badges
   const unreviewedDumps = brainDumps.filter(d => d.status === 'inbox' || d.status === 'reviewed').length
   const specReviewTasks = tasks.filter(t => t.status === 'pending' && t.generated_spec != null).length
-  const inFlightTasks = tasks.filter(t => t.status === 'in_progress').length
+  const inFlightTasks = tasks.filter(t => t.status === 'in_progress' || t.status === 'review').length
   const doneCount = doneTasks.length
 
   const PIPELINE_STAGES: { key: ActiveStage; label: string; count: number }[] = [
@@ -527,7 +527,7 @@ export function ProjectWorkspaceTabs({
                 </p>
               ) : (
                 tasks
-                  .filter(t => t.status === 'in_progress')
+                  .filter(t => t.status === 'in_progress' || t.status === 'review')
                   .map(task => {
                     const relatedHandoff = handoffs.find(h => h.task_id === task.id)
                     return (
