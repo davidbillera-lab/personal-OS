@@ -64,7 +64,10 @@ function PipelineCard({ project, counts }: { project: Project; counts: PipelineC
   const stage = STAGE_BADGE[project.stage]
   const hasPipeline = counts.dumps + counts.specReady + counts.inFlight > 0
   return (
-    <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4 hover:bg-white/[0.07] transition-colors">
+    <Link
+      href={`/projects/${project.id}`}
+      className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4 hover:bg-white/[0.07] hover:border-white/20 transition-colors cursor-pointer"
+    >
       {/* Header */}
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
@@ -107,14 +110,11 @@ function PipelineCard({ project, counts }: { project: Project; counts: PipelineC
         <p className="text-[11px] text-gray-500 leading-snug line-clamp-2">{project.status}</p>
       )}
 
-      {/* CTA */}
-      <Link
-        href={`/projects/${project.id}`}
-        className="mt-auto inline-flex items-center gap-1 rounded-lg bg-white/10 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-white/20 transition-colors w-fit"
-      >
-        Run Pipeline →
-      </Link>
-    </div>
+      {/* Footer hint */}
+      <p className="mt-auto text-[11px] text-gray-600 group-hover:text-gray-400">
+        Open workspace →
+      </p>
+    </Link>
   )
 }
 
