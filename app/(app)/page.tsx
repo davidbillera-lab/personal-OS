@@ -1,10 +1,9 @@
 import Link from 'next/link'
 import { createServerSupabaseClient } from '@/lib/supabase'
-import { ProjectCard } from '@/components/ProjectCard'
 import { Textarea } from '@/components/ui/textarea'
 import { Button } from '@/components/ui/button'
 import { quickDump } from './actions'
-import type { Project, AgentHandoff } from '@/lib/types'
+import type { Project, AgentHandoff, ProjectStage } from '@/lib/types'
 
 export const dynamic = 'force-dynamic'
 
@@ -50,6 +49,75 @@ const HANDOFF_STATUS: Record<string, string> = {
   review:      'text-blue-400',
 }
 
+const STAGE_BADGE: Record<ProjectStage, string> = {
+  idea:  'bg-slate-700 text-slate-300',
+  spec:  'bg-blue-900 text-blue-300',
+  build: 'bg-yellow-900 text-yellow-300',
+  ship:  'bg-green-900 text-green-300',
+  scale: 'bg-emerald-900 text-emerald-300',
+  kill:  'bg-red-900 text-red-300',
+}
+
+type PipelineCounts = { dumps: number; specReady: number; inFlight: number }
+
+function PipelineCard({ project, counts }: { project: Project; counts: PipelineCounts }) {
+  const stage = STAGE_BADGE[project.stage]
+  const hasPipeline = counts.dumps + counts.specReady + counts.inFlight > 0
+  return (
+    <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4 hover:bg-white/[0.07] transition-colors">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-white leading-tight">
+            {project.name}
+            {project.protected && (
+              <span className="ml-1.5 text-[10px] font-medium text-amber-400 tracking-wide">PROTECTED</span>
+            )}
+          </p>
+        </div>
+        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${stage}`}>
+          {project.stage}
+        </span>
+      </div>
+
+      {/* Pipeline summary */}
+      <div className="text-[11px] text-gray-500">
+        {hasPipeline ? (
+          <span>
+            <span className={counts.dumps > 0 ? 'text-gray-300' : ''}>{counts.dumps} dump{counts.dumps !== 1 ? 's' : ''}</span>
+            {' · '}
+            <span className={counts.specReady > 0 ? 'text-yellow-400' : ''}>{counts.specReady} spec ready</span>
+            {' · '}
+            <span className={counts.inFlight > 0 ? 'text-green-400' : ''}>{counts.inFlight} in flight</span>
+          </span>
+        ) : (
+          <span>No active pipeline</span>
+        )}
+      </div>
+
+      {/* Blocker */}
+      {project.blockers && (
+        <div className="rounded-md bg-red-950/50 px-2 py-1 text-[11px] text-red-400">
+          <span className="font-medium">Blocked:</span> {project.blockers}
+        </div>
+      )}
+
+      {/* Status note */}
+      {project.status && !project.blockers && (
+        <p className="text-[11px] text-gray-500 leading-snug line-clamp-2">{project.status}</p>
+      )}
+
+      {/* CTA */}
+      <Link
+        href={`/projects/${project.id}`}
+        className="mt-auto inline-flex items-center gap-1 rounded-lg bg-white/10 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-white/20 transition-colors w-fit"
+      >
+        Run Pipeline →
+      </Link>
+    </div>
+  )
+}
+
 export default async function CommandCenter() {
   const supabase = await createServerSupabaseClient()
 
@@ -58,6 +126,8 @@ export default async function CommandCenter() {
     { data: handoffs },
     { count: credCount },
     { count: specReadyCount },
+    { data: taskCountRows },
+    { data: dumpCountRows },
   ] = await Promise.all([
     supabase
       .from('projects')
@@ -77,6 +147,17 @@ export default async function CommandCenter() {
       .select('*', { count: 'exact', head: true })
       .not('generated_spec', 'is', null)
       .not('status', 'in', '("done","killed","review")'),
+    // All tasks for pipeline count aggregation (just the fields we need)
+    supabase
+      .from('tasks')
+      .select('project_id, status, generated_spec')
+      .not('status', 'in', '("done","killed")'),
+    // All brain_dumps for pipeline count aggregation
+    supabase
+      .from('brain_dumps')
+      .select('project_id, status')
+      .not('status', 'eq', 'archived')
+      .not('project_id', 'is', null),
   ])
 
   const all     = (projects ?? []) as Project[]
@@ -86,6 +167,27 @@ export default async function CommandCenter() {
   const tier1 = all.filter(p => p.tier === 1)
   const tier2 = all.filter(p => p.tier === 2)
   const tier3 = all.filter(p => p.tier === 3)
+
+  // Build per-project pipeline counts
+  const taskRows = (taskCountRows ?? []) as { project_id: string | null; status: string; generated_spec: string | null }[]
+  const dumpRows = (dumpCountRows ?? []) as { project_id: string | null; status: string }[]
+
+  const pipelineByProject = new Map<string, PipelineCounts>()
+
+  for (const row of dumpRows) {
+    if (!row.project_id) continue
+    const entry = pipelineByProject.get(row.project_id) ?? { dumps: 0, specReady: 0, inFlight: 0 }
+    entry.dumps++
+    pipelineByProject.set(row.project_id, entry)
+  }
+
+  for (const row of taskRows) {
+    if (!row.project_id) continue
+    const entry = pipelineByProject.get(row.project_id) ?? { dumps: 0, specReady: 0, inFlight: 0 }
+    if (row.status === 'pending' && row.generated_spec) entry.specReady++
+    if (row.status === 'in_progress') entry.inFlight++
+    pipelineByProject.set(row.project_id, entry)
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -123,11 +225,6 @@ export default async function CommandCenter() {
             {credCount ?? 0} credential{(credCount ?? 0) !== 1 ? 's' : ''} in vault
           </Link>
         </div>
-        <div className="ml-auto">
-          <Link href="/orchestrate" className="text-xs text-gray-500 hover:text-white">
-            Orchestrate →
-          </Link>
-        </div>
       </div>
 
       {/* Projects header */}
@@ -158,7 +255,7 @@ export default async function CommandCenter() {
               {items.length === 0 ? (
                 <p className={`text-xs ${s.empty}`}>No projects.</p>
               ) : (
-                items.map(p => <ProjectCard key={p.id} project={p} />)
+                items.map(p => <PipelineCard key={p.id} project={p} counts={pipelineByProject.get(p.id) ?? { dumps: 0, specReady: 0, inFlight: 0 }} />)
               )}
             </section>
           )
@@ -172,7 +269,6 @@ export default async function CommandCenter() {
         <div className="rounded-xl border border-white/10 bg-white/5 p-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-white">Agent Activity</h3>
-            <Link href="/orchestrate" className="text-xs text-gray-500 hover:text-white">View all →</Link>
           </div>
           {allHO.length === 0 ? (
             <p className="text-xs text-gray-600">No agent sessions yet.</p>
