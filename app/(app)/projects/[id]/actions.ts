@@ -1,171 +1,164 @@
-'use server'
+﻿'use server'
 
-import { revalidatePath } from 'next/cache'
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
-import type { ProjectChat } from '@/lib/types'
+import { revalidatePath } from 'next/cache'
 
-export async function generateSuggestions(projectId: string): Promise<{ error?: string; suggestions?: string }> {
+export async function runAdvisoryBoard(dumpId: string, projectId: string) {
   const supabase = await createServerSupabaseClient()
-
+  const { data: dump } = await supabase
+    .from('brain_dumps')
+    .select('raw_text, classified_type, ai_summary')
+    .eq('id', dumpId)
+    .single()
   const { data: project } = await supabase
     .from('projects')
-    .select('*, projects(name)')
+    .select('name, stage, status, next_action, blockers')
     .eq('id', projectId)
     .single()
+  if (!dump || !project) return { error: 'Dump or project not found' }
+  const system = `You are the Advisory Board for a solo AI-native holdco operator. Give honest kill/keep verdicts on ideas — no sugarcoating.
 
-  if (!project) return { error: 'Project not found' }
+Apply four kill criteria: Functionality (solves a real problem?), Efficiency (right solution?), Scalability (grows without proportional work?), Time-to-revenue (realistic return timeline?).
 
-  let claudeMd = ''
-  let decisionsMd = ''
+Respond ONLY with valid JSON:
+{"verdict": "keep" | "kill", "reasoning": "Full argument. If kill: why it won't work specifically. If keep: what makes it worth building and what to watch for."}`
+  const prompt = `Project: ${project.name} (Stage: ${project.stage})
+Status: ${project.status ?? 'none'}
+Next action: ${project.next_action ?? 'none'}
+Blockers: ${project.blockers ?? 'none'}
 
-  if (project.repo_url) {
-    const pat = process.env.GITHUB_PAT
-    const rawBase = project.repo_url
-      .replace('https://github.com/', 'https://raw.githubusercontent.com/')
-      + '/main'
-    const headers: Record<string, string> = pat ? { Authorization: `token ${pat}` } : {}
-
-    const [cRes, dRes] = await Promise.allSettled([
-      fetch(`${rawBase}/CLAUDE.md`, { headers }),
-      fetch(`${rawBase}/decisions.md`, { headers }),
-    ])
-
-    if (cRes.status === 'fulfilled' && cRes.value.ok) claudeMd = (await cRes.value.text()).slice(0, 6000)
-    if (dRes.status === 'fulfilled' && dRes.value.ok) decisionsMd = (await dRes.value.text()).slice(0, 3000)
-  }
-
-  const system = `You are a build advisor for an AI-native portfolio operating system.
-Given a project's context, produce actionable suggestions that move it toward ship-ready.
-Output a markdown string with 3-5 concrete, specific suggestions. Be direct, not generic.
-Start each suggestion with an action verb. Focus on the highest-leverage moves.`
-
-  const prompt = [
-    `Project: ${project.name}`,
-    project.stage ? `Stage: ${project.stage}` : '',
-    project.status ? `Status: ${project.status}` : '',
-    project.next_action ? `Next action: ${project.next_action}` : '',
-    project.blockers ? `Blockers: ${project.blockers}` : '',
-    claudeMd ? `\n## CLAUDE.md\n${claudeMd}` : '',
-    decisionsMd ? `\n## decisions.md\n${decisionsMd}` : '',
-  ].filter(Boolean).join('\n')
-
-  const callArgs = {
-    prompt,
-    system,
-    purpose: 'project_suggestions',
-    project_id: projectId,
-    supabase,
-  }
-
-  let raw: string | undefined
-
+Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
+"${dump.raw_text}"`
+  const result = await routeTask({
+    prompt, system, complexity_tier: 1, purpose: 'advisory_board',
+    project_id: projectId, brain_dump_id: dumpId, supabase,
+  })
+  let verdict: 'keep' | 'kill' = 'keep'
+  let reasoning = ''
   try {
-    const result = await routeTask({ ...callArgs, complexity_tier: 2 })
-    raw = result.text
-  } catch (err1) {
-    console.error('[generateSuggestions] Sonnet failed, escalating to Codex:', err1)
-    try {
-      const result = await routeTask({ ...callArgs, complexity_tier: 4, model: 'codex-mini-latest' })
-      raw = result.text
-    } catch (err2) {
-      console.error('[generateSuggestions] Codex failed, escalating to Opus:', err2)
-      try {
-        const result = await routeTask({ ...callArgs, complexity_tier: 3, model: 'claude-opus-4-7' })
-        raw = result.text
-      } catch (err3) {
-        console.error('[generateSuggestions] All models failed:', err3)
-        return { error: 'Suggestion generation failed. Check console logs and model_costs table.' }
-      }
-    }
-  }
-
-  await supabase
-    .from('projects')
-    .update({
-      lead_suggestions: raw,
-      suggestions_updated_at: new Date().toISOString(),
-    })
-    .eq('id', projectId)
-
+    const parsed = JSON.parse(result.text)
+    verdict = parsed.verdict
+    reasoning = parsed.reasoning
+  } catch { reasoning = result.text }
+  await supabase.from('brain_dumps').update({ ab_verdict: verdict, ab_reasoning: reasoning }).eq('id', dumpId)
   revalidatePath(`/projects/${projectId}`)
-  return { suggestions: raw }
+  return { verdict, reasoning }
 }
 
-export async function sendChatMessage(
-  projectId: string,
-  userMessage: string
-): Promise<{ reply?: string; error?: string }> {
+export async function generateSpec(dumpId: string, projectId: string, claudeMd: string, decisionsMd: string) {
   const supabase = await createServerSupabaseClient()
+  const { data: dump } = await supabase.from('brain_dumps')
+    .select('raw_text, classified_type, ai_summary, ab_verdict, ab_reasoning')
+    .eq('id', dumpId).single()
+  if (!dump) return { error: 'Dump not found' }
+  const system = `You are a technical spec writer for an AI-native operator. Write a concise, context-loaded implementation spec.
 
-  const { data: project } = await supabase
-    .from('projects')
-    .select('lead_model, name')
-    .eq('id', projectId)
-    .single()
+The spec must include:
+1. Task description (plain English — what to build and why)
+2. Relevant context (project stage, status, blockers)
+3. Files likely involved (best guess from the task description)
+4. Recommended model tier (1–4) with reasoning
+5. Recommended tool (claude_code / codex / cursor) with reasoning
+6. Acceptance criteria (how to know it's done)
 
-  if (!project) return { error: 'Project not found' }
+Be specific. No fluff. The engineer reading this has zero context about the project.`
+  const prompt = `CLAUDE.md:\n${claudeMd || '(not available)'}\n\ndecisions.md:\n${decisionsMd || '(not available)'}\n\nBrain dump:\n"${dump.raw_text}"\n\nAdvisory Board verdict: ${dump.ab_verdict ?? 'none'} — ${dump.ab_reasoning ?? ''}\n\nGenerate the implementation spec.`
+  const result = await routeTask({ prompt, system, complexity_tier: 2, purpose: 'spec_generation', project_id: projectId, brain_dump_id: dumpId, supabase })
+  const specContent = result.text
+  const today = new Date().toISOString().slice(0, 10)
+  const slug = dump.raw_text.toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').slice(0, 60)
+  const specPath = `docs/superpowers/plans/${today}-${slug}.md`
+  const tier = dump.classified_type === 'bug' ? 1 : 2
+  const tool = 'claude_code'
+  const { data: task, error } = await supabase.from('tasks').insert({
+    project_id: projectId, brain_dump_id: dumpId,
+    title: dump.raw_text.slice(0, 120), description: dump.ai_summary,
+    complexity_tier: tier, recommended_tool: tool, tool, model_tier: tier,
+    generated_spec: specContent, spec_path: specPath, status: 'pending',
+  }).select().single()
+  if (error) return { error: error.message }
+  await supabase.from('brain_dumps').update({ status: 'spec_generated' }).eq('id', dumpId)
+  revalidatePath(`/projects/${projectId}`)
+  return { task, specContent, specPath }
+}
 
-  await supabase.from('project_chats').insert({
-    project_id: projectId,
-    role: 'user',
-    content: userMessage,
+export async function approveSpec(taskId: string, projectId: string, localPath?: string) {
+  const supabase = await createServerSupabaseClient()
+  const { data: task } = await supabase.from('tasks').select('title, spec_path, generated_spec').eq('id', taskId).single()
+  if (!task) return { error: 'Task not found' }
+  await supabase.from('tasks').update({ status: 'in_progress' }).eq('id', taskId)
+  await supabase.from('agent_handoffs').insert({
+    project_id: projectId, task_id: taskId, agent_name: 'Claude Code',
+    task_description: task.title, spec_path: task.spec_path, status: 'in_progress',
   })
+  revalidatePath(`/projects/${projectId}`)
+  const vscodePath = localPath ? `vscode://file/${localPath.replace(/\\/g, '/')}` : null
+  return { ok: true, vscodePath }
+}
 
-  const { data: history } = await supabase
-    .from('project_chats')
-    .select('role, content')
-    .eq('project_id', projectId)
-    .order('created_at', { ascending: true })
-    .limit(20)
+export async function runCodexQC(taskId: string, projectId: string, diff: string, commitUrl?: string) {
+  const supabase = await createServerSupabaseClient()
+  const { data: task } = await supabase.from('tasks').select('title, generated_spec').eq('id', taskId).single()
+  if (!task) return { error: 'Task not found' }
+  const system = `You are a code reviewer. Review the diff against the original spec.
 
-  const prior = (history ?? []).slice(0, -1)
-  const historyBlock = prior.length > 0
-    ? '[Prior conversation]\n' + prior.map((m: Pick<ProjectChat, 'role' | 'content'>) => `${m.role}: ${m.content}`).join('\n') + '\n\n[Current message]\n'
-    : ''
+Check for:
+1. Correctness — does the code do what the spec asked?
+2. Regressions — does anything look broken that wasn't touched?
+3. Scope adherence — did the agent go out of scope or leave things undone?
+4. Code quality — anything obviously wrong?
 
-  const prompt = historyBlock + userMessage
-
-  const model = project.lead_model ?? 'claude-sonnet-4-6'
-  const complexityTier = (model.startsWith('claude-opus') ? 3 : model.startsWith('codex') ? 4 : 2) as 1 | 2 | 3 | 4
-
-  const system = `You are a build partner for the "${project.name}" project in an AI-native portfolio operating system.
-Your job is to help the operator think clearly, make better decisions, and move faster — not to validate bad ideas.
-
-Rules:
-- Be honest about the idea, not just encouraging about the effort. If something won't work, say so directly and explain why.
-- Push back when you see a flaw, a wrong assumption, or a better path. Back your pushback with specific reasoning, not vague concern.
-- Skip flattery, filler, and throat-clearing. Get to the point.
-- When something is genuinely good, say so and explain what makes it strong.
-- Speak in plain English. No jargon for jargon's sake.
-- You are allowed to say "that's a bad idea" if it is.`
-
-  let reply: string
-  let usedModel = model
-
+Respond ONLY with valid JSON:
+{"status": "passed" | "issues_found", "notes": "If passed: confirm what was verified. If issues_found: list each issue clearly."}`
+  const prompt = `Original spec:\n${task.generated_spec ?? '(no spec recorded)'}\n\nGit diff:\n${diff}\n\nCommit: ${commitUrl ?? 'not provided'}`
+  const result = await routeTask({ prompt, system, complexity_tier: 4, model: 'gpt-4o', purpose: 'codex_qc', project_id: projectId, task_id: taskId, supabase })
+  let status: 'passed' | 'issues_found' = 'passed'
+  let notes = ''
   try {
-    const result = await routeTask({
-      prompt,
-      system,
-      purpose: 'project_chat',
-      project_id: projectId,
-      complexity_tier: complexityTier,
-      model,
-      supabase,
-    })
-    reply = result.text
-    usedModel = result.model
-  } catch (err) {
-    console.error('[sendChatMessage] Model call failed:', err)
-    return { error: 'Failed to get a response. Try again.' }
+    const parsed = JSON.parse(result.text)
+    status = parsed.status
+    notes = parsed.notes
+  } catch { notes = result.text }
+  await supabase.from('tasks').update({ codex_qc_status: status, codex_qc_notes: notes, status: status === 'passed' ? 'done' : 'review' }).eq('id', taskId)
+  if (commitUrl && status === 'passed') {
+    await supabase.from('agent_handoffs').update({ status: 'done', github_commit_url: commitUrl, completed_at: new Date().toISOString() }).eq('task_id', taskId)
   }
+  revalidatePath(`/projects/${projectId}`)
+  return { status, notes }
+}
 
-  await supabase.from('project_chats').insert({
-    project_id: projectId,
-    role: 'assistant',
-    content: reply,
-    model: usedModel,
-  })
+export async function markTaskDone(taskId: string, projectId: string) {
+  const supabase = await createServerSupabaseClient()
+  await supabase.from('tasks').update({ status: 'done', codex_qc_status: 'passed' }).eq('id', taskId)
+  revalidatePath(`/projects/${projectId}`)
+  return { ok: true }
+}
 
-  return { reply }
+export async function generateSuggestions(projectId: string) {
+  const supabase = await createServerSupabaseClient()
+  const { data: project } = await supabase.from('projects')
+    .select('name, stage, status, next_action, blockers, description').eq('id', projectId).single()
+  if (!project) return { error: 'Project not found', suggestions: null }
+  const { data: recentDumps } = await supabase.from('brain_dumps')
+    .select('raw_text, classified_type, ab_verdict').eq('project_id', projectId)
+    .order('created_at', { ascending: false }).limit(5)
+  const prompt = `Project: ${project.name}\nStage: ${project.stage}\nStatus: ${project.status ?? 'none'}\nNext action: ${project.next_action ?? 'none'}\nBlockers: ${project.blockers ?? 'none'}\n\nRecent brain dumps:\n${(recentDumps ?? []).map(d => `- [${d.classified_type ?? 'unclassified'}${d.ab_verdict ? `, AB: ${d.ab_verdict}` : ''}] ${d.raw_text}`).join('\n')}\n\nGive 3 concrete, actionable suggestions for what the operator should tackle next on this project. Be specific. No fluff.`
+  const result = await routeTask({ prompt, complexity_tier: 2, purpose: 'project_suggestions', project_id: projectId, supabase })
+  await supabase.from('projects').update({ lead_suggestions: result.text, suggestions_updated_at: new Date().toISOString() }).eq('id', projectId)
+  revalidatePath(`/projects/${projectId}`)
+  return { suggestions: result.text, error: null }
+}
+
+export async function sendChatMessage(projectId: string, text: string) {
+  const supabase = await createServerSupabaseClient()
+  const { data: project } = await supabase.from('projects')
+    .select('name, stage, status, next_action, blockers, description').eq('id', projectId).single()
+  if (!project) return { error: 'Project not found' }
+  await supabase.from('project_chats').insert({ project_id: projectId, role: 'user', content: text, model: null })
+  const system = `You are an AI assistant helping an operator manage and grow a portfolio project. Be concise, direct, and actionable. The project context is:\n\nProject: ${project.name}\nStage: ${project.stage}\nStatus: ${project.status ?? 'none'}\nNext action: ${project.next_action ?? 'none'}\nBlockers: ${project.blockers ?? 'none'}`
+  const result = await routeTask({ prompt: text, system, complexity_tier: 2, purpose: 'project_chat', project_id: projectId, supabase })
+  await supabase.from('project_chats').insert({ project_id: projectId, role: 'assistant', content: result.text, model: 'claude-sonnet-4-6' })
+  revalidatePath(`/projects/${projectId}`)
+  return { reply: result.text }
 }
