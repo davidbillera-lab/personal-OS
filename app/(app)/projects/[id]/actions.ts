@@ -38,8 +38,8 @@ Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
   let reasoning = ''
   try {
     const parsed = JSON.parse(result.text)
-    verdict = parsed.verdict
-    reasoning = parsed.reasoning
+    verdict = (['keep', 'kill'] as const).includes(parsed.verdict) ? parsed.verdict : 'keep'
+    reasoning = parsed.reasoning ?? ''
   } catch { reasoning = result.text }
   await supabase.from('brain_dumps').update({ ab_verdict: verdict, ab_reasoning: reasoning }).eq('id', dumpId)
   revalidatePath(`/projects/${projectId}`)
@@ -87,11 +87,13 @@ export async function approveSpec(taskId: string, projectId: string, localPath?:
   const supabase = await createServerSupabaseClient()
   const { data: task } = await supabase.from('tasks').select('title, spec_path, generated_spec').eq('id', taskId).single()
   if (!task) return { error: 'Task not found' }
-  await supabase.from('tasks').update({ status: 'in_progress' }).eq('id', taskId)
-  await supabase.from('agent_handoffs').insert({
+  const { error: updateError } = await supabase.from('tasks').update({ status: 'in_progress' }).eq('id', taskId)
+  if (updateError) return { error: updateError.message }
+  const { error: handoffError } = await supabase.from('agent_handoffs').insert({
     project_id: projectId, task_id: taskId, agent_name: 'Claude Code',
     task_description: task.title, spec_path: task.spec_path, status: 'in_progress',
   })
+  if (handoffError) return { error: handoffError.message }
   revalidatePath(`/projects/${projectId}`)
   const vscodePath = localPath ? `vscode://file/${localPath.replace(/\\/g, '/')}` : null
   return { ok: true, vscodePath }
@@ -117,8 +119,8 @@ Respond ONLY with valid JSON:
   let notes = ''
   try {
     const parsed = JSON.parse(result.text)
-    status = parsed.status
-    notes = parsed.notes
+    status = (['passed', 'issues_found'] as const).includes(parsed.status) ? parsed.status : 'issues_found'
+    notes = parsed.notes ?? ''
   } catch { notes = result.text }
   await supabase.from('tasks').update({ codex_qc_status: status, codex_qc_notes: notes, status: status === 'passed' ? 'done' : 'review' }).eq('id', taskId)
   if (commitUrl && status === 'passed') {
@@ -130,7 +132,8 @@ Respond ONLY with valid JSON:
 
 export async function markTaskDone(taskId: string, projectId: string) {
   const supabase = await createServerSupabaseClient()
-  await supabase.from('tasks').update({ status: 'done', codex_qc_status: 'passed' }).eq('id', taskId)
+  const { error } = await supabase.from('tasks').update({ status: 'done' }).eq('id', taskId)
+  if (error) return { error: error.message }
   revalidatePath(`/projects/${projectId}`)
   return { ok: true }
 }
@@ -158,7 +161,7 @@ export async function sendChatMessage(projectId: string, text: string) {
   await supabase.from('project_chats').insert({ project_id: projectId, role: 'user', content: text, model: null })
   const system = `You are an AI assistant helping an operator manage and grow a portfolio project. Be concise, direct, and actionable. The project context is:\n\nProject: ${project.name}\nStage: ${project.stage}\nStatus: ${project.status ?? 'none'}\nNext action: ${project.next_action ?? 'none'}\nBlockers: ${project.blockers ?? 'none'}`
   const result = await routeTask({ prompt: text, system, complexity_tier: 2, purpose: 'project_chat', project_id: projectId, supabase })
-  await supabase.from('project_chats').insert({ project_id: projectId, role: 'assistant', content: result.text, model: 'claude-sonnet-4-6' })
+  await supabase.from('project_chats').insert({ project_id: projectId, role: 'assistant', content: result.text, model: result.model })
   revalidatePath(`/projects/${projectId}`)
   return { reply: result.text }
 }
