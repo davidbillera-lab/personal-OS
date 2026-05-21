@@ -12,6 +12,9 @@ export type TaskStatus = 'pending' | 'in_progress' | 'review' | 'done' | 'killed
 export type AgentHandoffStatus = 'in_progress' | 'done' | 'failed' | 'review'
 export type IdeaValidationVerdict = 'proceed' | 'flag'
 export type KillVerdict = 'pass' | 'warning' | 'fail'
+export type AbVerdict = 'keep' | 'kill' | 'pending'
+export type CodexQcStatus = 'pending' | 'passed' | 'issues_found' | 'loop_detected'
+export type TaskTool = 'claude_code' | 'codex' | 'cursor'
 
 export interface Project {
   id: string
@@ -58,6 +61,8 @@ export interface BrainDump {
   project_id: string | null
   status: BrainDumpStatus
   ai_summary: string | null
+  ab_verdict: AbVerdict | null
+  ab_reasoning: string | null
   source: string
   created_at: string
   updated_at: string
@@ -83,6 +88,11 @@ export interface Task {
   recommended_tool: string | null
   recommended_model: string | null
   generated_spec: string | null
+  spec_path: string | null
+  tool: TaskTool | null
+  model_tier: number | null
+  codex_qc_status: CodexQcStatus | null
+  codex_qc_notes: string | null
   status: TaskStatus
   agent_assigned_to: string | null
   claimed_at: string | null
@@ -99,6 +109,7 @@ export interface AgentHandoff {
   task_description: string | null
   outcome: string | null
   github_commit_url: string | null
+  spec_path: string | null
   status: AgentHandoffStatus
   started_at: string
   completed_at: string | null
