@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useTransition } from 'react'
+import { useRouter } from 'next/navigation'
 import {
   runAdvisoryBoard,
   generateSpec,
@@ -8,6 +9,7 @@ import {
   runCodexQC,
   markTaskDone,
   generateSuggestions,
+  createProjectBrainDump,
 } from '@/app/(app)/projects/[id]/actions'
 import { ProjectChat } from '@/components/ProjectChat'
 import type {
@@ -142,6 +144,50 @@ function CodexQCForm({ taskId, projectId }: { taskId: string; projectId: string 
         </div>
       )}
     </div>
+  )
+}
+
+// ─── NewDumpForm ──────────────────────────────────────────────────────────────
+
+function NewDumpForm({ projectId, onCreated }: { projectId: string; onCreated: () => void }) {
+  const [text, setText] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!text.trim()) return
+    setLoading(true)
+    setError('')
+    const result = await createProjectBrainDump(projectId, text.trim())
+    if (result.error) {
+      setError(result.error)
+      setLoading(false)
+      return
+    }
+    setText('')
+    setLoading(false)
+    onCreated()
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-3 mb-6">
+      <textarea
+        value={text}
+        onChange={e => setText(e.target.value)}
+        placeholder="Brain dump here — idea, task, bug, decision, kill candidate..."
+        rows={4}
+        className="w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white placeholder:text-gray-600 resize-none focus:outline-none focus:border-violet-500/50"
+      />
+      {error && <p className="text-xs text-red-400">{error}</p>}
+      <button
+        type="submit"
+        disabled={loading || !text.trim()}
+        className="px-4 py-1.5 rounded-md text-sm font-medium bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40"
+      >
+        {loading ? 'Saving...' : 'Submit Brain Dump'}
+      </button>
+    </form>
   )
 }
 
@@ -365,6 +411,7 @@ export function ProjectWorkspaceTabs({
   handoffs,
   health,
 }: Props) {
+  const router = useRouter()
   const [activeStage, setActiveStage] = useState<ActiveStage>('dumps')
   const [isPending, startTransition] = useTransition()
   const [suggestionsText, setSuggestionsText] = useState(project.lead_suggestions ?? '')
@@ -481,6 +528,10 @@ export function ProjectWorkspaceTabs({
           {activeStage === 'dumps' && (
             <div className="flex flex-col gap-3">
               <h2 className="text-sm font-semibold text-white">Brain Dumps</h2>
+              <NewDumpForm
+                projectId={project.id}
+                onCreated={() => router.refresh()}
+              />
               {brainDumps.length === 0 ? (
                 <p className="text-sm text-gray-500 py-12 text-center">
                   No brain dumps yet. Submit one from the Inbox.

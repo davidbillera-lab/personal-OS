@@ -165,3 +165,23 @@ export async function sendChatMessage(projectId: string, text: string) {
   revalidatePath(`/projects/${projectId}`)
   return { reply: result.text }
 }
+
+export async function createProjectBrainDump(
+  projectId: string,
+  rawText: string
+): Promise<{ id: string; error?: string }> {
+  const supabase = await createServerSupabaseClient()
+  const { data, error } = await supabase
+    .from('brain_dumps')
+    .insert({
+      project_id: projectId,
+      raw_text: rawText,
+      status: 'inbox',
+      classified_type: 'idea',
+    })
+    .select('id')
+    .single()
+  if (error) return { id: '', error: error.message }
+  revalidatePath('/projects/' + projectId)
+  return { id: data.id }
+}
