@@ -10,9 +10,11 @@ export function createClient() {
 
 export async function createServerSupabaseClient() {
   const cookieStore = await cookies()
+  // Use service role key (bypasses RLS) when available — auth has been removed
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    key,
     {
       cookies: {
         getAll() {
@@ -24,7 +26,7 @@ export async function createServerSupabaseClient() {
               cookieStore.set(name, value, options)
             )
           } catch {
-            // Server Component — cookie writes are ignored (middleware handles session refresh)
+            // Server Component — cookie writes are ignored
           }
         },
       },
