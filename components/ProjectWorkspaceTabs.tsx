@@ -534,7 +534,7 @@ export function ProjectWorkspaceTabs({
               />
               {brainDumps.length === 0 ? (
                 <p className="text-sm text-gray-500 py-12 text-center">
-                  No brain dumps yet. Submit one from the Inbox.
+                  No brain dumps yet. Submit one above to get started.
                 </p>
               ) : (
                 brainDumps.map(dump => (

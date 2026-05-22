@@ -169,7 +169,7 @@ export async function sendChatMessage(projectId: string, text: string) {
 export async function createProjectBrainDump(
   projectId: string,
   rawText: string
-): Promise<{ id: string; error?: string }> {
+): Promise<{ id?: string; error?: string }> {
   const supabase = await createServerSupabaseClient()
   const { data, error } = await supabase
     .from('brain_dumps')
@@ -181,7 +181,7 @@ export async function createProjectBrainDump(
     })
     .select('id')
     .single()
-  if (error) return { id: '', error: error.message }
-  revalidatePath('/projects/' + projectId)
+  if (error) return { error: error.message }
+  revalidatePath(`/projects/${projectId}`)
   return { id: data.id }
 }
