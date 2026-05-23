@@ -40,6 +40,9 @@ export interface Project {
   vercel_url: string | null
   supabase_project_id: string | null
   github_repo: string | null
+  ship_checklist: Record<string, boolean> | null
+  ship_ab_verdict: AbVerdict | null
+  ship_ab_reasoning: string | null
   created_at: string
   updated_at: string
 }

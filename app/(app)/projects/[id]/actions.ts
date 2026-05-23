@@ -126,6 +126,9 @@ Respond ONLY with valid JSON:
   if (commitUrl && status === 'passed') {
     await supabase.from('agent_handoffs').update({ status: 'done', github_commit_url: commitUrl, completed_at: new Date().toISOString() }).eq('task_id', taskId)
   }
+  if (status === 'passed') {
+    await runProjectShipAdvisoryBoard(projectId)
+  }
   revalidatePath(`/projects/${projectId}`)
   return { status, notes }
 }
@@ -169,6 +172,9 @@ Respond ONLY with valid JSON:
   }).eq('id', taskId)
   if (commitUrl && finalStatus === 'passed') {
     await supabase.from('agent_handoffs').update({ status: 'done', github_commit_url: commitUrl, completed_at: new Date().toISOString() }).eq('task_id', taskId)
+  }
+  if (finalStatus === 'passed') {
+    await runProjectShipAdvisoryBoard(projectId)
   }
   revalidatePath(`/projects/${projectId}`)
   return { status: finalStatus as 'passed' | 'issues_found' | 'loop_detected', notes }
@@ -235,6 +241,95 @@ export async function markTaskDone(taskId: string, projectId: string) {
   if (error) return { error: error.message }
   revalidatePath(`/projects/${projectId}`)
   return { ok: true }
+}
+
+export async function archiveProject(projectId: string) {
+  const supabase = await createServerSupabaseClient()
+  // Kill all pending/in-progress tasks so they don't linger
+  await supabase
+    .from('tasks')
+    .update({ status: 'killed' })
+    .eq('project_id', projectId)
+    .in('status', ['pending', 'in_progress', 'review'])
+  // Mark any open handoffs as done
+  await supabase
+    .from('agent_handoffs')
+    .update({ status: 'done', completed_at: new Date().toISOString() })
+    .eq('project_id', projectId)
+    .eq('status', 'in_progress')
+  const { error } = await supabase
+    .from('projects')
+    .update({ stage: 'kill', status: 'Archived.' })
+    .eq('id', projectId)
+  if (error) return { error: error.message }
+  revalidatePath(`/projects/${projectId}`)
+  revalidatePath('/')
+  return { ok: true }
+}
+
+export async function runProjectShipAdvisoryBoard(projectId: string) {
+  const supabase = await createServerSupabaseClient()
+
+  // Only run if all tasks are done — bail fast for intermediate completions
+  const { count } = await supabase
+    .from('tasks')
+    .select('id', { count: 'exact', head: true })
+    .eq('project_id', projectId)
+    .not('status', 'in', '("done","killed")')
+  if ((count ?? 1) > 0) return { skipped: true }
+
+  const { data: project } = await supabase
+    .from('projects')
+    .select('name, stage, status, next_action, blockers, description')
+    .eq('id', projectId)
+    .single()
+  if (!project) return { error: 'Project not found' }
+
+  const { data: tasks } = await supabase
+    .from('tasks')
+    .select('title, generated_spec, codex_qc_notes, codex_qc_status')
+    .eq('project_id', projectId)
+    .eq('status', 'done')
+
+  const taskSummary = (tasks ?? [])
+    .map(t => `- ${t.title}${t.codex_qc_notes ? ` (QC: ${t.codex_qc_notes})` : ''}`)
+    .join('\n')
+
+  const system = `You are the Advisory Board for a solo AI-native holdco operator. Evaluate whether this project is ready to ship — meaning it is complete, stable, and worth launching publicly. Give an honest verdict.
+
+Apply four kill criteria: Functionality (solves a real problem?), Efficiency (right solution?), Scalability (grows without proportional work?), Time-to-revenue (realistic return timeline?).
+
+Respond ONLY with valid JSON:
+{"verdict": "keep" | "kill", "reasoning": "Full argument. If keep: what makes it ship-ready and what to watch after launch. If kill: why it should not ship."}`
+
+  const prompt = `Project: ${project.name} (Stage: ${project.stage})
+Status: ${project.status ?? 'none'}
+Description: ${project.description ?? 'none'}
+Next action: ${project.next_action ?? 'none'}
+Blockers: ${project.blockers ?? 'none'}
+
+All build tasks completed:
+${taskSummary || '(no tasks recorded)'}
+
+All tasks are done. Is this project ready to ship?`
+
+  const result = await routeTask({
+    prompt, system, complexity_tier: 2, purpose: 'ship_advisory_board',
+    project_id: projectId, supabase,
+  })
+
+  let verdict: 'keep' | 'kill' = 'keep'
+  let reasoning = ''
+  try {
+    const parsed = JSON.parse(result.text)
+    verdict = (['keep', 'kill'] as const).includes(parsed.verdict) ? parsed.verdict : 'keep'
+    reasoning = parsed.reasoning ?? ''
+  } catch { reasoning = result.text }
+
+  await supabase.from('projects').update({ ship_ab_verdict: verdict, ship_ab_reasoning: reasoning }).eq('id', projectId)
+  revalidatePath(`/projects/${projectId}`)
+  revalidatePath('/')
+  return { verdict, reasoning }
 }
 
 export async function generateSuggestions(projectId: string) {
