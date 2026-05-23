@@ -1,5 +1,7 @@
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { decrypt } from '@/lib/crypto'
+import { fetchGitHubDiff } from '@/lib/github'
+import { runCodexQC, rerunCodexQCOnSpec } from '@/app/(app)/projects/[id]/actions'
 
 export interface McpTool {
   name: string
@@ -143,7 +145,7 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
 
     const { data: task } = await supabase
       .from('tasks')
-      .select('project_id, agent_assigned_to')
+      .select('project_id, agent_assigned_to, codex_qc_status')
       .eq('id', task_id)
       .single()
 
@@ -165,6 +167,32 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
       })
       .eq('task_id', task_id)
       .eq('status', 'in_progress')
+
+    // Auto-QC: fetch diff and run QC when a commit URL is provided
+    if (github_commit_url && task?.project_id) {
+      const currentQcStatus = (task as { codex_qc_status?: string | null }).codex_qc_status
+
+      // Skip if loop already detected — terminal state
+      if (currentQcStatus !== 'loop_detected') {
+        try {
+          const diff = await fetchGitHubDiff(github_commit_url)
+
+          const isRerun = currentQcStatus === 'issues_found'
+          const qcResult = isRerun
+            ? await rerunCodexQCOnSpec(task_id, task.project_id, diff, github_commit_url)
+            : await runCodexQC(task_id, task.project_id, diff, github_commit_url)
+
+          if ('error' in qcResult && qcResult.error) {
+            return JSON.stringify({ ok: true, completed_at: now, qc_error: qcResult.error })
+          }
+
+          return JSON.stringify({ ok: true, completed_at: now, qc_status: (qcResult as { status: string }).status })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return JSON.stringify({ ok: true, completed_at: now, qc_error: msg })
+        }
+      }
+    }
 
     return JSON.stringify({ ok: true, completed_at: now })
   }
