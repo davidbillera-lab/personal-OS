@@ -13,6 +13,7 @@ import {
   generateSuggestions,
   createProjectBrainDump,
   fetchRepoContents,
+  archiveProject,
   type RepoEntry,
 } from '@/app/(app)/projects/[id]/actions'
 import { ProjectChat } from '@/components/ProjectChat'
@@ -721,6 +722,136 @@ function TaskSpecCard({ task, project }: { task: Task; project: Project }) {
   )
 }
 
+// ─── Done panel ───────────────────────────────────────────────────────────────
+
+function DonePanel({
+  project,
+  doneTasks,
+  handoffs,
+}: {
+  project: Project
+  doneTasks: Task[]
+  handoffs: AgentHandoff[]
+}) {
+  const [archiveState, setArchiveState] = useState<'idle' | 'confirm' | 'loading' | 'done'>('idle')
+  const [isPending, startTransition] = useTransition()
+  const router = useRouter()
+
+  const doneHandoffs = handoffs.filter(h => h.status === 'done')
+  const commitsByTask = new Map<string, string>()
+  for (const h of doneHandoffs) {
+    if (h.task_id && h.github_commit_url) commitsByTask.set(h.task_id, h.github_commit_url)
+  }
+
+  const passedCount = doneTasks.filter(t => t.codex_qc_status === 'passed').length
+
+  function handleArchive() {
+    setArchiveState('loading')
+    startTransition(async () => {
+      const res = await archiveProject(project.id)
+      if (res.error) {
+        setArchiveState('confirm')
+        alert(res.error)
+      } else {
+        setArchiveState('done')
+        router.push('/')
+      }
+    })
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* Header row */}
+      <div className="flex items-center gap-3">
+        <h2 className="text-sm font-semibold text-white flex-1">Done</h2>
+        {doneTasks.length > 0 && (
+          <span className="text-[11px] text-gray-600">
+            {passedCount}/{doneTasks.length} QC passed
+          </span>
+        )}
+        {/* Archive button */}
+        {project.stage !== 'kill' && archiveState === 'idle' && (
+          <button
+            onClick={() => setArchiveState('confirm')}
+            className="rounded border border-red-500/30 px-3 py-1 text-[11px] font-medium text-red-400 hover:border-red-500/60 hover:bg-red-950/30 transition-colors"
+          >
+            Archive project
+          </button>
+        )}
+        {archiveState === 'confirm' && (
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-red-400">Kill all open tasks and archive?</span>
+            <button
+              onClick={handleArchive}
+              disabled={isPending}
+              className="rounded bg-red-600/20 border border-red-500/40 px-2 py-1 text-[11px] font-medium text-red-300 hover:bg-red-600/30 transition-colors disabled:opacity-50"
+            >
+              Confirm
+            </button>
+            <button
+              onClick={() => setArchiveState('idle')}
+              className="text-[11px] text-gray-500 hover:text-gray-300"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+        {archiveState === 'loading' && (
+          <span className="text-[11px] text-gray-500">Archiving…</span>
+        )}
+      </div>
+
+      {/* Task list */}
+      {doneTasks.length === 0 ? (
+        <div className="py-12 text-center">
+          <p className="text-sm text-gray-500">No completed tasks yet.</p>
+          <p className="mt-1 text-xs text-gray-700">Completed tasks from In Flight will appear here.</p>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {doneTasks.map(task => {
+            const commitUrl = task.id ? commitsByTask.get(task.id) : undefined
+            return (
+              <div key={task.id} className="rounded-lg border border-white/10 bg-white/5 p-3 flex flex-col gap-2">
+                <div className="flex items-start gap-2">
+                  <p className="flex-1 text-sm font-medium text-white leading-snug">{task.title}</p>
+                  <span className="shrink-0 text-[10px] text-gray-600 mt-0.5">{timeSince(task.updated_at)}</span>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {task.tool && (
+                    <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-white/10 text-gray-300">
+                      {task.tool.replace('_', ' ')}
+                    </span>
+                  )}
+                  {task.codex_qc_status && <QCStatusBadge status={task.codex_qc_status} />}
+                  {commitUrl && (
+                    <a
+                      href={commitUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-green-900/20 text-green-400 hover:text-green-300 ring-1 ring-green-500/20"
+                    >
+                      View commit →
+                    </a>
+                  )}
+                </div>
+                {task.codex_qc_notes && task.codex_qc_status !== 'passed' && (
+                  <p className="text-[11px] text-gray-500 leading-snug border-t border-white/5 pt-2">
+                    {task.codex_qc_notes}
+                  </p>
+                )}
+                {task.spec_path && (
+                  <p className="text-[11px] text-gray-700 font-mono truncate">{task.spec_path}</p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function ProjectWorkspaceTabs({
@@ -938,7 +1069,18 @@ export function ProjectWorkspaceTabs({
                           </a>
                         )}
 
-                        <CodexQCForm taskId={task.id} projectId={project.id} currentQcStatus={task.codex_qc_status ?? undefined} />
+                        {task.tool === 'codex' && task.codex_qc_status && task.codex_qc_status !== 'pending' ? (
+                          <details className="mt-1">
+                            <summary className="cursor-pointer text-[10px] text-gray-600 hover:text-gray-400 select-none">
+                              Run QC manually
+                            </summary>
+                            <div className="mt-2">
+                              <CodexQCForm taskId={task.id} projectId={project.id} currentQcStatus={task.codex_qc_status} />
+                            </div>
+                          </details>
+                        ) : (
+                          <CodexQCForm taskId={task.id} projectId={project.id} currentQcStatus={task.codex_qc_status ?? undefined} />
+                        )}
                       </div>
                     )
                   })
@@ -948,33 +1090,11 @@ export function ProjectWorkspaceTabs({
 
           {/* DONE */}
           {activeStage === 'done' && (
-            <div className="flex flex-col gap-3">
-              <h2 className="text-sm font-semibold text-white">Done</h2>
-              {doneTasks.length === 0 ? (
-                <p className="text-sm text-gray-500 py-12 text-center">
-                  No completed tasks yet.
-                </p>
-              ) : (
-                doneTasks.map(task => (
-                  <div key={task.id} className="rounded-lg border border-white/10 bg-white/5 p-3 flex flex-col gap-1.5">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <p className="text-sm font-medium text-white">{task.title}</p>
-                      <span className="ml-auto text-[10px] text-gray-600">{timeSince(task.updated_at)}</span>
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {task.tool && (
-                        <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-white/10 text-gray-300">
-                          {task.tool.replace('_', ' ')}
-                        </span>
-                      )}
-                      {task.codex_qc_status && (
-                        <QCStatusBadge status={task.codex_qc_status} />
-                      )}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
+            <DonePanel
+              project={project}
+              doneTasks={doneTasks}
+              handoffs={handoffs}
+            />
           )}
 
           {/* MISSION BRIEF */}
