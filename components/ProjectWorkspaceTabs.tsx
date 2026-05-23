@@ -1,15 +1,19 @@
 'use client'
 
-import { useState, useTransition } from 'react'
+import { useState, useTransition, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   runAdvisoryBoard,
   generateSpec,
   approveSpec,
   runCodexQC,
+  rerunCodexQCOnSpec,
+  updateAgentHandoff,
   markTaskDone,
   generateSuggestions,
   createProjectBrainDump,
+  fetchRepoContents,
+  type RepoEntry,
 } from '@/app/(app)/projects/[id]/actions'
 import { ProjectChat } from '@/components/ProjectChat'
 import type {
@@ -83,21 +87,35 @@ function timeSince(iso: string): string {
   return `${Math.floor(hrs / 24)}d ago`
 }
 
+// ─── QCStatusBadge ────────────────────────────────────────────────────────────
+
+function QCStatusBadge({ status }: { status: CodexQcStatus }) {
+  return (
+    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${QC_STATUS_COLOR[status]}`}>
+      QC: {status.replace(/_/g, ' ')}
+    </span>
+  )
+}
+
 // ─── CodexQCForm inline component ────────────────────────────────────────────
 
-function CodexQCForm({ taskId, projectId }: { taskId: string; projectId: string }) {
+function CodexQCForm({ taskId, projectId, currentQcStatus }: { taskId: string; projectId: string; currentQcStatus?: CodexQcStatus }) {
   const [diff, setDiff] = useState('')
   const [commitUrl, setCommitUrl] = useState('')
   const [isPending, startTransition] = useTransition()
   const [result, setResult] = useState<{ status: string; notes: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  const isRerun = currentQcStatus === 'issues_found'
+
   function handleRun() {
     if (!diff.trim() || isPending) return
     setError(null)
     setResult(null)
     startTransition(async () => {
-      const res = await runCodexQC(taskId, projectId, diff, commitUrl || undefined)
+      const res = isRerun
+        ? await rerunCodexQCOnSpec(taskId, projectId, diff, commitUrl || undefined)
+        : await runCodexQC(taskId, projectId, diff, commitUrl || undefined)
       if (res.error) {
         setError(res.error)
       } else {
@@ -106,9 +124,23 @@ function CodexQCForm({ taskId, projectId }: { taskId: string; projectId: string 
     })
   }
 
+  const statusColor = result?.status === 'passed'
+    ? 'text-green-400'
+    : result?.status === 'loop_detected'
+    ? 'text-orange-400'
+    : 'text-red-400'
+
+  const statusLabel = result?.status === 'passed'
+    ? 'Passed'
+    : result?.status === 'loop_detected'
+    ? 'Loop Detected'
+    : 'Issues Found'
+
   return (
     <div className="flex flex-col gap-2 mt-2 border-t border-white/10 pt-2">
-      <p className="text-[10px] text-gray-500 uppercase tracking-wide">Codex QC</p>
+      <p className="text-[10px] text-gray-500 uppercase tracking-wide">
+        {isRerun ? 'Re-run Codex QC' : 'Codex QC'}
+      </p>
       <textarea
         value={diff}
         onChange={e => setDiff(e.target.value)}
@@ -130,17 +162,308 @@ function CodexQCForm({ taskId, projectId }: { taskId: string; projectId: string 
         disabled={isPending || !diff.trim()}
         className="self-start rounded bg-white/10 px-3 py-1 text-[11px] text-white hover:bg-white/20 disabled:opacity-40"
       >
-        {isPending ? 'Running…' : 'Run Codex QC'}
+        {isPending ? 'Running…' : isRerun ? 'Re-run Codex QC' : 'Run Codex QC'}
       </button>
       {error && (
         <p className="text-[11px] text-red-400 bg-red-900/20 rounded px-2 py-1">{error}</p>
       )}
       {result && (
         <div className="rounded border border-white/10 bg-white/5 px-2 py-1.5 text-[11px] text-gray-300">
-          <span className={`font-medium mr-1 ${result.status === 'passed' ? 'text-green-400' : 'text-red-400'}`}>
-            {result.status === 'passed' ? 'Passed' : 'Issues Found'}
-          </span>
+          <span className={`font-medium mr-1 ${statusColor}`}>{statusLabel}</span>
           {result.notes}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── AgentHandoffPanel ────────────────────────────────────────────────────────
+
+const HANDOFF_STATUS_LABELS: Record<string, string> = {
+  in_progress: 'In Progress',
+  done:        'Done',
+  failed:      'Failed',
+  review:      'Review',
+}
+
+function AgentHandoffPanel({ handoffs, projectId }: { handoffs: AgentHandoff[]; projectId: string }) {
+  const [selectedId, setSelectedId] = useState<string | null>(handoffs[0]?.id ?? null)
+  const [outcome, setOutcome] = useState('')
+  const [commitUrl, setCommitUrl] = useState('')
+  const [isPending, startTransition] = useTransition()
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const selected = handoffs.find(h => h.id === selectedId) ?? null
+
+  function select(h: AgentHandoff) {
+    setSelectedId(h.id)
+    setOutcome(h.outcome ?? '')
+    setCommitUrl(h.github_commit_url ?? '')
+    setError(null)
+    setSaved(false)
+  }
+
+  function handleSave() {
+    if (!selected || isPending) return
+    setError(null)
+    setSaved(false)
+    startTransition(async () => {
+      const res = await updateAgentHandoff(selected.id, projectId, {
+        outcome: outcome || undefined,
+        github_commit_url: commitUrl || undefined,
+      })
+      if (res.error) setError(res.error)
+      else setSaved(true)
+    })
+  }
+
+  function handleStatus(status: string) {
+    if (!selected || isPending) return
+    setError(null)
+    startTransition(async () => {
+      const res = await updateAgentHandoff(selected.id, projectId, { status })
+      if (res.error) setError(res.error)
+    })
+  }
+
+  if (handoffs.length === 0) {
+    return (
+      <p className="text-sm text-gray-500 py-12 text-center">No agent sessions yet for this project.</p>
+    )
+  }
+
+  return (
+    <div className="flex gap-3 min-h-0">
+      {/* Left: handoff list */}
+      <div className="w-44 shrink-0 flex flex-col gap-1.5 overflow-y-auto">
+        {handoffs.map(h => (
+          <button
+            key={h.id}
+            onClick={() => select(h)}
+            className={`text-left rounded-lg border px-2.5 py-2 flex flex-col gap-0.5 transition-colors ${
+              h.id === selectedId
+                ? 'border-white/30 bg-white/10'
+                : 'border-white/10 bg-white/5 hover:bg-white/8'
+            }`}
+          >
+            <span className={`text-[11px] font-medium ${HANDOFF_STATUS_COLOR[h.status] ?? 'text-gray-400'}`}>
+              {h.agent_name}
+            </span>
+            <span className="text-[10px] text-gray-500">{HANDOFF_STATUS_LABELS[h.status] ?? h.status}</span>
+            <span className="text-[10px] text-gray-600">{timeSince(h.started_at)}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Right: detail pane */}
+      {selected && (
+        <div className="flex-1 flex flex-col gap-3 rounded-lg border border-white/10 bg-white/5 p-3">
+          {/* Header */}
+          <div className="flex items-start gap-2 flex-wrap">
+            <div className="flex flex-col gap-0.5 flex-1">
+              <span className={`text-sm font-semibold ${HANDOFF_STATUS_COLOR[selected.status] ?? 'text-gray-400'}`}>
+                {selected.agent_name}
+              </span>
+              {selected.task_description && (
+                <p className="text-xs text-gray-300 leading-snug">{selected.task_description}</p>
+              )}
+            </div>
+            <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-gray-400 shrink-0">
+              {HANDOFF_STATUS_LABELS[selected.status] ?? selected.status}
+            </span>
+          </div>
+
+          {/* Timestamps */}
+          <div className="flex items-center gap-4 text-[10px] text-gray-600">
+            <span>Started {timeSince(selected.started_at)}</span>
+            {selected.completed_at && <span>Completed {timeSince(selected.completed_at)}</span>}
+          </div>
+
+          {/* Spec path */}
+          {selected.spec_path && (
+            <p className="text-[10px] text-gray-500 font-mono">{selected.spec_path}</p>
+          )}
+
+          {/* Outcome */}
+          <div className="flex flex-col gap-1.5">
+            <label className="text-[10px] text-gray-500 uppercase tracking-wide">Outcome</label>
+            <textarea
+              value={outcome}
+              onChange={e => { setOutcome(e.target.value); setSaved(false) }}
+              disabled={isPending}
+              placeholder="Describe what was shipped, what changed, or what blocked completion…"
+              rows={3}
+              className="resize-none rounded border border-white/10 bg-white/5 px-2 py-1.5 text-[11px] text-gray-200 placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-white/20 disabled:opacity-50"
+            />
+          </div>
+
+          {/* Commit URL */}
+          <div className="flex flex-col gap-1.5">
+            <label className="text-[10px] text-gray-500 uppercase tracking-wide">Commit URL</label>
+            <input
+              type="text"
+              value={commitUrl}
+              onChange={e => { setCommitUrl(e.target.value); setSaved(false) }}
+              disabled={isPending}
+              placeholder="https://github.com/…"
+              className="rounded border border-white/10 bg-white/5 px-2 py-1.5 text-[11px] text-gray-200 placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-white/20 disabled:opacity-50"
+            />
+          </div>
+
+          {/* Save + status controls */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={handleSave}
+              disabled={isPending}
+              className="rounded bg-white/10 px-3 py-1 text-[11px] text-white hover:bg-white/20 disabled:opacity-40"
+            >
+              {isPending ? 'Saving…' : 'Save'}
+            </button>
+            {saved && <span className="text-[10px] text-green-400">Saved</span>}
+            <div className="ml-auto flex gap-1.5">
+              {(['done', 'review', 'failed'] as const).filter(s => s !== selected.status).map(s => (
+                <button
+                  key={s}
+                  onClick={() => handleStatus(s)}
+                  disabled={isPending}
+                  className={`rounded px-2 py-0.5 text-[10px] disabled:opacity-40 ${
+                    s === 'done'   ? 'bg-green-900/40 text-green-300 hover:bg-green-900/60' :
+                    s === 'failed' ? 'bg-red-900/40 text-red-300 hover:bg-red-900/60' :
+                                     'bg-blue-900/40 text-blue-300 hover:bg-blue-900/60'
+                  }`}
+                >
+                  Mark {HANDOFF_STATUS_LABELS[s]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {error && <p className="text-[11px] text-red-400 bg-red-900/20 rounded px-2 py-1">{error}</p>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── GitHubFileTree ───────────────────────────────────────────────────────────
+
+function GitHubFileTree({ repoUrl }: { repoUrl: string }) {
+  const [isOpen, setIsOpen] = useState(false)
+  const [currentPath, setCurrentPath] = useState('')
+  const [entries, setEntries] = useState<RepoEntry[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!isOpen) return
+    setLoading(true)
+    setError(null)
+    fetchRepoContents(repoUrl, currentPath).then(res => {
+      setLoading(false)
+      if (res.error) {
+        setError(res.error)
+      } else {
+        setEntries(res.entries ?? [])
+      }
+    })
+  }, [isOpen, currentPath, repoUrl])
+
+  const breadcrumbs = currentPath ? currentPath.split('/') : []
+
+  function navigateTo(path: string) {
+    setCurrentPath(path)
+    setEntries([])
+  }
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[0.03] mb-1">
+      <button
+        onClick={() => setIsOpen(o => !o)}
+        className="flex w-full items-center justify-between px-3 py-2 text-[11px] font-medium text-gray-400 hover:text-white"
+      >
+        <span className="flex items-center gap-1.5">
+          <span className="text-gray-500">{'<>'}</span>
+          Repo File Tree
+        </span>
+        <span className="text-gray-600">{isOpen ? '▲' : '▼'}</span>
+      </button>
+
+      {isOpen && (
+        <div className="border-t border-white/10 px-3 pb-3 pt-2 flex flex-col gap-2">
+          {/* Breadcrumb */}
+          <div className="flex items-center gap-1 text-[10px] text-gray-500 flex-wrap">
+            <button
+              onClick={() => navigateTo('')}
+              className="hover:text-white"
+            >
+              root
+            </button>
+            {breadcrumbs.map((crumb, i) => {
+              const path = breadcrumbs.slice(0, i + 1).join('/')
+              return (
+                <span key={path} className="flex items-center gap-1">
+                  <span>/</span>
+                  <button
+                    onClick={() => navigateTo(path)}
+                    className="hover:text-white"
+                  >
+                    {crumb}
+                  </button>
+                </span>
+              )
+            })}
+          </div>
+
+          {/* Entries */}
+          {loading && (
+            <p className="text-[11px] text-gray-600 py-2">Loading…</p>
+          )}
+          {error && (
+            <p className="text-[11px] text-red-400 bg-red-900/20 rounded px-2 py-1">{error}</p>
+          )}
+          {!loading && !error && (
+            <div className="flex flex-col gap-0.5 max-h-64 overflow-y-auto">
+              {currentPath && (
+                <button
+                  onClick={() => {
+                    const parent = currentPath.split('/').slice(0, -1).join('/')
+                    navigateTo(parent)
+                  }}
+                  className="flex items-center gap-1.5 rounded px-1.5 py-1 text-[11px] text-gray-500 hover:bg-white/5 hover:text-gray-300 text-left"
+                >
+                  <span>↑</span>
+                  <span>..</span>
+                </button>
+              )}
+              {entries.map(entry => (
+                entry.type === 'dir' ? (
+                  <button
+                    key={entry.path}
+                    onClick={() => navigateTo(entry.path)}
+                    className="flex items-center gap-1.5 rounded px-1.5 py-1 text-[11px] text-blue-300 hover:bg-white/5 text-left"
+                  >
+                    <span className="text-gray-500">📁</span>
+                    <span>{entry.name}/</span>
+                  </button>
+                ) : (
+                  <a
+                    key={entry.path}
+                    href={entry.html_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 rounded px-1.5 py-1 text-[11px] text-gray-300 hover:bg-white/5 hover:text-white"
+                  >
+                    <span className="text-gray-600">📄</span>
+                    <span>{entry.name}</span>
+                  </a>
+                )
+              ))}
+              {entries.length === 0 && !loading && (
+                <p className="text-[11px] text-gray-600 py-1 px-1.5">Empty directory</p>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -572,6 +895,7 @@ export function ProjectWorkspaceTabs({
           {activeStage === 'in_flight' && (
             <div className="flex flex-col gap-3">
               <h2 className="text-sm font-semibold text-white">In Flight</h2>
+              {project.repo_url && <GitHubFileTree repoUrl={project.repo_url} />}
               {inFlightTasks === 0 ? (
                 <p className="text-sm text-gray-500 py-12 text-center">
                   No tasks in flight.
@@ -595,9 +919,7 @@ export function ProjectWorkspaceTabs({
                             </span>
                           )}
                           {task.codex_qc_status && (
-                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${QC_STATUS_COLOR[task.codex_qc_status]}`}>
-                              QC: {task.codex_qc_status.replace('_', ' ')}
-                            </span>
+                            <QCStatusBadge status={task.codex_qc_status} />
                           )}
                         </div>
 
@@ -616,7 +938,7 @@ export function ProjectWorkspaceTabs({
                           </a>
                         )}
 
-                        <CodexQCForm taskId={task.id} projectId={project.id} />
+                        <CodexQCForm taskId={task.id} projectId={project.id} currentQcStatus={task.codex_qc_status ?? undefined} />
                       </div>
                     )
                   })
@@ -646,9 +968,7 @@ export function ProjectWorkspaceTabs({
                         </span>
                       )}
                       {task.codex_qc_status && (
-                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${QC_STATUS_COLOR[task.codex_qc_status]}`}>
-                          QC: {task.codex_qc_status.replace('_', ' ')}
-                        </span>
+                        <QCStatusBadge status={task.codex_qc_status} />
                       )}
                     </div>
                   </div>
@@ -769,46 +1089,7 @@ export function ProjectWorkspaceTabs({
           {activeStage === 'handoff_log' && (
             <div className="flex flex-col gap-3">
               <h2 className="text-sm font-semibold text-white">Handoff Log</h2>
-              {handoffs.length === 0 ? (
-                <p className="text-sm text-gray-500 py-12 text-center">
-                  No agent sessions yet for this project.
-                </p>
-              ) : (
-                handoffs.map(h => (
-                  <div key={h.id} className="rounded-lg border border-white/10 bg-white/5 p-3 flex flex-col gap-1.5">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className={`text-xs font-medium ${HANDOFF_STATUS_COLOR[h.status] ?? 'text-gray-400'}`}>
-                        {h.agent_name}
-                      </span>
-                      <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-gray-400">
-                        {h.status.replace('_', ' ')}
-                      </span>
-                      <span className="ml-auto text-[10px] text-gray-600">{timeSince(h.started_at)}</span>
-                    </div>
-                    {h.task_description && (
-                      <p className="text-xs text-gray-200 leading-snug">{h.task_description}</p>
-                    )}
-                    {h.outcome && (
-                      <p className="text-[11px] text-gray-400">{h.outcome}</p>
-                    )}
-                    <div className="flex items-center gap-3 text-[10px] text-gray-600">
-                      {h.completed_at && (
-                        <span>Completed {timeSince(h.completed_at)}</span>
-                      )}
-                      {h.github_commit_url && (
-                        <a
-                          href={h.github_commit_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-400 hover:text-blue-300"
-                        >
-                          View commit →
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                ))
-              )}
+              <AgentHandoffPanel handoffs={handoffs} projectId={project.id} />
             </div>
           )}
         </div>

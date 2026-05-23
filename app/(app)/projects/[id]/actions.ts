@@ -130,6 +130,105 @@ Respond ONLY with valid JSON:
   return { status, notes }
 }
 
+export async function rerunCodexQCOnSpec(taskId: string, projectId: string, diff: string, commitUrl?: string) {
+  const supabase = await createServerSupabaseClient()
+  const { data: task } = await supabase
+    .from('tasks')
+    .select('title, generated_spec, codex_qc_status')
+    .eq('id', taskId)
+    .single()
+  if (!task) return { error: 'Task not found' }
+
+  const wasAlreadyIssues = task.codex_qc_status === 'issues_found'
+
+  const system = `You are a code reviewer. Review the diff against the original spec.
+
+Check for:
+1. Correctness — does the code do what the spec asked?
+2. Regressions — does anything look broken that wasn't touched?
+3. Scope adherence — did the agent go out of scope or leave things undone?
+4. Code quality — anything obviously wrong?
+
+Respond ONLY with valid JSON:
+{"status": "passed" | "issues_found", "notes": "If passed: confirm what was verified. If issues_found: list each issue clearly."}`
+  const prompt = `Original spec:\n${task.generated_spec ?? '(no spec recorded)'}\n\nGit diff:\n${diff}\n\nCommit: ${commitUrl ?? 'not provided'}`
+  const result = await routeTask({ prompt, system, complexity_tier: 4, model: 'gpt-4o', purpose: 'codex_qc_rerun', project_id: projectId, task_id: taskId, supabase })
+  let newStatus: 'passed' | 'issues_found' = 'passed'
+  let notes = ''
+  try {
+    const parsed = JSON.parse(result.text)
+    newStatus = (['passed', 'issues_found'] as const).includes(parsed.status) ? parsed.status : 'issues_found'
+    notes = parsed.notes ?? ''
+  } catch { notes = result.text }
+
+  const finalStatus = wasAlreadyIssues && newStatus === 'issues_found' ? 'loop_detected' : newStatus
+  await supabase.from('tasks').update({
+    codex_qc_status: finalStatus,
+    codex_qc_notes: notes,
+    status: finalStatus === 'passed' ? 'done' : 'review',
+  }).eq('id', taskId)
+  if (commitUrl && finalStatus === 'passed') {
+    await supabase.from('agent_handoffs').update({ status: 'done', github_commit_url: commitUrl, completed_at: new Date().toISOString() }).eq('task_id', taskId)
+  }
+  revalidatePath(`/projects/${projectId}`)
+  return { status: finalStatus as 'passed' | 'issues_found' | 'loop_detected', notes }
+}
+
+export type RepoEntry = { name: string; type: 'file' | 'dir'; path: string; html_url: string }
+
+export async function fetchRepoContents(
+  repoUrl: string,
+  path: string = ''
+): Promise<{ entries?: RepoEntry[]; error?: string }> {
+  const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+)/)
+  if (!match) return { error: 'Invalid GitHub URL' }
+  const [, owner, repo] = match
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`
+  const pat = process.env.GITHUB_PAT
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+    ...(pat ? { Authorization: `token ${pat}` } : {}),
+  }
+  try {
+    const res = await fetch(apiUrl, { headers, next: { revalidate: 60 } })
+    if (!res.ok) return { error: `GitHub API error: ${res.status}` }
+    const data = await res.json()
+    if (!Array.isArray(data)) return { error: 'Unexpected response from GitHub' }
+    const entries: RepoEntry[] = data
+      .filter((e: { type: string }) => e.type === 'file' || e.type === 'dir')
+      .map((e: { name: string; type: string; path: string; html_url: string }) => ({
+        name: e.name,
+        type: e.type as 'file' | 'dir',
+        path: e.path,
+        html_url: e.html_url,
+      }))
+      .sort((a: RepoEntry, b: RepoEntry) => {
+        if (a.type === b.type) return a.name.localeCompare(b.name)
+        return a.type === 'dir' ? -1 : 1
+      })
+    return { entries }
+  } catch {
+    return { error: 'Failed to fetch repo contents' }
+  }
+}
+
+export async function updateAgentHandoff(
+  handoffId: string,
+  projectId: string,
+  fields: { status?: string; outcome?: string; github_commit_url?: string }
+) {
+  const supabase = await createServerSupabaseClient()
+  const update: Record<string, string | null> = {}
+  if (fields.status !== undefined) update.status = fields.status
+  if (fields.outcome !== undefined) update.outcome = fields.outcome
+  if (fields.github_commit_url !== undefined) update.github_commit_url = fields.github_commit_url || null
+  if (fields.status === 'done') update.completed_at = new Date().toISOString()
+  const { error } = await supabase.from('agent_handoffs').update(update).eq('id', handoffId)
+  if (error) return { error: error.message }
+  revalidatePath(`/projects/${projectId}`)
+  return { ok: true }
+}
+
 export async function markTaskDone(taskId: string, projectId: string) {
   const supabase = await createServerSupabaseClient()
   const { error } = await supabase.from('tasks').update({ status: 'done' }).eq('id', taskId)
