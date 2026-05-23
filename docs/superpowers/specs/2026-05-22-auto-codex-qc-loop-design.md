@@ -14,7 +14,7 @@ Today's Codex QC requires the operator to manually paste a GitHub diff into the 
 
 ## Goal
 
-When Codex calls `mc_complete_task` with a `github_commit_url`, Mission Control automatically fetches the diff from GitHub and runs QC server-side. Codex receives the QC result inline in the response. No operator action required in the happy path.
+When Codex calls `mc_complete_task` with a `github_commit_url`, Mission Control automatically fetches the diff from GitHub and runs QC server-side. Codex receives the QC result inline in the response. If QC finds issues, Codex is expected to fix them and resubmit — Mission Control re-runs QC on each resubmit until the build passes or loop detection triggers. Once QC passes, the task is marked `done` and Claude Code picks up the next pending task naturally on its next `mc_get_pending_tasks` poll. No operator action required in the happy path.
 
 ---
 
@@ -37,7 +37,11 @@ Codex → mc_complete_task(taskId, outcome, githubCommitUrl)
   4. if no githubCommitUrl: return { ok: true, task_id } as today (no QC run)
 ```
 
-Codex reads `qc_status` from the response to decide whether to iterate or stop.
+Codex reads `qc_status` from the response:
+- `passed` → task is done; Codex stops. Claude Code picks up the next pending task on its next poll.
+- `issues_found` → Codex fixes the identified issues, commits, and calls `mc_complete_task` again with the new commit URL. Mission Control runs `rerunCodexQCOnSpec` on resubmit.
+- `loop_detected` → Codex stops. Operator intervenes manually.
+- absent (no commit URL provided) → no QC ran; task is in review awaiting manual QC.
 
 ---
 
