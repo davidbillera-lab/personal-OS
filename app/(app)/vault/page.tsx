@@ -95,6 +95,7 @@ const TIER_BADGE: Record<string, string> = {
 function CredentialsSection({ credentials, search }: { credentials: CredentialListItem[]; search: string }) {
   const [revealed, setRevealed] = useState<Record<string, string>>({})
   const [revealing, setRevealing] = useState<Record<string, boolean>>({})
+  const [revealErrors, setRevealErrors] = useState<Record<string, string>>({})
 
   const filtered = credentials.filter(c =>
     !search ||
@@ -104,9 +105,16 @@ function CredentialsSection({ credentials, search }: { credentials: CredentialLi
 
   async function handleReveal(id: string) {
     setRevealing(prev => ({ ...prev, [id]: true }))
-    const res = await revealCredential(id)
-    setRevealing(prev => ({ ...prev, [id]: false }))
-    if (res.value) setRevealed(prev => ({ ...prev, [id]: res.value! }))
+    setRevealErrors(prev => ({ ...prev, [id]: '' }))
+    try {
+      const res = await revealCredential(id)
+      if (res.value) setRevealed(prev => ({ ...prev, [id]: res.value! }))
+      if (res.error) setRevealErrors(prev => ({ ...prev, [id]: res.error! }))
+    } catch (err) {
+      setRevealErrors(prev => ({ ...prev, [id]: err instanceof Error ? err.message : 'Reveal failed' }))
+    } finally {
+      setRevealing(prev => ({ ...prev, [id]: false }))
+    }
   }
 
   if (filtered.length === 0) return null
@@ -134,6 +142,9 @@ function CredentialsSection({ credentials, search }: { credentials: CredentialLi
               <p className="text-xs text-gray-500 font-mono truncate">{cred.key_name}</p>
               {revealed[cred.id] && (
                 <p className="text-xs text-amber-300 font-mono mt-1 break-all">{revealed[cred.id]}</p>
+              )}
+              {revealErrors[cred.id] && (
+                <p className="text-xs text-red-400 mt-1">{revealErrors[cred.id]}</p>
               )}
               {cred.notes && !revealed[cred.id] && (
                 <p className="text-xs text-gray-600 mt-1 truncate">{cred.notes}</p>
