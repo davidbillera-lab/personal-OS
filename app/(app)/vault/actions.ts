@@ -6,7 +6,7 @@ import { Credential, CredentialTier, VaultItem, VaultItemType } from '@/lib/type
 import { revalidatePath } from 'next/cache'
 import { embedVaultItem } from '@/lib/vault'
 
-type CredentialListItem = Omit<Credential, 'value'> & { masked_value: string }
+export type CredentialListItem = Omit<Credential, 'value'> & { masked_value: string }
 
 export async function listCredentials(): Promise<CredentialListItem[]> {
   const supabase = await createServerSupabaseClient()

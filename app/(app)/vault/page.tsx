@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useTransition } from 'react'
-import { listVaultItems, createVaultItem, type VaultItemListItem } from './actions'
+import { listVaultItems, listCredentials, createVaultItem, revealCredential, type VaultItemListItem, type CredentialListItem } from './actions'
 import { VaultList } from '@/components/VaultList'
 import { VaultGraph } from '@/components/VaultGraph'
 import { VaultSidePanel } from '@/components/VaultSidePanel'
@@ -44,9 +44,9 @@ function AddItemModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
       <div className="bg-gray-900 border border-white/10 rounded-xl w-full max-w-lg p-6 shadow-2xl">
         <h2 className="text-lg font-semibold text-white mb-4">New Vault Item</h2>
         <div className="flex flex-col gap-3">
-          <select className={inputCls} value={type} onChange={e => setType(e.target.value as VaultItemType)}>
+          <select className={inputCls} style={{ colorScheme: 'dark' }} value={type} onChange={e => setType(e.target.value as VaultItemType)}>
             {TYPE_OPTIONS.map(t => (
-              <option key={t.value} value={t.value}>{t.label}</option>
+              <option key={t.value} value={t.value} style={{ backgroundColor: '#111827', color: 'white' }}>{t.label}</option>
             ))}
           </select>
           <input className={inputCls} placeholder="Title" value={title} onChange={e => setTitle(e.target.value)} />
@@ -86,8 +86,78 @@ function AddItemModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
   )
 }
 
+const TIER_BADGE: Record<string, string> = {
+  system:   'bg-violet-500/15 text-violet-300 ring-violet-500/30',
+  project:  'bg-blue-500/15 text-blue-300 ring-blue-500/30',
+  personal: 'bg-amber-500/15 text-amber-300 ring-amber-500/30',
+}
+
+function CredentialsSection({ credentials, search }: { credentials: CredentialListItem[]; search: string }) {
+  const [revealed, setRevealed] = useState<Record<string, string>>({})
+  const [revealing, setRevealing] = useState<Record<string, boolean>>({})
+
+  const filtered = credentials.filter(c =>
+    !search ||
+    c.name.toLowerCase().includes(search.toLowerCase()) ||
+    c.key_name.toLowerCase().includes(search.toLowerCase())
+  )
+
+  async function handleReveal(id: string) {
+    setRevealing(prev => ({ ...prev, [id]: true }))
+    const res = await revealCredential(id)
+    setRevealing(prev => ({ ...prev, [id]: false }))
+    if (res.value) setRevealed(prev => ({ ...prev, [id]: res.value! }))
+  }
+
+  if (filtered.length === 0) return null
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Credentials ({filtered.length})</span>
+        <div className="flex-1 h-px bg-white/5" />
+      </div>
+      {filtered.map(cred => (
+        <div key={cred.id} className="rounded-xl border border-white/10 bg-white/3 px-4 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap mb-1">
+                <span className="text-sm font-medium text-white truncate">{cred.name}</span>
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 shrink-0 ${TIER_BADGE[cred.tier] ?? TIER_BADGE.personal}`}>
+                  {cred.tier}
+                </span>
+                <span className="text-[10px] text-gray-500">🔒</span>
+                {cred.is_mcp_accessible && (
+                  <span className="rounded-full bg-green-500/15 text-green-300 ring-1 ring-green-500/30 px-1.5 py-0.5 text-[9px] font-medium">MCP</span>
+                )}
+              </div>
+              <p className="text-xs text-gray-500 font-mono truncate">{cred.key_name}</p>
+              {revealed[cred.id] && (
+                <p className="text-xs text-amber-300 font-mono mt-1 break-all">{revealed[cred.id]}</p>
+              )}
+              {cred.notes && !revealed[cred.id] && (
+                <p className="text-xs text-gray-600 mt-1 truncate">{cred.notes}</p>
+              )}
+            </div>
+            {!revealed[cred.id] && (
+              <button
+                onClick={() => handleReveal(cred.id)}
+                disabled={revealing[cred.id]}
+                className="shrink-0 text-xs text-gray-500 hover:text-white border border-white/10 hover:border-white/30 rounded px-2 py-1 transition-colors disabled:opacity-40"
+              >
+                {revealing[cred.id] ? '…' : 'Reveal'}
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function VaultPage() {
   const [items, setItems] = useState<VaultItemListItem[]>([])
+  const [credentials, setCredentials] = useState<CredentialListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState<VaultItemType | 'all'>('all')
@@ -98,8 +168,9 @@ export default function VaultPage() {
 
   async function load() {
     setLoading(true)
-    const data = await listVaultItems()
+    const [data, creds] = await Promise.all([listVaultItems(), listCredentials()])
     setItems(data)
+    setCredentials(creds)
     setLoading(false)
   }
 
@@ -183,6 +254,13 @@ export default function VaultPage() {
             </>
           )}
         </>
+      )}
+
+      {(typeFilter === 'all' || typeFilter === 'credential') && credentials.length > 0 && (
+        <CredentialsSection
+          credentials={credentials}
+          search={search}
+        />
       )}
 
       {selectedItem && (
