@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useTransition } from 'react'
+import Link from 'next/link'
 import { Card, CardContent } from '@/components/ui/card'
 import { archiveDump, routeDump, promoteDump, promoteDumpAnyway, reclassifyDump } from '@/app/(app)/inbox/actions'
 import type { BrainDump, BrainDumpType, Project } from '@/lib/types'
@@ -120,6 +121,14 @@ export function InboxItem({ dump, projects }: Props) {
           >
             {isPending ? '…' : 'Promote to task'}
           </button>
+
+          {/* Advisory Board */}
+          <Link
+            href={`/inbox/${dump.id}/advisory`}
+            className="rounded border border-input px-3 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:border-foreground/40"
+          >
+            Advisory Board
+          </Link>
 
           {/* Archive */}
           <button

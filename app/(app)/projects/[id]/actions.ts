@@ -125,7 +125,12 @@ Check for:
 Respond ONLY with valid JSON:
 {"status": "passed" | "issues_found", "notes": "If passed: confirm what was verified. If issues_found: list each issue clearly."}`
   const prompt = `Original spec:\n${task.generated_spec ?? '(no spec recorded)'}\n\nGit diff:\n${diff}\n\nCommit: ${commitUrl ?? 'not provided'}`
-  const result = await routeTask({ prompt, system, complexity_tier: 4, model: 'gpt-4o', purpose: 'codex_qc', project_id: projectId, task_id: taskId, supabase })
+  let result: Awaited<ReturnType<typeof routeTask>>
+  try {
+    result = await routeTask({ prompt, system, complexity_tier: 4, model: 'gpt-4o', purpose: 'codex_qc', project_id: projectId, task_id: taskId, supabase })
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : 'QC model call failed' }
+  }
   let status: 'passed' | 'issues_found' = 'passed'
   let notes = ''
   try {
@@ -166,7 +171,12 @@ Check for:
 Respond ONLY with valid JSON:
 {"status": "passed" | "issues_found", "notes": "If passed: confirm what was verified. If issues_found: list each issue clearly."}`
   const prompt = `Original spec:\n${task.generated_spec ?? '(no spec recorded)'}\n\nGit diff:\n${diff}\n\nCommit: ${commitUrl ?? 'not provided'}`
-  const result = await routeTask({ prompt, system, complexity_tier: 4, model: 'gpt-4o', purpose: 'codex_qc_rerun', project_id: projectId, task_id: taskId, supabase })
+  let result: Awaited<ReturnType<typeof routeTask>>
+  try {
+    result = await routeTask({ prompt, system, complexity_tier: 4, model: 'gpt-4o', purpose: 'codex_qc_rerun', project_id: projectId, task_id: taskId, supabase })
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : 'QC model call failed' }
+  }
   let newStatus: 'passed' | 'issues_found' = 'passed'
   let notes = ''
   try {
@@ -324,10 +334,15 @@ ${taskSummary || '(no tasks recorded)'}
 
 All tasks are done. Is this project ready to ship?`
 
-  const result = await routeTask({
-    prompt, system, complexity_tier: 2, purpose: 'ship_advisory_board',
-    project_id: projectId, supabase,
-  })
+  let result: Awaited<ReturnType<typeof routeTask>>
+  try {
+    result = await routeTask({
+      prompt, system, complexity_tier: 2, purpose: 'ship_advisory_board',
+      project_id: projectId, supabase,
+    })
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : 'Ship advisory board model call failed' }
+  }
 
   let verdict: 'keep' | 'kill' = 'keep'
   let reasoning = ''

@@ -138,6 +138,16 @@ export interface AgentHandoff {
   created_at: string
 }
 
+export interface AbChat {
+  id: string
+  brain_dump_id: string
+  role: 'user' | 'assistant'
+  content: string
+  is_board_run: boolean
+  run_number: number
+  created_at: string
+}
+
 export interface IdeaValidationResult {
   verdict: IdeaValidationVerdict
   reason: string
@@ -281,6 +291,12 @@ export interface Database {
         Row: VaultItem
         Insert: Omit<VaultItem, 'id' | 'created_at' | 'updated_at'>
         Update: Partial<Omit<VaultItem, 'id' | 'created_at'>>
+        Relationships: []
+      }
+      ab_chats: {
+        Row: AbChat
+        Insert: Omit<AbChat, 'id' | 'created_at'>
+        Update: never
         Relationships: []
       }
     }
