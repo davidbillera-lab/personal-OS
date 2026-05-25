@@ -31,10 +31,15 @@ Blockers: ${project.blockers ?? 'none'}
 
 Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
 "${dump.raw_text}"`
-  const result = await routeTask({
-    prompt, system, complexity_tier: 1, purpose: 'advisory_board',
-    project_id: projectId, brain_dump_id: dumpId, supabase,
-  })
+  let result: { text: string; model: string; cost_usd: number }
+  try {
+    result = await routeTask({
+      prompt, system, complexity_tier: 1, purpose: 'advisory_board',
+      project_id: projectId, brain_dump_id: dumpId, supabase,
+    })
+  } catch (err) {
+    return { error: `Model call failed: ${err instanceof Error ? err.message : String(err)}` }
+  }
   let verdict: 'keep' | 'kill' = 'keep'
   let reasoning = ''
   try {
@@ -65,7 +70,12 @@ The spec must include:
 
 Be specific. No fluff. The engineer reading this has zero context about the project.`
   const prompt = `CLAUDE.md:\n${claudeMd || '(not available)'}\n\ndecisions.md:\n${decisionsMd || '(not available)'}\n\nBrain dump:\n"${dump.raw_text}"\n\nAdvisory Board verdict: ${dump.ab_verdict ?? 'none'} — ${dump.ab_reasoning ?? ''}\n\nGenerate the implementation spec.`
-  const result = await routeTask({ prompt, system, complexity_tier: 2, purpose: 'spec_generation', project_id: projectId, brain_dump_id: dumpId, supabase })
+  let result: { text: string; model: string; cost_usd: number }
+  try {
+    result = await routeTask({ prompt, system, complexity_tier: 2, purpose: 'spec_generation', project_id: projectId, brain_dump_id: dumpId, supabase })
+  } catch (err) {
+    return { error: `Model call failed: ${err instanceof Error ? err.message : String(err)}` }
+  }
   const specContent = result.text
   const today = new Date().toISOString().slice(0, 10)
   const slug = dump.raw_text.toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').slice(0, 60)
@@ -342,7 +352,12 @@ export async function generateSuggestions(projectId: string) {
     .select('raw_text, classified_type, ab_verdict').eq('project_id', projectId)
     .order('created_at', { ascending: false }).limit(5)
   const prompt = `Project: ${project.name}\nStage: ${project.stage}\nStatus: ${project.status ?? 'none'}\nNext action: ${project.next_action ?? 'none'}\nBlockers: ${project.blockers ?? 'none'}\n\nRecent brain dumps:\n${(recentDumps ?? []).map(d => `- [${d.classified_type ?? 'unclassified'}${d.ab_verdict ? `, AB: ${d.ab_verdict}` : ''}] ${d.raw_text}`).join('\n')}\n\nGive 3 concrete, actionable suggestions for what the operator should tackle next on this project. Be specific. No fluff.`
-  const result = await routeTask({ prompt, complexity_tier: 2, purpose: 'project_suggestions', project_id: projectId, supabase })
+  let result: { text: string; model: string; cost_usd: number }
+  try {
+    result = await routeTask({ prompt, complexity_tier: 2, purpose: 'project_suggestions', project_id: projectId, supabase })
+  } catch (err) {
+    return { error: `Model call failed: ${err instanceof Error ? err.message : String(err)}`, suggestions: null }
+  }
   await supabase.from('projects').update({ lead_suggestions: result.text, suggestions_updated_at: new Date().toISOString() }).eq('id', projectId)
   revalidatePath(`/projects/${projectId}`)
   return { suggestions: result.text, error: null }
@@ -355,7 +370,12 @@ export async function sendChatMessage(projectId: string, text: string, focusedCo
   if (!project) return { error: 'Project not found' }
   await supabase.from('project_chats').insert({ project_id: projectId, role: 'user', content: text, model: null })
   const system = `You are an AI assistant helping an operator manage and grow a portfolio project. Be concise, direct, and actionable. The project context is:\n\nProject: ${project.name}\nStage: ${project.stage}\nStatus: ${project.status ?? 'none'}\nNext action: ${project.next_action ?? 'none'}\nBlockers: ${project.blockers ?? 'none'}${focusedContext ? `\n\nOperator's current focus:\n${focusedContext}` : ''}`
-  const result = await routeTask({ prompt: text, system, complexity_tier: 2, purpose: 'project_chat', project_id: projectId, supabase })
+  let result: { text: string; model: string; cost_usd: number }
+  try {
+    result = await routeTask({ prompt: text, system, complexity_tier: 2, purpose: 'project_chat', project_id: projectId, supabase })
+  } catch (err) {
+    return { error: `Model call failed: ${err instanceof Error ? err.message : String(err)}` }
+  }
   await supabase.from('project_chats').insert({ project_id: projectId, role: 'assistant', content: result.text, model: result.model })
   revalidatePath(`/projects/${projectId}`)
   return { reply: result.text }
