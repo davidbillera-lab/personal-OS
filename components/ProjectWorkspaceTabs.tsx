@@ -17,6 +17,7 @@ import {
   type RepoEntry,
 } from '@/app/(app)/projects/[id]/actions'
 import { ProjectChat } from '@/components/ProjectChat'
+import { ProjectGraph } from '@/components/ProjectGraph'
 import type {
   Project,
   BrainDump,
@@ -62,7 +63,7 @@ const QC_STATUS_COLOR: Record<CodexQcStatus, string> = {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type ActiveStage = 'dumps' | 'spec_review' | 'in_flight' | 'done' | 'mission_brief' | 'handoff_log'
+type ActiveStage = 'dumps' | 'spec_review' | 'in_flight' | 'done' | 'mission_brief' | 'handoff_log' | 'knowledge_graph'
 
 interface Props {
   project: Project
@@ -906,6 +907,7 @@ export function ProjectWorkspaceTabs({
     if (activeStage === 'done') return 'Operator is reviewing completed tasks.'
     if (activeStage === 'mission_brief') return 'Operator is reviewing the Mission Brief (project overview, stage, status, blockers).'
     if (activeStage === 'handoff_log') return 'Operator is reviewing the agent handoff log.'
+    if (activeStage === 'knowledge_graph') return 'Operator is viewing the project knowledge graph.'
     return undefined
   }, [activeStage, brainDumps, tasks])
   const [suggestError, setSuggestError] = useState<string | null>(null)
@@ -936,8 +938,9 @@ export function ProjectWorkspaceTabs({
   ]
 
   const CONTEXT_STAGES: { key: ActiveStage; label: string }[] = [
-    { key: 'mission_brief', label: 'Mission Brief' },
-    { key: 'handoff_log',   label: 'Handoff Log' },
+    { key: 'mission_brief',   label: 'Mission Brief' },
+    { key: 'handoff_log',     label: 'Handoff Log' },
+    { key: 'knowledge_graph', label: 'Knowledge Graph' },
   ]
 
   return (
@@ -1249,6 +1252,19 @@ export function ProjectWorkspaceTabs({
             <div className="flex flex-col gap-3">
               <h2 className="text-sm font-semibold text-white">Handoff Log</h2>
               <AgentHandoffPanel handoffs={handoffs} projectId={project.id} />
+            </div>
+          )}
+
+          {/* KNOWLEDGE GRAPH */}
+          {activeStage === 'knowledge_graph' && (
+            <div className="flex flex-col gap-3">
+              <h2 className="text-sm font-semibold text-white">Knowledge Graph</h2>
+              <ProjectGraph
+                brainDumps={brainDumps}
+                tasks={tasks}
+                doneTasks={doneTasks}
+                handoffs={handoffs}
+              />
             </div>
           )}
         </div>

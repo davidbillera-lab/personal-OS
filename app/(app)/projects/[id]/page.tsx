@@ -30,7 +30,7 @@ export default async function ProjectWorkspacePage({ params }: Props) {
 
   if (!project) notFound()
 
-  const health = await getProjectHealth(id)
+  const health = await getProjectHealth(id).catch(() => null)
 
   let claudeMd = ''
   let decisionsMd = ''
