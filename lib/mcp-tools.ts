@@ -44,7 +44,7 @@ export const MCP_TOOLS: McpTool[] = [
       properties: {
         task_id:           { type: 'string', description: 'UUID of the task to complete' },
         outcome:           { type: 'string', description: 'Short description of what was done' },
-        github_commit_url: { type: 'string', description: 'Optional GitHub commit or PR URL' },
+        github_commit_url: { type: 'string', description: 'GitHub commit URL' },
       },
       required: ['task_id', 'outcome'],
     },
@@ -84,6 +84,18 @@ export const MCP_TOOLS: McpTool[] = [
         blockers:    { type: 'string', description: 'Current blockers, if any' },
       },
       required: ['project_id'],
+    },
+  },
+  {
+    name: 'mc_get_vault_context',
+    description: 'Semantic search over vault items. Pass the current task description to get relevant skills, agent roles, and knowledge items back. Never returns encrypted or personal items.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Task description or question to match against vault knowledge' },
+        limit: { type: 'number', description: 'Max items to return (default 8, max 20)' },
+      },
+      required: ['query'],
     },
   },
 ]
@@ -170,7 +182,7 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
 
     // Auto-QC: fetch diff and run QC when a commit URL is provided
     if (github_commit_url && task?.project_id) {
-      const currentQcStatus = (task as { codex_qc_status?: string | null }).codex_qc_status
+      const currentQcStatus = task?.codex_qc_status
 
       // Skip if loop already detected — terminal state
       if (currentQcStatus !== 'loop_detected') {
@@ -245,6 +257,23 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
 
     const value = decrypt(data.value)
     return JSON.stringify({ key_name, value })
+  }
+
+  if (name === 'mc_get_vault_context') {
+    const { query, limit } = args
+    if (!query) throw new Error('query is required')
+    const { queryVaultContext } = await import('@/lib/vault')
+    const parsedLimit = limit ? Math.min(parseInt(limit, 10), 20) : 8
+    const results = await queryVaultContext(query, parsedLimit)
+    return JSON.stringify(
+      results.map(r => ({
+        id: r.id,
+        type: r.type,
+        title: r.title,
+        content: r.content.slice(0, 500),
+        tags: r.tags,
+      }))
+    )
   }
 
   throw new Error(`Unknown tool: ${name}`)

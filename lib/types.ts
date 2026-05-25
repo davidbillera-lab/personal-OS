@@ -16,6 +16,25 @@ export type AbVerdict = 'keep' | 'kill' | 'pending'
 export type CodexQcStatus = 'pending' | 'passed' | 'issues_found' | 'loop_detected'
 export type TaskTool = 'claude_code' | 'codex' | 'cursor'
 
+export type VaultItemType = 'credential' | 'skill' | 'agent' | 'personal' | 'knowledge'
+
+export interface VaultItem {
+  id: string
+  type: VaultItemType
+  title: string
+  content: string
+  encrypted: boolean
+  tags: string[]
+  project_id: string | null
+  source_table: string | null
+  source_id: string | null
+  is_mcp_accessible: boolean
+  metadata: Record<string, unknown>
+  embedding: number[] | null
+  created_at: string
+  updated_at: string
+}
+
 export interface Project {
   id: string
   name: string
@@ -256,6 +275,12 @@ export interface Database {
         Row: ProjectHealth
         Insert: Omit<ProjectHealth, 'id' | 'checked_at'>
         Update: Partial<Omit<ProjectHealth, 'id'>>
+        Relationships: []
+      }
+      vault_items: {
+        Row: VaultItem
+        Insert: Omit<VaultItem, 'id' | 'created_at' | 'updated_at'>
+        Update: Partial<Omit<VaultItem, 'id' | 'created_at'>>
         Relationships: []
       }
     }
