@@ -533,13 +533,17 @@ function DumpCard({
   const [isPendingSpec, startSpec] = useTransition()
   const [abVerdict, setAbVerdict] = useState<string | null>(dump.ab_verdict ?? null)
   const [abReasoning, setAbReasoning] = useState<string | null>(dump.ab_reasoning ?? null)
+  const [abError, setAbError] = useState<string | null>(null)
   const [specError, setSpecError] = useState<string | null>(null)
   const [specDone, setSpecDone] = useState(false)
 
   function handleRunAB() {
+    setAbError(null)
     startAB(async () => {
       const res = await runAdvisoryBoard(dump.id, project.id)
-      if (!('error' in res)) {
+      if ('error' in res) {
+        setAbError(res.error ?? 'Advisory Board failed')
+      } else {
         setAbVerdict(res.verdict)
         setAbReasoning(res.reasoning)
       }
@@ -627,6 +631,10 @@ function DumpCard({
           <span className="text-[11px] text-green-400">Spec generated ✓</span>
         )}
       </div>
+
+      {abError && (
+        <p className="text-[11px] text-red-400 bg-red-900/20 rounded px-2 py-1">AB error: {abError}</p>
+      )}
 
       {specError && (
         <p className="text-[11px] text-red-400 bg-red-900/20 rounded px-2 py-1">{specError}</p>
