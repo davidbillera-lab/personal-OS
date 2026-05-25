@@ -7,7 +7,9 @@ import { cn } from '@/lib/utils'
 const navLinks = [
   { href: '/', label: 'Dashboard' },
   { href: '/inbox', label: 'Inbox' },
+  { href: '/ship', label: 'Ship' },
   { href: '/vault', label: 'Vault' },
+  { href: '/runbook', label: 'Runbook' },
 ]
 
 export default function Nav() {

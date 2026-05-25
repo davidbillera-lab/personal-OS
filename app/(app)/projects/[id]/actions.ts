@@ -2,6 +2,7 @@
 
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
+import { classifyBrainDump } from '@/lib/classify'
 import { revalidatePath } from 'next/cache'
 
 export async function runAdvisoryBoard(dumpId: string, projectId: string) {
@@ -347,13 +348,13 @@ export async function generateSuggestions(projectId: string) {
   return { suggestions: result.text, error: null }
 }
 
-export async function sendChatMessage(projectId: string, text: string) {
+export async function sendChatMessage(projectId: string, text: string, focusedContext?: string) {
   const supabase = await createServerSupabaseClient()
   const { data: project } = await supabase.from('projects')
     .select('name, stage, status, next_action, blockers, description').eq('id', projectId).single()
   if (!project) return { error: 'Project not found' }
   await supabase.from('project_chats').insert({ project_id: projectId, role: 'user', content: text, model: null })
-  const system = `You are an AI assistant helping an operator manage and grow a portfolio project. Be concise, direct, and actionable. The project context is:\n\nProject: ${project.name}\nStage: ${project.stage}\nStatus: ${project.status ?? 'none'}\nNext action: ${project.next_action ?? 'none'}\nBlockers: ${project.blockers ?? 'none'}`
+  const system = `You are an AI assistant helping an operator manage and grow a portfolio project. Be concise, direct, and actionable. The project context is:\n\nProject: ${project.name}\nStage: ${project.stage}\nStatus: ${project.status ?? 'none'}\nNext action: ${project.next_action ?? 'none'}\nBlockers: ${project.blockers ?? 'none'}${focusedContext ? `\n\nOperator's current focus:\n${focusedContext}` : ''}`
   const result = await routeTask({ prompt: text, system, complexity_tier: 2, purpose: 'project_chat', project_id: projectId, supabase })
   await supabase.from('project_chats').insert({ project_id: projectId, role: 'assistant', content: result.text, model: result.model })
   revalidatePath(`/projects/${projectId}`)
@@ -371,11 +372,16 @@ export async function createProjectBrainDump(
       project_id: projectId,
       raw_text: rawText,
       status: 'inbox',
-      classified_type: 'idea',
+      classified_type: null,
     })
     .select('id')
     .single()
   if (error) return { error: error.message }
+
+  const dumpId = data.id
+  await classifyBrainDump(dumpId, rawText, supabase).catch(console.error)
+  await runAdvisoryBoard(dumpId, projectId).catch(console.error)
+
   revalidatePath(`/projects/${projectId}`)
-  return { id: data.id }
+  return { id: dumpId }
 }

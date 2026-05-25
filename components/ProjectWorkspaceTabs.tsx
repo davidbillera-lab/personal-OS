@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useTransition, useEffect } from 'react'
+import { useState, useTransition, useEffect, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   runAdvisoryBoard,
@@ -509,7 +509,7 @@ function NewDumpForm({ projectId, onCreated }: { projectId: string; onCreated: (
         disabled={loading || !text.trim()}
         className="px-4 py-1.5 rounded-md text-sm font-medium bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40"
       >
-        {loading ? 'Saving...' : 'Submit Brain Dump'}
+        {loading ? 'Saving + analyzing…' : 'Submit Brain Dump'}
       </button>
     </form>
   )
@@ -642,6 +642,15 @@ function TaskSpecCard({ task, project }: { task: Task; project: Project }) {
   const [approveError, setApproveError] = useState<string | null>(null)
   const [approved, setApproved] = useState(false)
   const [markedDone, setMarkedDone] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  function handleCopySpec() {
+    if (!task.generated_spec) return
+    navigator.clipboard.writeText(task.generated_spec).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
 
   function handleApprove() {
     setApproveError(null)
@@ -694,6 +703,14 @@ function TaskSpecCard({ task, project }: { task: Task; project: Project }) {
       )}
 
       <div className="flex items-center gap-2 flex-wrap pt-1">
+        {task.generated_spec && (
+          <button
+            onClick={handleCopySpec}
+            className="rounded border border-white/10 px-3 py-1 text-[11px] text-gray-400 hover:text-white hover:border-white/30"
+          >
+            {copied ? 'Copied ✓' : 'Copy spec'}
+          </button>
+        )}
         {!approved ? (
           <button
             onClick={handleApprove}
@@ -869,6 +886,28 @@ export function ProjectWorkspaceTabs({
   const [activeStage, setActiveStage] = useState<ActiveStage>('dumps')
   const [isPending, startTransition] = useTransition()
   const [suggestionsText, setSuggestionsText] = useState(project.lead_suggestions ?? '')
+
+  const focusedContext = useMemo(() => {
+    if (activeStage === 'dumps') {
+      const pending = brainDumps.filter(d => d.status === 'inbox' || d.status === 'reviewed')
+      if (pending.length === 0) return 'Operator is on the Brain Dumps tab. No pending dumps.'
+      return `Operator is on the Brain Dumps tab. Pending dumps:\n${pending.slice(0, 5).map(d => `- ${d.ai_summary ?? d.raw_text.slice(0, 120)}`).join('\n')}`
+    }
+    if (activeStage === 'spec_review') {
+      const specTasks = tasks.filter(t => t.status === 'pending' && t.generated_spec)
+      if (specTasks.length === 0) return 'Operator is on the Spec Review tab. No tasks with specs yet.'
+      return `Operator is reviewing specs for these tasks:\n${specTasks.slice(0, 5).map(t => `- ${t.title}${t.description ? ': ' + t.description : ''}`).join('\n')}`
+    }
+    if (activeStage === 'in_flight') {
+      const inFlight = tasks.filter(t => t.status === 'in_progress' || t.status === 'review')
+      if (inFlight.length === 0) return 'Operator is on the In Flight tab. No tasks currently in progress.'
+      return `Operator is monitoring these in-flight tasks:\n${inFlight.slice(0, 5).map(t => `- ${t.title} (${t.status}${t.agent_assigned_to ? ', agent: ' + t.agent_assigned_to : ''})`).join('\n')}`
+    }
+    if (activeStage === 'done') return 'Operator is reviewing completed tasks.'
+    if (activeStage === 'mission_brief') return 'Operator is reviewing the Mission Brief (project overview, stage, status, blockers).'
+    if (activeStage === 'handoff_log') return 'Operator is reviewing the agent handoff log.'
+    return undefined
+  }, [activeStage, brainDumps, tasks])
   const [suggestError, setSuggestError] = useState<string | null>(null)
 
   function handleRefreshSuggestions() {
@@ -1224,7 +1263,7 @@ export function ProjectWorkspaceTabs({
               )}
             </div>
             <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-              <ProjectChat projectId={project.id} initialMessages={initialChats} />
+              <ProjectChat projectId={project.id} initialMessages={initialChats} focusedContext={focusedContext} />
             </div>
           </div>
         </div>

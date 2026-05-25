@@ -7,9 +7,10 @@ import type { ProjectChat as ProjectChatType } from '@/lib/types'
 interface Props {
   projectId: string
   initialMessages: ProjectChatType[]
+  focusedContext?: string
 }
 
-export function ProjectChat({ projectId, initialMessages }: Props) {
+export function ProjectChat({ projectId, initialMessages, focusedContext }: Props) {
   const [messages, setMessages] = useState<ProjectChatType[]>(initialMessages)
   const [input, setInput] = useState('')
   const [isPending, startTransition] = useTransition()
@@ -39,7 +40,7 @@ export function ProjectChat({ projectId, initialMessages }: Props) {
     setMessages(prev => [...prev, optimisticUser])
 
     startTransition(async () => {
-      const result = await sendChatMessage(projectId, text)
+      const result = await sendChatMessage(projectId, text, focusedContext)
       if (result.error) {
         setError(result.error)
         setMessages(prev => prev.filter(m => m.id !== optimisticUser.id))
