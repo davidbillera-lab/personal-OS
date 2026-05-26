@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useTransition } from 'react'
-import { listVaultItems, listCredentials, createVaultItem, revealCredential, type VaultItemListItem, type CredentialListItem } from './actions'
+import { listVaultItems, listCredentials, createVaultItem, revealCredential, updateCredential, deleteCredential, type VaultItemListItem, type CredentialListItem } from './actions'
 import { VaultList } from '@/components/VaultList'
 import { VaultGraph } from '@/components/VaultGraph'
 import { VaultSidePanel } from '@/components/VaultSidePanel'
@@ -92,10 +92,16 @@ const TIER_BADGE: Record<string, string> = {
   personal: 'bg-amber-500/15 text-amber-300 ring-amber-500/30',
 }
 
-function CredentialsSection({ credentials, search }: { credentials: CredentialListItem[]; search: string }) {
+function CredentialsSection({ credentials, search, onReload }: { credentials: CredentialListItem[]; search: string; onReload: () => void }) {
   const [revealed, setRevealed] = useState<Record<string, string>>({})
   const [revealing, setRevealing] = useState<Record<string, boolean>>({})
   const [revealErrors, setRevealErrors] = useState<Record<string, string>>({})
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editValue, setEditValue] = useState('')
+  const [editNotes, setEditNotes] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [deleting, setDeleting] = useState<Record<string, boolean>>({})
 
   const filtered = credentials.filter(c =>
     !search ||
@@ -117,7 +123,44 @@ function CredentialsSection({ credentials, search }: { credentials: CredentialLi
     }
   }
 
+  function startEdit(cred: CredentialListItem) {
+    setEditingId(cred.id)
+    setEditValue('')
+    setEditNotes(cred.notes ?? '')
+    setSaveError('')
+  }
+
+  function cancelEdit() {
+    setEditingId(null)
+    setEditValue('')
+    setEditNotes('')
+    setSaveError('')
+  }
+
+  async function handleSave(id: string) {
+    setSaving(true)
+    setSaveError('')
+    const params: { value?: string; notes?: string } = {}
+    if (editValue.trim()) params.value = editValue.trim()
+    params.notes = editNotes.trim() || undefined
+    const res = await updateCredential(id, params)
+    setSaving(false)
+    if (res.error) { setSaveError(res.error); return }
+    setEditingId(null)
+    setRevealed(prev => { const n = { ...prev }; delete n[id]; return n })
+    onReload()
+  }
+
+  async function handleDelete(id: string, name: string) {
+    if (!confirm(`Delete "${name}"? This cannot be undone.`)) return
+    setDeleting(prev => ({ ...prev, [id]: true }))
+    await deleteCredential(id)
+    onReload()
+  }
+
   if (filtered.length === 0) return null
+
+  const inputCls = 'w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-violet-500'
 
   return (
     <div className="flex flex-col gap-2">
@@ -127,39 +170,87 @@ function CredentialsSection({ credentials, search }: { credentials: CredentialLi
       </div>
       {filtered.map(cred => (
         <div key={cred.id} className="rounded-xl border border-white/10 bg-white/3 px-4 py-3">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 flex-wrap mb-1">
-                <span className="text-sm font-medium text-white truncate">{cred.name}</span>
-                <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 shrink-0 ${TIER_BADGE[cred.tier] ?? TIER_BADGE.personal}`}>
-                  {cred.tier}
-                </span>
-                <span className="text-[10px] text-gray-500">🔒</span>
-                {cred.is_mcp_accessible && (
-                  <span className="rounded-full bg-green-500/15 text-green-300 ring-1 ring-green-500/30 px-1.5 py-0.5 text-[9px] font-medium">MCP</span>
+          {editingId === cred.id ? (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-sm font-medium text-white">{cred.name}</span>
+                <span className="text-xs text-gray-500 font-mono">{cred.key_name}</span>
+              </div>
+              <input
+                className={inputCls}
+                type="password"
+                placeholder="New value (leave blank to keep existing)"
+                value={editValue}
+                onChange={e => setEditValue(e.target.value)}
+              />
+              <input
+                className={inputCls}
+                placeholder="Notes (optional)"
+                value={editNotes}
+                onChange={e => setEditNotes(e.target.value)}
+              />
+              {saveError && <p className="text-xs text-red-400">{saveError}</p>}
+              <div className="flex gap-2 justify-end">
+                <button onClick={cancelEdit} className="text-xs text-gray-400 hover:text-white px-3 py-1.5 border border-white/10 rounded">Cancel</button>
+                <button
+                  onClick={() => handleSave(cred.id)}
+                  disabled={saving}
+                  className="text-xs bg-violet-600 hover:bg-violet-500 text-white px-3 py-1.5 rounded disabled:opacity-40"
+                >
+                  {saving ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap mb-1">
+                  <span className="text-sm font-medium text-white truncate">{cred.name}</span>
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 shrink-0 ${TIER_BADGE[cred.tier] ?? TIER_BADGE.personal}`}>
+                    {cred.tier}
+                  </span>
+                  <span className="text-[10px] text-gray-500">🔒</span>
+                  {cred.is_mcp_accessible && (
+                    <span className="rounded-full bg-green-500/15 text-green-300 ring-1 ring-green-500/30 px-1.5 py-0.5 text-[9px] font-medium">MCP</span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 font-mono truncate">{cred.key_name}</p>
+                {revealed[cred.id] && (
+                  <p className="text-xs text-amber-300 font-mono mt-1 break-all">{revealed[cred.id]}</p>
+                )}
+                {revealErrors[cred.id] && (
+                  <p className="text-xs text-red-400 mt-1">{revealErrors[cred.id]}</p>
+                )}
+                {cred.notes && !revealed[cred.id] && (
+                  <p className="text-xs text-gray-600 mt-1 truncate">{cred.notes}</p>
                 )}
               </div>
-              <p className="text-xs text-gray-500 font-mono truncate">{cred.key_name}</p>
-              {revealed[cred.id] && (
-                <p className="text-xs text-amber-300 font-mono mt-1 break-all">{revealed[cred.id]}</p>
-              )}
-              {revealErrors[cred.id] && (
-                <p className="text-xs text-red-400 mt-1">{revealErrors[cred.id]}</p>
-              )}
-              {cred.notes && !revealed[cred.id] && (
-                <p className="text-xs text-gray-600 mt-1 truncate">{cred.notes}</p>
-              )}
+              <div className="flex items-center gap-1 shrink-0">
+                {!revealed[cred.id] && (
+                  <button
+                    onClick={() => handleReveal(cred.id)}
+                    disabled={revealing[cred.id]}
+                    className="text-xs text-gray-500 hover:text-white border border-white/10 hover:border-white/30 rounded px-2 py-1 transition-colors disabled:opacity-40"
+                  >
+                    {revealing[cred.id] ? '…' : 'Reveal'}
+                  </button>
+                )}
+                <button
+                  onClick={() => startEdit(cred)}
+                  className="text-xs text-gray-500 hover:text-white border border-white/10 hover:border-white/30 rounded px-2 py-1 transition-colors"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => handleDelete(cred.id, cred.name)}
+                  disabled={deleting[cred.id]}
+                  className="text-xs text-gray-500 hover:text-red-400 border border-white/10 hover:border-red-500/30 rounded px-2 py-1 transition-colors disabled:opacity-40"
+                >
+                  {deleting[cred.id] ? '…' : 'Delete'}
+                </button>
+              </div>
             </div>
-            {!revealed[cred.id] && (
-              <button
-                onClick={() => handleReveal(cred.id)}
-                disabled={revealing[cred.id]}
-                className="shrink-0 text-xs text-gray-500 hover:text-white border border-white/10 hover:border-white/30 rounded px-2 py-1 transition-colors disabled:opacity-40"
-              >
-                {revealing[cred.id] ? '…' : 'Reveal'}
-              </button>
-            )}
-          </div>
+          )}
         </div>
       ))}
     </div>
@@ -271,6 +362,7 @@ export default function VaultPage() {
         <CredentialsSection
           credentials={credentials}
           search={search}
+          onReload={load}
         />
       )}
 

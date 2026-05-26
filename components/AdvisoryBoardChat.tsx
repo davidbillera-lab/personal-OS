@@ -13,6 +13,76 @@ const typeColors: Record<BrainDumpType, string> = {
   unclassified:   'bg-slate-100 text-slate-600',
 }
 
+const PERSONA_BORDER: Record<string, string> = {
+  'Partner':              'border-blue-500/40 bg-blue-500/5',
+  'Advisor':              'border-purple-500/40 bg-purple-500/5',
+  'Colleague':            'border-green-500/40 bg-green-500/5',
+  'Friend':               'border-amber-500/40 bg-amber-500/5',
+  'Agreed Recommendation':'border-white/20 bg-white/5',
+}
+
+const PERSONA_LABEL: Record<string, string> = {
+  'Partner':              'text-blue-400',
+  'Advisor':              'text-purple-400',
+  'Colleague':            'text-green-400',
+  'Friend':               'text-amber-400',
+  'Agreed Recommendation':'text-white font-semibold',
+}
+
+const PERSONAS = ['Partner', 'Advisor', 'Colleague', 'Friend', 'Agreed Recommendation']
+
+function parsePersonaSections(content: string): { persona: string; text: string }[] | null {
+  // Build regex that matches **PersonaName** or **Agreed Recommendation:**
+  const pattern = new RegExp(`\\*\\*(${PERSONAS.map(p => p.replace(/\s/g, '\\s+')).join('|')})[:\\s]*`, 'g')
+  const sections: { persona: string; text: string }[] = []
+  let lastPersona = ''
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+
+  while ((match = pattern.exec(content)) !== null) {
+    if (lastPersona) {
+      sections.push({ persona: lastPersona, text: content.slice(lastIndex, match.index).trim() })
+    }
+    // Normalize multi-word persona names (collapse whitespace)
+    lastPersona = match[1].replace(/\s+/g, ' ')
+    lastIndex = match.index + match[0].length
+  }
+  if (lastPersona) {
+    sections.push({ persona: lastPersona, text: content.slice(lastIndex).trim() })
+  }
+  return sections.length >= 2 ? sections : null
+}
+
+function BoardResponse({ content, runNumber }: { content: string; runNumber: number }) {
+  const sections = parsePersonaSections(content)
+
+  if (!sections) {
+    return (
+      <div className="border border-border rounded-lg p-4 relative">
+        <span className="absolute top-2 right-3 text-[10px] text-muted-foreground/50">Run {runNumber}</span>
+        <pre className="text-sm leading-relaxed whitespace-pre-wrap font-sans">{content}</pre>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <span className="text-[10px] text-muted-foreground/50 self-end">Run {runNumber}</span>
+      {sections.map(({ persona, text }) => (
+        <div
+          key={persona}
+          className={`rounded-lg border px-4 py-3 ${PERSONA_BORDER[persona] ?? 'border-border bg-card'}`}
+        >
+          <p className={`text-[11px] font-semibold uppercase tracking-wide mb-1.5 ${PERSONA_LABEL[persona] ?? 'text-muted-foreground'}`}>
+            {persona}
+          </p>
+          <p className="text-sm leading-relaxed whitespace-pre-wrap">{text}</p>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 interface Props {
   dump: BrainDump & { project_name?: string | null }
   chats: AbChat[]
@@ -129,14 +199,7 @@ export function AdvisoryBoardChat({ dump, chats: initialChats }: Props) {
         {chats.map((chat) => (
           <div key={chat.id} className={chat.role === 'user' ? 'flex justify-end' : ''}>
             {chat.role === 'assistant' ? (
-              <div className="border border-border rounded-lg p-4 relative">
-                <span className="absolute top-2 right-3 text-[10px] text-muted-foreground/50">
-                  Run {chat.run_number}
-                </span>
-                <pre className="text-sm leading-relaxed whitespace-pre-wrap font-sans">
-                  {chat.content}
-                </pre>
-              </div>
+              <BoardResponse content={chat.content} runNumber={chat.run_number} />
             ) : (
               <div className="bg-muted rounded-lg px-3 py-2 max-w-[75%]">
                 <p className="text-sm">{chat.content}</p>

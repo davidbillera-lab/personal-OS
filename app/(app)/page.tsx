@@ -1,8 +1,6 @@
 import Link from 'next/link'
 import { createServerSupabaseClient } from '@/lib/supabase'
-import { Textarea } from '@/components/ui/textarea'
-import { Button } from '@/components/ui/button'
-import { quickDump } from './actions'
+import { QuickDumpForm } from '@/components/QuickDumpForm'
 import type { Project, AgentHandoff, ProjectStage } from '@/lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -193,15 +191,7 @@ export default async function CommandCenter() {
     <div className="flex flex-col gap-6">
 
       {/* Brain dump quick input */}
-      <form action={quickDump} className="flex flex-col gap-2 sm:flex-row sm:items-end">
-        <Textarea
-          name="text"
-          placeholder="Brain dump anything — idea, bug, task, decision… Haiku classifies it."
-          className="min-h-[56px] flex-1 resize-none text-sm"
-          required
-        />
-        <Button type="submit" className="shrink-0">Dump it</Button>
-      </form>
+      <QuickDumpForm />
 
       {/* Health summary bar */}
       <div className="flex flex-wrap gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm">
