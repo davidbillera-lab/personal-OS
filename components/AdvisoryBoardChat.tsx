@@ -32,19 +32,28 @@ const PERSONA_LABEL: Record<string, string> = {
 const PERSONAS = ['Partner', 'Advisor', 'Colleague', 'Friend', 'Agreed Recommendation']
 
 function parsePersonaSections(content: string): { persona: string; text: string }[] | null {
-  // Build regex that matches **PersonaName** or **Agreed Recommendation:**
-  const pattern = new RegExp(`\\*\\*(${PERSONAS.map(p => p.replace(/\s/g, '\\s+')).join('|')})[:\\s]*`, 'g')
+  // Match **PersonaName** or **PersonaName:** or ### PersonaName or PersonaName: at start of line
+  const namePattern = PERSONAS.map(p => p.replace(/\s+/g, '\\s+')).join('|')
+  const pattern = new RegExp(
+    `(?:^|\\n)(?:\\*\\*(${namePattern})\\*\\*[:\\s]*|###\\s*(${namePattern})\\s*\\n|(${namePattern}):[ \\t]*)`,
+    'gi'
+  )
+
   const sections: { persona: string; text: string }[] = []
   let lastPersona = ''
   let lastIndex = 0
   let match: RegExpExecArray | null
 
   while ((match = pattern.exec(content)) !== null) {
+    const rawName = (match[1] ?? match[2] ?? match[3] ?? '').replace(/\s+/g, ' ').trim()
+    if (!rawName) continue
+    // Normalize to canonical casing
+    const persona = PERSONAS.find(p => p.toLowerCase() === rawName.toLowerCase()) ?? rawName
+
     if (lastPersona) {
       sections.push({ persona: lastPersona, text: content.slice(lastIndex, match.index).trim() })
     }
-    // Normalize multi-word persona names (collapse whitespace)
-    lastPersona = match[1].replace(/\s+/g, ' ')
+    lastPersona = persona
     lastIndex = match.index + match[0].length
   }
   if (lastPersona) {

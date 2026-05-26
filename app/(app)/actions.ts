@@ -1,6 +1,5 @@
 'use server'
 
-import { revalidatePath } from 'next/cache'
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { classifyBrainDump } from '@/lib/classify'
 
@@ -25,6 +24,4 @@ export async function quickDump(formData: FormData) {
     // Synchronous classification (~1-2s). Failure does not block the dump save.
     await classifyBrainDump(data.id, text, supabase).catch(console.error)
   }
-
-  revalidatePath('/')
 }
