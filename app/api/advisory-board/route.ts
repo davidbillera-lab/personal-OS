@@ -43,9 +43,10 @@ CRITICAL FORMAT RULES — follow exactly, no deviation:
 
 export async function POST(req: NextRequest) {
   try {
-    const { brain_dump_id, user_message } = await req.json() as {
+    const { brain_dump_id, user_message, rerun } = await req.json() as {
       brain_dump_id: string
       user_message?: string
+      rerun?: boolean
     }
 
     if (!brain_dump_id) {
@@ -109,8 +110,8 @@ Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
     type MessageParam = { role: 'user' | 'assistant'; content: string }
     const messages: MessageParam[] = []
 
-    if (existingChats.length === 0 && !user_message) {
-      // Initial call — dump is the first user turn
+    if (rerun || (existingChats.length === 0 && !user_message)) {
+      // Fresh run — just the dump context. Always ends with user turn.
       messages.push({ role: 'user', content: dumpContext })
     } else {
       // Prepend dump as first turn, then replay history
@@ -124,6 +125,10 @@ Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
       }
       if (user_message) {
         messages.push({ role: 'user', content: user_message })
+      }
+      // Safety guard: Anthropic requires messages to end with a user turn
+      if (messages[messages.length - 1]?.role === 'assistant') {
+        messages.push({ role: 'user', content: FORMAT_REMINDER })
       }
     }
 

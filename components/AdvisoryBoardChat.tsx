@@ -105,14 +105,17 @@ export function AdvisoryBoardChat({ dump, chats: initialChats }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const initialized = useRef(false)
 
-  async function callBoard(userMessage?: string) {
+  async function callBoard(userMessage?: string, rerun?: boolean) {
     setLoading(true)
     setError(null)
+    if (rerun) {
+      setChats([])
+    }
     try {
       const res = await fetch('/api/advisory-board', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ brain_dump_id: dump.id, user_message: userMessage }),
+        body: JSON.stringify({ brain_dump_id: dump.id, user_message: userMessage, rerun }),
       })
       const data = await res.json() as { content?: string; run_number?: number; error?: string }
       if (!res.ok || data.error) {
@@ -257,7 +260,7 @@ export function AdvisoryBoardChat({ dump, chats: initialChats }: Props) {
           Send
         </button>
         <button
-          onClick={() => callBoard()}
+          onClick={() => callBoard(undefined, true)}
           disabled={loading}
           className="rounded border border-input px-4 py-2 text-sm text-muted-foreground hover:text-foreground hover:border-foreground/40 disabled:opacity-40"
         >
