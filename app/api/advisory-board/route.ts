@@ -85,7 +85,25 @@ export async function POST(req: NextRequest) {
     }
 
     // Build messages: first user turn is the dump context, then alternating history
-    const dumpContext = `Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
+    const FORMAT_REMINDER = `IMPORTANT: Respond ONLY in this exact format — four labeled sections then Agreed Recommendation:
+
+**Partner**
+[response]
+
+**Advisor**
+[response]
+
+**Colleague**
+[response]
+
+**Friend**
+[response]
+
+**Agreed Recommendation:** [one sentence]`
+
+    const dumpContext = `${FORMAT_REMINDER}
+
+Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
 "${dump.raw_text}"${dump.ai_summary ? `\n\nSummary: ${dump.ai_summary}` : ''}`
 
     type MessageParam = { role: 'user' | 'assistant'; content: string }
@@ -96,8 +114,12 @@ export async function POST(req: NextRequest) {
       messages.push({ role: 'user', content: dumpContext })
     } else {
       // Prepend dump as first turn, then replay history
+      // Strip old history that used wrong JSON format to avoid poisoning new runs
+      const cleanHistory = existingChats.filter(c =>
+        !(c.role === 'assistant' && c.content.includes('"verdict"'))
+      )
       messages.push({ role: 'user', content: dumpContext })
-      for (const chat of existingChats) {
+      for (const chat of cleanHistory) {
         messages.push({ role: chat.role as 'user' | 'assistant', content: chat.content })
       }
       if (user_message) {
