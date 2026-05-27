@@ -35,7 +35,7 @@ function parsePersonaSections(content: string): { persona: string; text: string 
   // Match **PersonaName** or **PersonaName:** or ### PersonaName or PersonaName: at start of line
   const namePattern = PERSONAS.map(p => p.replace(/\s+/g, '\\s+')).join('|')
   const pattern = new RegExp(
-    `(?:^|\\n)(?:\\*\\*(${namePattern})\\*\\*[:\\s]*|###\\s*(${namePattern})\\s*\\n|(${namePattern}):[ \\t]*)`,
+    `(?:^|\\n)(?:\\*\\*(${namePattern}):?\\*\\*[:\\s]*|###\\s*(${namePattern})\\s*\\n|(${namePattern}):[ \\t]*)`,
     'gi'
   )
 
