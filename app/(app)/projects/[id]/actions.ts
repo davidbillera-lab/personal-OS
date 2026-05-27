@@ -43,7 +43,8 @@ Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
   let verdict: 'keep' | 'kill' = 'keep'
   let reasoning = ''
   try {
-    const parsed = JSON.parse(result.text)
+    const cleaned = result.text.replace(/^```[a-z]*\n?/m, '').replace(/```$/m, '').trim()
+    const parsed = JSON.parse(cleaned)
     verdict = (['keep', 'kill'] as const).includes(parsed.verdict) ? parsed.verdict : 'keep'
     reasoning = parsed.reasoning ?? ''
   } catch { reasoning = result.text }
@@ -347,7 +348,8 @@ All tasks are done. Is this project ready to ship?`
   let verdict: 'keep' | 'kill' = 'keep'
   let reasoning = ''
   try {
-    const parsed = JSON.parse(result.text)
+    const cleaned = result.text.replace(/^```[a-z]*\n?/m, '').replace(/```$/m, '').trim()
+    const parsed = JSON.parse(cleaned)
     verdict = (['keep', 'kill'] as const).includes(parsed.verdict) ? parsed.verdict : 'keep'
     reasoning = parsed.reasoning ?? ''
   } catch { reasoning = result.text }
