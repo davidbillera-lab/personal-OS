@@ -98,6 +98,25 @@ export const MCP_TOOLS: McpTool[] = [
       required: ['query'],
     },
   },
+  {
+    name: 'mc_list_skills',
+    description: 'List all operator workflow skills stored in the vault. Returns title, description, and tags for each skill. Call this at session start to discover which skills apply to your task, then call mc_get_skill to fetch full content.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'mc_get_skill',
+    description: 'Fetch the full content of a skill by name. Use mc_list_skills first to discover available skill names.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'The skill title exactly as returned by mc_list_skills' },
+      },
+      required: ['name'],
+    },
+  },
 ]
 
 type ToolArgs = Record<string, string | undefined>
@@ -274,6 +293,45 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
         tags: r.tags,
       }))
     )
+  }
+
+  if (name === 'mc_list_skills') {
+    const { data, error } = await supabase
+      .from('vault_items')
+      .select('id, title, metadata, tags')
+      .eq('type', 'skill')
+      .eq('is_mcp_accessible', true)
+      .order('title', { ascending: true })
+
+    if (error) throw new Error(error.message)
+    return JSON.stringify(
+      (data ?? []).map(r => ({
+        name: r.title,
+        description: (r.metadata as Record<string, string> | null)?.description ?? '',
+        tags: r.tags ?? [],
+      }))
+    )
+  }
+
+  if (name === 'mc_get_skill') {
+    const { name: skillName } = args
+    if (!skillName) throw new Error('name is required')
+
+    const { data, error } = await supabase
+      .from('vault_items')
+      .select('title, content, metadata, tags')
+      .eq('type', 'skill')
+      .eq('is_mcp_accessible', true)
+      .ilike('title', skillName)
+      .single()
+
+    if (error || !data) throw new Error(`Skill not found: ${skillName}`)
+    return JSON.stringify({
+      name: data.title,
+      description: (data.metadata as Record<string, string> | null)?.description ?? '',
+      tags: data.tags ?? [],
+      content: data.content,
+    })
   }
 
   throw new Error(`Unknown tool: ${name}`)
