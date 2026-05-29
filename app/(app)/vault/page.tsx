@@ -261,6 +261,7 @@ export default function VaultPage() {
   const [items, setItems] = useState<VaultItemListItem[]>([])
   const [credentials, setCredentials] = useState<CredentialListItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState<VaultItemType | 'all'>('all')
   const [view, setView] = useState<'list' | 'graph'>('list')
@@ -270,10 +271,16 @@ export default function VaultPage() {
 
   async function load() {
     setLoading(true)
-    const [data, creds] = await Promise.all([listVaultItems(), listCredentials()])
-    setItems(data)
-    setCredentials(creds)
-    setLoading(false)
+    setLoadError(null)
+    try {
+      const [data, creds] = await Promise.all([listVaultItems(), listCredentials()])
+      setItems(data)
+      setCredentials(creds)
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Failed to load vault')
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => { load() }, [])
@@ -320,6 +327,11 @@ export default function VaultPage() {
 
       {loading ? (
         <p className="text-sm text-gray-500">Loading vault…</p>
+      ) : loadError ? (
+        <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3">
+          <p className="text-sm text-red-400">Failed to load vault: {loadError}</p>
+          <button onClick={load} className="mt-2 text-xs text-red-400 hover:text-red-300 underline">Retry</button>
+        </div>
       ) : (
         <>
           {view === 'list' ? (
