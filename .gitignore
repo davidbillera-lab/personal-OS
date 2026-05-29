@@ -51,4 +51,10 @@ nextinit/
 # Superpowers plugin workspace (local brainstorming artifacts)
 .superpowers/
 
+# Claude Code local settings (machine-specific permissions)
+.claude/
+
+# Supabase CLI temp files
+supabase/.temp/
+
 .vercel
