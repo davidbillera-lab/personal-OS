@@ -598,6 +598,124 @@ foreach ($line in $content) {
 
 Skip MC sync. Still push to GitHub. Note in your final message to the operator that MC sync was skipped.`,
   },
+  {
+    title: 'dynamic-workflow',
+    description:
+      'Use when the user types /dynamic-workflow, or asks to "run the dynamic workflow", "plan and build this", "complete this framework/project", or otherwise hands you a non-trivial multi-step build, feature, or refactor that deserves a real plan before code. Runs a disciplined five-phase loop — Explore → Design → Review → Write Plan → Approval Gate — then implements only after the user approves, and closes the session by pushing to GitHub (and, if configured, Mission Control). Do NOT use for trivial one-file edits, lookups, or quick fixes; those get surgical judgment, not ceremony.',
+    tags: ['workflow', 'planning', 'plan-mode', 'build-loop', 'process', 'handoff'],
+    content: `---
+name: dynamic-workflow
+description: Use when the user types /dynamic-workflow, or asks to "run the dynamic workflow", "plan and build this", "complete this framework/project", or otherwise hands you a non-trivial multi-step build, feature, or refactor that deserves a real plan before code. Runs a disciplined five-phase loop — Explore → Design → Review → Write Plan → Approval Gate — then implements only after the user approves, and closes the session by pushing to GitHub (and, if configured, Mission Control). Do NOT use for trivial one-file edits, lookups, or quick fixes; those get surgical judgment, not ceremony.
+---
+
+# Dynamic Workflow
+
+A repeatable build loop that turns a vague request into an approved plan, then working code, then a synced session — without skipping the thinking. This is the workflow used to scope and ship JSG portfolio builds. It is **rigid about the gates** (Explore before designing, approval before building, push before ending) and **flexible about the depth** (scale each phase to the task).
+
+Built for two readers: the operator (David) who wants operator-framing first, and a builder being trained (EsteCam) who can follow it solo.
+
+---
+
+## When to run it
+
+| Situation | Run dynamic-workflow? |
+|---|---|
+| New feature, component, or service | **Yes** |
+| Multi-file refactor or framework completion | **Yes** |
+| "Build / complete / scope this for me" | **Yes** |
+| Unknown bug across several files | **Yes** (Explore phase = root-cause trace) |
+| One-line fix, config tweak, rename, lookup | **No** — just do it (see \`[[skill-invocation-scope]]\`) |
+
+If unsure, run it. The phases collapse to a few sentences for small work; the gates still protect you.
+
+---
+
+## The Five Phases
+
+\`\`\`
+1. EXPLORE   →  2. DESIGN   →  3. REVIEW   →  4. WRITE PLAN   →  5. APPROVAL GATE
+   (map it)      (shape it)     (break it)     (record it)        (ExitPlanMode)
+                                                                       │
+                                                          approved ────┘
+                                                                       ▼
+                                                   IMPLEMENT  →  SESSION-END SYNC
+\`\`\`
+
+**Enter plan mode first** (\`EnterPlanMode\`). You are scoping, not building, until Phase 5 clears.
+
+### Phase 1 — Explore (map it)
+
+Understand the ground truth before proposing anything. Read the relevant files, the README/spec, recent commits, and any \`CLAUDE.md\` / \`decisions.md\`.
+
+- For broad sweeps (many files, naming conventions, "where does X live"), dispatch **read-only Explore agents in parallel** and ask for conclusions, not file dumps.
+- Match the cost to the job: cheap models for mapping and classification; escalate only when being wrong is expensive (see the project's \`model-routing.md\` and the global routing rules).
+- Output of this phase: a short, honest statement of what already exists, what's actually missing, and what the request really means. "Complete the framework" rarely means "fill in stubs" — find out what it means here.
+
+### Phase 2 — Design (shape it)
+
+Propose **2–3 approaches with trade-offs**, lead with your recommendation and why. Name what each approach gives up — no silent trade-offs.
+
+- Ask the operator **one decision at a time** for genuine forks (use \`AskUserQuestion\`). Don't ask what the code or sensible defaults already answer.
+- Break the work into small units with one clear purpose each. If you can't say what a unit does, how it's used, and what it depends on, the boundaries need work.
+- Keep operator-framing first: cost, risk, time-to-revenue, sellability before implementation detail.
+
+### Phase 3 — Review (break it)
+
+Stress-test the design before it becomes a plan. Look for:
+
+- **Placeholders / TBDs** — resolve them now, not in code.
+- **Internal contradictions** — does the architecture match the feature list?
+- **Scope creep** — is this one plan, or does it need decomposing into sub-projects?
+- **Ambiguity** — any requirement readable two ways? Pick one, make it explicit.
+- **Kill check** — does this still pass functionality / efficiency / scalability / time-to-revenue? If it's failing, say so plainly (global rule #8). Don't be polite about waste.
+
+### Phase 4 — Write the Plan (record it)
+
+Write the validated plan to a plan file (the harness plan file, or \`docs/specs/YYYY-MM-DD-<topic>.md\` if the project keeps specs). A good plan states:
+
+- **Context** — why this work, what exists, what the request actually means, decisions already locked.
+- **Steps** — grouped by part, each naming the exact files touched (new vs. modified vs. verified-unchanged).
+- **Verification** — concrete checks that prove each part works.
+
+Log any architecture- or scope-changing decision to \`decisions.md\` with date and reasoning (global rule #3).
+
+### Phase 5 — Approval Gate (\`ExitPlanMode\`)
+
+Call **\`ExitPlanMode\`** with a tight summary and wait. **Do not write a single line of implementation code until the user approves.** Approval of one phase is not approval of the next. If they revise, loop back to the phase that changed.
+
+---
+
+## After Approval — Implement
+
+- Build in the plan's order. Match existing style, comment density, and idioms.
+- Minimum code that solves the problem; nothing speculative.
+- Customer-facing copy gets a human voice pass — no AI-template feel (global rule #6).
+- **Cost-log every API call** — tokens + model to the project's \`model_costs\` table (global rule #7). Wrap logging best-effort so it never blocks the real work.
+- Run the plan's verification steps and report results faithfully: if a test fails, say so with the output; if a step was skipped, say that.
+
+---
+
+## Session-End Sync (never leave without it)
+
+Every run ends by syncing state (global rules #9, and \`[[mission-control]]\`):
+
+1. **GitHub first — source of truth.** \`git add -A\`; commit with a clear message; push the **current branch**. Never push directly to \`main\` on protected projects; branch and open a PR. If there's no remote or push fails, commit locally and tell the operator — never crash the session, never end without pushing.
+2. **Mission Control — gated.** Only if \`MC_SUPABASE_URL\` is set (and \`mission_control_id\` is in the project \`CLAUDE.md\`): update project \`status\` + \`next_action\` and log the agent handoff, using \`MC_SUPABASE_SERVICE_KEY\`. On Windows use PowerShell \`Invoke-RestMethod\`, not curl. If MC is unreachable, skip it and say so. Check project \`.env\` files for the creds before asking — never ask for a credential already in a file.
+3. **Supabase — by hand.** No auto-push to the database. Schema lives in \`supabase/migrations/*.sql\` and is applied deliberately in the SQL editor or via \`supabase db push\`.
+
+---
+
+## Quick Reference (the loop in one screen)
+
+1. \`EnterPlanMode\`
+2. **Explore** — read/agents map reality; state what's really missing.
+3. **Design** — 2–3 approaches, recommend one, decide forks one at a time.
+4. **Review** — placeholders, contradictions, scope, ambiguity, kill check.
+5. **Write plan** — context + per-part steps + verification; log decisions.
+6. \`ExitPlanMode\` — **wait for approval. No code before this clears.**
+7. **Implement** — in order, minimal, cost-logged, human-voiced copy, verify honestly.
+8. **Sync** — GitHub (always) → MC (gated) → Supabase (by hand). Never end without pushing.`,
+  },
 ]
 
 export async function POST(req: NextRequest) {
