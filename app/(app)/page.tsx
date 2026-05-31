@@ -57,6 +57,7 @@ const STAGE_BADGE: Record<ProjectStage, string> = {
 }
 
 type PipelineCounts = { dumps: number; specReady: number; inFlight: number }
+type NextTask = { id: string; title: string; project_id: string | null }
 
 function PipelineCard({ project, counts }: { project: Project; counts: PipelineCounts }) {
   const stage = STAGE_BADGE[project.stage]
@@ -126,6 +127,7 @@ export default async function CommandCenter() {
     { count: specReadyCount },
     { data: taskCountRows },
     { data: dumpCountRows },
+    { data: nextTasks },
   ] = await Promise.all([
     supabase
       .from('projects')
@@ -156,6 +158,14 @@ export default async function CommandCenter() {
       .select('project_id, status')
       .not('status', 'eq', 'archived')
       .not('project_id', 'is', null),
+    // Top-3 spec-ready tasks for What's Next panel
+    supabase
+      .from('tasks')
+      .select('id, title, project_id')
+      .not('generated_spec', 'is', null)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+      .limit(3),
   ])
 
   const all     = (projects ?? []) as Project[]
@@ -288,27 +298,35 @@ export default async function CommandCenter() {
           )}
         </div>
 
-        {/* Vault Quick View */}
-        <div className="rounded-xl border border-purple-500/20 bg-purple-900/10 p-4">
+        {/* What's Next */}
+        <div className="rounded-xl border border-yellow-500/20 bg-yellow-900/10 p-4">
           <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-white">Credentials Vault</h3>
-            <Link href="/vault" className="text-xs text-purple-400 hover:text-purple-300">Manage →</Link>
+            <h3 className="text-sm font-semibold text-white">What&apos;s Next</h3>
+            <Link href="/inbox" className="text-xs text-yellow-400 hover:text-yellow-300">All tasks →</Link>
           </div>
-          <p className="text-sm text-gray-400">
-            {(credCount ?? 0) === 0
-              ? 'No credentials stored yet.'
-              : `${credCount} key${(credCount ?? 0) !== 1 ? 's' : ''} encrypted at rest.`}
-          </p>
-          <p className="mt-1 text-xs text-gray-600">
-            Agents access keys via <code className="text-purple-400">mc_get_credential</code> over MCP.
-            Values are never shown in list view.
-          </p>
-          <Link
-            href="/vault"
-            className="mt-3 inline-block rounded-lg bg-purple-600/20 px-3 py-1.5 text-xs text-purple-300 hover:bg-purple-600/30"
-          >
-            + Add Credential
-          </Link>
+          {(nextTasks ?? []).length === 0 ? (
+            <p className="text-xs text-gray-600">No spec-ready tasks — drop an idea in Inbox to generate one.</p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {(nextTasks as NextTask[]).map(t => {
+                const proj = all.find(p => p.id === t.project_id)
+                return (
+                  <Link
+                    key={t.id}
+                    href={t.project_id ? `/projects/${t.project_id}` : '#'}
+                    className="flex items-start gap-2 rounded-lg bg-white/5 px-3 py-2 hover:bg-white/[0.08] transition-colors"
+                  >
+                    {proj && (
+                      <span className="shrink-0 rounded bg-yellow-900/50 px-1.5 py-0.5 text-[10px] text-yellow-300 leading-tight mt-0.5">
+                        {proj.name}
+                      </span>
+                    )}
+                    <span className="text-xs text-gray-300 leading-snug">{t.title}</span>
+                  </Link>
+                )
+              })}
+            </div>
+          )}
         </div>
 
       </div>
