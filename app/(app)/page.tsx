@@ -69,13 +69,20 @@ function PipelineCard({ project, counts }: { project: Project; counts: PipelineC
     >
       {/* Header */}
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
+        <div className="min-w-0 flex items-center gap-1.5">
           <p className="truncate text-sm font-semibold text-white leading-tight">
             {project.name}
             {project.protected && (
               <span className="ml-1.5 text-[10px] font-medium text-amber-400 tracking-wide">PROTECTED</span>
             )}
           </p>
+          {project.kill_criteria_status && project.kill_criteria_status !== 'exempt' && (
+            <span className={`shrink-0 h-2 w-2 rounded-full ${
+              project.kill_criteria_status === 'fail' ? 'bg-red-500 shadow-[0_0_5px_theme(colors.red.500)]' :
+              project.kill_criteria_status === 'warning' ? 'bg-yellow-500' :
+              'bg-green-500'
+            }`} />
+          )}
         </div>
         <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${stage}`}>
           {project.stage}
@@ -175,6 +182,7 @@ export default async function CommandCenter() {
   const tier1 = all.filter(p => p.tier === 1)
   const tier2 = all.filter(p => p.tier === 2)
   const tier3 = all.filter(p => p.tier === 3)
+  const atRisk = all.filter(p => p.kill_criteria_status === 'fail').length
 
   // Build per-project pipeline counts
   const taskRows = (taskCountRows ?? []) as { project_id: string | null; status: string; generated_spec: string | null }[]
@@ -218,6 +226,15 @@ export default async function CommandCenter() {
             {specReadyCount ?? 0} spec-ready task{(specReadyCount ?? 0) !== 1 ? 's' : ''}
           </span>
         </div>
+        {atRisk > 0 && (
+          <>
+            <span className="text-white/10">|</span>
+            <div className="flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-red-500 shadow-[0_0_6px_theme(colors.red.500)]" />
+              <span className="text-red-400">{atRisk} project{atRisk !== 1 ? 's' : ''} at risk</span>
+            </div>
+          </>
+        )}
         <span className="text-white/10">|</span>
         <div className="flex items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-purple-400" />

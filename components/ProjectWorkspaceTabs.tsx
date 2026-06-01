@@ -27,6 +27,7 @@ import type {
   ProjectHealth,
   HealthStatus,
   CodexQcStatus,
+  KillCriteriaCheck,
 } from '@/lib/types'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -63,7 +64,7 @@ const QC_STATUS_COLOR: Record<CodexQcStatus, string> = {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type ActiveStage = 'dumps' | 'spec_review' | 'in_flight' | 'done' | 'mission_brief' | 'handoff_log' | 'knowledge_graph'
+type ActiveStage = 'dumps' | 'spec_review' | 'in_flight' | 'done' | 'mission_brief' | 'handoff_log' | 'knowledge_graph' | 'kill_criteria'
 
 interface Props {
   project: Project
@@ -75,6 +76,7 @@ interface Props {
   decisionsMd: string
   handoffs: AgentHandoff[]
   health: ProjectHealth | null
+  killCriteriaChecks: KillCriteriaCheck[]
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -890,11 +892,16 @@ export function ProjectWorkspaceTabs({
   decisionsMd,
   handoffs,
   health,
+  killCriteriaChecks,
 }: Props) {
   const router = useRouter()
   const [activeStage, setActiveStage] = useState<ActiveStage>('dumps')
   const [isPending, startTransition] = useTransition()
   const [suggestionsText, setSuggestionsText] = useState(project.lead_suggestions ?? '')
+  const [killScores, setKillScores] = useState({ functionality: 3, efficiency: 3, scalability: 3, time_to_revenue: 3 })
+  const [killNotes, setKillNotes] = useState('')
+  const [killSubmitting, setKillSubmitting] = useState(false)
+  const [killError, setKillError] = useState<string | null>(null)
 
   const focusedContext = useMemo(() => {
     if (activeStage === 'dumps') {
@@ -916,8 +923,13 @@ export function ProjectWorkspaceTabs({
     if (activeStage === 'mission_brief') return 'Operator is reviewing the Mission Brief (project overview, stage, status, blockers).'
     if (activeStage === 'handoff_log') return 'Operator is reviewing the agent handoff log.'
     if (activeStage === 'knowledge_graph') return 'Operator is viewing the project knowledge graph.'
+    if (activeStage === 'kill_criteria') {
+      const last = killCriteriaChecks[0]
+      if (!last) return 'Operator is on the Kill Criteria tab. No checks have been run yet.'
+      return `Operator is reviewing kill criteria. Last check verdict: ${last.verdict}. Scores — Functionality: ${last.functionality_score}, Efficiency: ${last.efficiency_score}, Scalability: ${last.scalability_score}, Time to Revenue: ${last.time_to_revenue_score}.`
+    }
     return undefined
-  }, [activeStage, brainDumps, tasks])
+  }, [activeStage, brainDumps, tasks, killCriteriaChecks])
   const [suggestError, setSuggestError] = useState<string | null>(null)
 
   function handleRefreshSuggestions() {
@@ -949,6 +961,7 @@ export function ProjectWorkspaceTabs({
     { key: 'mission_brief',   label: 'Mission Brief' },
     { key: 'handoff_log',     label: 'Handoff Log' },
     { key: 'knowledge_graph', label: 'Knowledge Graph' },
+    { key: 'kill_criteria',   label: 'Kill Check' },
   ]
 
   return (
@@ -1275,6 +1288,137 @@ export function ProjectWorkspaceTabs({
               />
             </div>
           )}
+
+          {/* KILL CHECK */}
+          {activeStage === 'kill_criteria' && (() => {
+            const scoreLabels: Record<number, string> = { 1: '1 — Critical', 2: '2 — Failing', 3: '3 — Warning', 4: '4 — Passing', 5: '5 — Strong' }
+            const liveMin = Math.min(killScores.functionality, killScores.efficiency, killScores.scalability, killScores.time_to_revenue)
+            const liveVerdict = liveMin <= 2 ? 'fail' : liveMin <= 3 ? 'warning' : 'pass'
+            const verdictStyle = liveVerdict === 'fail' ? 'bg-red-900/50 text-red-400' : liveVerdict === 'warning' ? 'bg-yellow-900/50 text-yellow-400' : 'bg-green-900/50 text-green-400'
+            const historyVerdictStyle = (v: string) => v === 'fail' ? 'bg-red-900/50 text-red-400' : v === 'warning' ? 'bg-yellow-900/50 text-yellow-400' : 'bg-green-900/50 text-green-400'
+
+            async function handleKillSubmit(e: React.FormEvent) {
+              e.preventDefault()
+              setKillSubmitting(true)
+              setKillError(null)
+              try {
+                const res = await fetch('/api/kill-criteria', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    project_id: project.id,
+                    functionality_score: killScores.functionality,
+                    efficiency_score: killScores.efficiency,
+                    scalability_score: killScores.scalability,
+                    time_to_revenue_score: killScores.time_to_revenue,
+                    notes: killNotes.trim() || undefined,
+                  }),
+                })
+                if (!res.ok) {
+                  const d = await res.json()
+                  setKillError(d.error ?? 'Submit failed')
+                } else {
+                  setKillNotes('')
+                  router.refresh()
+                }
+              } catch (err) {
+                setKillError(String(err))
+              } finally {
+                setKillSubmitting(false)
+              }
+            }
+
+            const scoreFields: { key: keyof typeof killScores; label: string }[] = [
+              { key: 'functionality',    label: 'Functionality' },
+              { key: 'efficiency',       label: 'Efficiency' },
+              { key: 'scalability',      label: 'Scalability' },
+              { key: 'time_to_revenue',  label: 'Time to Revenue' },
+            ]
+
+            return (
+              <div className="flex flex-col gap-6">
+                <h2 className="text-sm font-semibold text-white">Kill Check</h2>
+
+                {/* Form */}
+                <form onSubmit={handleKillSubmit} className="flex flex-col gap-4 rounded-lg border border-white/10 bg-white/5 p-4">
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    {scoreFields.map(({ key, label }) => (
+                      <div key={key} className="flex flex-col gap-1">
+                        <label className="text-[10px] text-gray-500">{label}</label>
+                        <select
+                          value={killScores[key]}
+                          onChange={e => setKillScores(prev => ({ ...prev, [key]: Number(e.target.value) }))}
+                          className="rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-white"
+                        >
+                          {[1, 2, 3, 4, 5].map(n => (
+                            <option key={n} value={n}>{scoreLabels[n]}</option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+
+                  <textarea
+                    value={killNotes}
+                    onChange={e => setKillNotes(e.target.value)}
+                    placeholder="Notes (optional)"
+                    rows={2}
+                    className="rounded border border-white/10 bg-black/40 px-3 py-2 text-xs text-white placeholder-gray-600 resize-none"
+                  />
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-gray-500">Verdict preview:</span>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${verdictStyle}`}>{liveVerdict}</span>
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={killSubmitting}
+                      className="rounded border border-white/10 px-4 py-1.5 text-xs font-medium text-gray-300 hover:text-white hover:border-white/30 disabled:opacity-50"
+                    >
+                      {killSubmitting ? 'Saving…' : 'Run Check'}
+                    </button>
+                  </div>
+
+                  {killError && (
+                    <p className="text-[11px] text-red-400 bg-red-900/20 rounded px-2 py-1">{killError}</p>
+                  )}
+                </form>
+
+                {/* History */}
+                <div className="flex flex-col gap-2">
+                  <h3 className="text-xs font-semibold text-gray-400">History</h3>
+                  {killCriteriaChecks.length === 0 ? (
+                    <p className="text-sm text-gray-500 py-8 text-center">No checks yet — run the first check above.</p>
+                  ) : (
+                    killCriteriaChecks.map(check => (
+                      <div key={check.id} className="rounded-lg border border-white/10 bg-white/5 p-3 flex flex-col gap-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] text-gray-600">{new Date(check.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${historyVerdictStyle(check.verdict ?? 'pass')}`}>{check.verdict ?? '—'}</span>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {[
+                            { label: 'Func', value: check.functionality_score },
+                            { label: 'Eff',  value: check.efficiency_score },
+                            { label: 'Scale', value: check.scalability_score },
+                            { label: 'TTR',   value: check.time_to_revenue_score },
+                          ].map(({ label, value }) => (
+                            <span key={label} className="rounded bg-white/10 px-2 py-0.5 text-[10px] text-gray-300">
+                              {label} {value}
+                            </span>
+                          ))}
+                        </div>
+                        {check.notes && (
+                          <p className="text-[11px] text-gray-400 leading-relaxed line-clamp-2">{check.notes}</p>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )
+          })()}
         </div>
 
         {/* ── Right sidebar: Build Partner 288px ── */}

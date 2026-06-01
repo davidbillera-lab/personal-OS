@@ -2,7 +2,7 @@ import { notFound } from 'next/navigation'
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { ProjectWorkspaceTabs } from '@/components/ProjectWorkspaceTabs'
 import { getProjectHealth } from '@/lib/health'
-import type { AgentHandoff } from '@/lib/types'
+import type { AgentHandoff, KillCriteriaCheck } from '@/lib/types'
 
 interface Props {
   params: Promise<{ id: string }>
@@ -19,6 +19,7 @@ export default async function ProjectWorkspacePage({ params }: Props) {
     { data: chats },
     { data: handoffs },
     { data: doneTasks },
+    { data: killChecks },
   ] = await Promise.all([
     supabase.from('projects').select('*').eq('id', id).single(),
     supabase.from('brain_dumps').select('*').eq('project_id', id).order('created_at', { ascending: false }),
@@ -26,6 +27,7 @@ export default async function ProjectWorkspacePage({ params }: Props) {
     supabase.from('project_chats').select('*').eq('project_id', id).order('created_at', { ascending: true }).limit(50),
     supabase.from('agent_handoffs').select('*').eq('project_id', id).order('started_at', { ascending: false }).limit(20),
     supabase.from('tasks').select('*').eq('project_id', id).eq('status', 'done').order('updated_at', { ascending: false }).limit(20),
+    supabase.from('kill_criteria_checks').select('*').eq('project_id', id).order('created_at', { ascending: false }).limit(10),
   ])
 
   if (!project) notFound()
@@ -62,6 +64,7 @@ export default async function ProjectWorkspacePage({ params }: Props) {
       decisionsMd={decisionsMd}
       handoffs={(handoffs ?? []) as AgentHandoff[]}
       health={health}
+      killCriteriaChecks={(killChecks ?? []) as KillCriteriaCheck[]}
     />
   )
 }
