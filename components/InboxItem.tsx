@@ -3,16 +3,16 @@
 import { useState, useTransition } from 'react'
 import Link from 'next/link'
 import { Card, CardContent } from '@/components/ui/card'
-import { archiveDump, routeDump, promoteDump, promoteDumpAnyway, reclassifyDump } from '@/app/(app)/inbox/actions'
+import { archiveDump, routeDump, promoteDump, promoteDumpAnyway, reclassifyDump, generateSpecAction } from '@/app/(app)/inbox/actions'
 import type { BrainDump, BrainDumpType, Project } from '@/lib/types'
 
 const typeColors: Record<BrainDumpType, string> = {
-  idea:           'bg-blue-100 text-blue-700',
-  task:           'bg-yellow-100 text-yellow-700',
-  bug:            'bg-red-100 text-red-700',
-  decision:       'bg-purple-100 text-purple-700',
-  kill_candidate: 'bg-orange-100 text-orange-700',
-  unclassified:   'bg-slate-100 text-slate-600',
+  idea:           'bg-blue-900/50 text-blue-400',
+  task:           'bg-yellow-900/50 text-yellow-400',
+  bug:            'bg-red-900/50 text-red-400',
+  decision:       'bg-purple-900/50 text-purple-400',
+  kill_candidate: 'bg-orange-900/50 text-orange-400',
+  unclassified:   'bg-slate-800 text-slate-400',
 }
 
 const ALL_TYPES: BrainDumpType[] = ['idea', 'task', 'bug', 'decision', 'kill_candidate', 'unclassified']
@@ -29,14 +29,28 @@ function timeSince(iso: string): string {
 
 type DumpWithProject = BrainDump & { project_name?: string | null }
 
+type TaskRef = {
+  id: string
+  brain_dump_id: string | null
+  generated_spec: string | null
+  recommended_tool: string | null
+  recommended_model: string | null
+  complexity_tier: number | null
+  status: string
+}
+
 interface Props {
   dump: DumpWithProject
   projects: Pick<Project, 'id' | 'name'>[]
+  task?: TaskRef
 }
 
-export function InboxItem({ dump, projects }: Props) {
+export function InboxItem({ dump, projects, task }: Props) {
   const [isPending, startTransition] = useTransition()
+  const [specPending, startSpecTransition] = useTransition()
   const [warn, setWarn] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const [specOpen, setSpecOpen] = useState(false)
 
   const displayText = dump.ai_summary ?? dump.raw_text
   const confidence = dump.classification_confidence != null
@@ -170,6 +184,63 @@ export function InboxItem({ dump, projects }: Props) {
                 Dismiss
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Generate Spec button — shown when task exists but spec not yet generated */}
+        {task && !task.generated_spec && (
+          <button
+            disabled={specPending}
+            onClick={() => {
+              startSpecTransition(async () => {
+                await generateSpecAction(task.id, dump.id, dump.raw_text, dump.project_id)
+              })
+            }}
+            className="self-start rounded bg-violet-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-violet-700 disabled:opacity-50"
+          >
+            {specPending ? 'Generating…' : 'Generate Spec'}
+          </button>
+        )}
+
+        {/* Spec panel — shown when spec has been generated */}
+        {task?.generated_spec && (
+          <div className="rounded-lg border border-violet-500/30 bg-violet-950/30 p-3 flex flex-col gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[10px] font-semibold text-violet-400 uppercase tracking-wide">Spec Ready</span>
+              {task.recommended_tool && (
+                <span className="rounded bg-violet-900/50 px-1.5 py-0.5 text-[10px] text-violet-300">
+                  {task.recommended_tool.replace('_', ' ')}
+                </span>
+              )}
+              {task.recommended_model && (
+                <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-gray-400">
+                  {task.recommended_model}
+                </span>
+              )}
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(task.generated_spec ?? '')
+                    setCopied(true)
+                    setTimeout(() => setCopied(false), 2000)
+                  }}
+                  className="text-[10px] text-violet-400 hover:text-violet-300"
+                >
+                  {copied ? 'Copied!' : 'Copy'}
+                </button>
+                <button
+                  onClick={() => setSpecOpen(o => !o)}
+                  className="text-[10px] text-gray-500 hover:text-gray-300"
+                >
+                  {specOpen ? 'Hide' : 'Show'}
+                </button>
+              </div>
+            </div>
+            {specOpen && (
+              <pre className="max-h-48 overflow-y-auto rounded bg-black/40 p-2 text-[10px] text-gray-300 whitespace-pre-wrap leading-relaxed">
+                {task.generated_spec}
+              </pre>
+            )}
           </div>
         )}
       </CardContent>

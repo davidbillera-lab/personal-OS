@@ -115,3 +115,39 @@ export async function reclassifyDump(id: string, newType: BrainDumpType): Promis
     .eq('id', id)
   revalidatePath('/inbox')
 }
+
+export async function generateSpecAction(
+  taskId: string,
+  dumpId: string,
+  rawText: string,
+  projectId: string | null
+): Promise<{ ok: boolean; error?: string }> {
+  const supabase = await createServerSupabaseClient()
+  try {
+    const result = await routeTask({
+      prompt: `Generate an agent-ready implementation spec for this task:\n\n${rawText}\n\nInclude: objective, inputs/outputs, recommended approach, files to touch, verification steps.`,
+      complexity_tier: 2,
+      purpose: 'spec_generation',
+      project_id: projectId ?? undefined,
+      task_id: taskId,
+      supabase,
+    })
+    await supabase
+      .from('tasks')
+      .update({
+        generated_spec: result.text,
+        recommended_tool: 'claude_code',
+        recommended_model: result.model,
+        complexity_tier: 2,
+      })
+      .eq('id', taskId)
+    await supabase
+      .from('brain_dumps')
+      .update({ status: 'spec_generated' })
+      .eq('id', dumpId)
+    revalidatePath('/inbox')
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+}
