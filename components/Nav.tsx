@@ -11,6 +11,9 @@ const navLinks = [
   { href: '/vault', label: 'Vault' },
   { href: '/guide', label: 'Guide' },
   { href: '/runbook', label: 'Runbook' },
+  { href: '/finance', label: 'Finance' },
+  { href: '/creative', label: 'Creative' },
+  { href: '/crm', label: 'CRM' },
 ]
 
 export default function Nav() {
@@ -38,16 +41,6 @@ export default function Nav() {
               >
                 {label}
               </Link>
-            ))}
-            <span className="mx-1 h-4 w-px bg-white/10" />
-            {(['Finance', 'Creative', 'CRM'] as const).map(dept => (
-              <span
-                key={dept}
-                className="flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium text-gray-600 cursor-default select-none"
-              >
-                {dept}
-                <span className="text-[9px] bg-white/5 px-1 py-0.5 rounded text-gray-600">soon</span>
-              </span>
             ))}
           </nav>
         </div>
