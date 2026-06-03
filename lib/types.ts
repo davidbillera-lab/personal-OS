@@ -16,7 +16,10 @@ export type AbVerdict = 'keep' | 'kill' | 'pending'
 export type CodexQcStatus = 'pending' | 'passed' | 'issues_found' | 'loop_detected'
 export type TaskTool = 'claude_code' | 'codex' | 'cursor'
 
-export type VaultItemType = 'credential' | 'skill' | 'agent' | 'personal' | 'knowledge'
+export type VaultItemType =
+  | 'credential' | 'skill' | 'agent' | 'personal' | 'knowledge'
+  | 'git_push' | 'file_snapshot' | 'brain_dump_mirror' | 'ab_conversation'
+  | 'build_spec' | 'mcp_event' | 'agent_session' | 'decision_log'
 
 export interface VaultItem {
   id: string
@@ -31,6 +34,7 @@ export interface VaultItem {
   is_mcp_accessible: boolean
   metadata: Record<string, unknown>
   embedding: number[] | null
+  capture_source: string
   created_at: string
   updated_at: string
 }

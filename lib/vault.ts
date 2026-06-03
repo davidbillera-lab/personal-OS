@@ -1,7 +1,7 @@
 import OpenAI from 'openai'
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { encrypt } from '@/lib/crypto'
-import type { VaultItem } from '@/lib/types'
+import type { VaultItem, VaultItemType } from '@/lib/types'
 
 let _openai: OpenAI | null = null
 function openaiClient() {
@@ -31,6 +31,62 @@ export async function queryVaultContext(query: string, limit = 8): Promise<Omit<
 
   if (error) throw new Error(error.message)
   return (data ?? []) as Omit<VaultItem, 'embedding'>[]
+}
+
+export async function captureToVault(params: {
+  type: VaultItemType
+  title: string
+  content: string
+  project_id?: string | null
+  source_table?: string
+  source_id?: string
+  capture_source: string
+  tags?: string[]
+  metadata?: Record<string, unknown>
+  encrypted?: boolean
+}): Promise<void> {
+  try {
+    const supabase = await createServerSupabaseClient()
+    const {
+      type, title, content, project_id = null,
+      source_table, source_id, capture_source,
+      tags = [], metadata = {}, encrypted = false,
+    } = params
+
+    const storedContent = encrypted ? encrypt(content) : content
+
+    const { data, error } = await supabase
+      .from('vault_items')
+      .insert({
+        type,
+        title,
+        content: storedContent,
+        encrypted,
+        tags,
+        project_id,
+        source_table: source_table ?? null,
+        source_id: source_id ?? null,
+        is_mcp_accessible: false,
+        metadata,
+        capture_source,
+      })
+      .select('id')
+      .single()
+
+    if (error || !data) return
+
+    try {
+      const embedding = await embedVaultItem(title, encrypted ? '' : content, encrypted)
+      await supabase
+        .from('vault_items')
+        .update({ embedding })
+        .eq('id', data.id)
+    } catch {
+      // embedding failure is non-fatal
+    }
+  } catch {
+    // capture is always best-effort — never block the caller
+  }
 }
 
 // One-time seed: copy existing credentials table rows into vault_items
