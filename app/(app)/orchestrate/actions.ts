@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache'
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
+import { captureToVault } from '@/lib/vault'
 
 export async function generateSpec(taskId: string): Promise<{ error?: string }> {
   const supabase = await createServerSupabaseClient()
@@ -120,6 +121,18 @@ SCOPE and OFF-LIMITS are required sections. Be explicit — list specific files,
     })
     .eq('id', taskId)
 
+  await captureToVault({
+    type: 'build_spec',
+    title: `Spec: ${task.title.slice(0, 80)}`,
+    content: parsed.spec,
+    project_id: task.project_id ?? null,
+    source_table: 'tasks',
+    source_id: taskId,
+    capture_source: 'spec_gen',
+    tags: ['spec', usedModel],
+    metadata: { model: usedModel, recommended_tool: parsed.recommended_tool, complexity_tier: parsed.complexity_tier },
+  })
+
   revalidatePath('/orchestrate')
   return {}
 }
@@ -159,12 +172,28 @@ export async function claimTask(taskId: string, agentName: string): Promise<void
       .eq('id', task.project_id)
   }
 
-  await supabase.from('agent_handoffs').insert({
-    project_id: task?.project_id ?? undefined,
-    task_id: taskId,
-    agent_name: agentName,
-    task_description: task?.title ?? null,
-    status: 'in_progress',
+  const { data: handoff } = await supabase
+    .from('agent_handoffs')
+    .insert({
+      project_id: task?.project_id ?? undefined,
+      task_id: taskId,
+      agent_name: agentName,
+      task_description: task?.title ?? null,
+      status: 'in_progress',
+    })
+    .select('id')
+    .single()
+
+  await captureToVault({
+    type: 'agent_session',
+    title: `${agentName}: ${(task?.title ?? '').slice(0, 80)}`,
+    content: `Task: ${task?.title ?? ''}\n\nStatus: in_progress`,
+    project_id: task?.project_id ?? null,
+    source_table: 'agent_handoffs',
+    source_id: handoff?.id,
+    capture_source: 'agent_handoff',
+    tags: ['agent', agentName, 'in_progress'],
+    metadata: { agent_name: agentName, task_id: taskId },
   })
 
   revalidatePath('/orchestrate')

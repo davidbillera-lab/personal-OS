@@ -6,11 +6,19 @@ import type { VaultItemType } from '@/lib/types'
 import type { VaultItemListItem } from '@/app/(app)/vault/actions'
 
 const TYPE_BADGE: Record<VaultItemType, string> = {
-  credential: 'bg-amber-500/15 text-amber-300 ring-amber-500/30',
-  skill:      'bg-blue-500/15 text-blue-300 ring-blue-500/30',
-  agent:      'bg-violet-500/15 text-violet-300 ring-violet-500/30',
-  personal:   'bg-rose-500/15 text-rose-300 ring-rose-500/30',
-  knowledge:  'bg-green-500/15 text-green-300 ring-green-500/30',
+  credential:       'bg-amber-500/15 text-amber-300 ring-amber-500/30',
+  skill:            'bg-blue-500/15 text-blue-300 ring-blue-500/30',
+  agent:            'bg-violet-500/15 text-violet-300 ring-violet-500/30',
+  personal:         'bg-rose-500/15 text-rose-300 ring-rose-500/30',
+  knowledge:        'bg-green-500/15 text-green-300 ring-green-500/30',
+  git_push:         'bg-slate-500/15 text-slate-300 ring-slate-500/30',
+  file_snapshot:    'bg-slate-500/15 text-slate-300 ring-slate-500/30',
+  brain_dump_mirror:'bg-cyan-500/15 text-cyan-300 ring-cyan-500/30',
+  ab_conversation:  'bg-purple-500/15 text-purple-300 ring-purple-500/30',
+  build_spec:       'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30',
+  agent_session:    'bg-orange-500/15 text-orange-300 ring-orange-500/30',
+  decision_log:     'bg-lime-500/15 text-lime-300 ring-lime-500/30',
+  mcp_event:        'bg-slate-500/15 text-slate-300 ring-slate-500/30',
 }
 
 interface Props {

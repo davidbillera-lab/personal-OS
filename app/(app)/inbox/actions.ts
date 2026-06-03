@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache'
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
 import type { BrainDumpType, IdeaValidationResult } from '@/lib/types'
+import { captureToVault } from '@/lib/vault'
 
 async function validateIdea(rawText: string, summary: string | null): Promise<IdeaValidationResult> {
   const supabase = await createServerSupabaseClient()
@@ -141,6 +142,17 @@ export async function generateSpecAction(
         complexity_tier: 2,
       })
       .eq('id', taskId)
+    await captureToVault({
+      type: 'build_spec',
+      title: `Spec: ${rawText.slice(0, 80)}`,
+      content: result.text,
+      project_id: projectId ?? null,
+      source_table: 'tasks',
+      source_id: taskId,
+      capture_source: 'spec_gen',
+      tags: ['spec', result.model],
+      metadata: { model: result.model, complexity_tier: 2 },
+    })
     await supabase
       .from('brain_dumps')
       .update({ status: 'spec_generated' })

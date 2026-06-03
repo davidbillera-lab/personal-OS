@@ -3,6 +3,7 @@
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
 import { classifyBrainDump } from '@/lib/classify'
+import { captureToVault } from '@/lib/vault'
 import { revalidatePath } from 'next/cache'
 
 export async function runAdvisoryBoard(dumpId: string, projectId: string) {
@@ -90,6 +91,17 @@ Be specific. No fluff. The engineer reading this has zero context about the proj
     generated_spec: specContent, spec_path: specPath, status: 'pending',
   }).select().single()
   if (error) return { error: error.message }
+  await captureToVault({
+    type: 'build_spec',
+    title: `Spec: ${dump.raw_text.slice(0, 80)}`,
+    content: specContent,
+    project_id: projectId,
+    source_table: 'tasks',
+    source_id: task.id,
+    capture_source: 'spec_gen',
+    tags: ['spec'],
+    metadata: { spec_path: specPath },
+  })
   await supabase.from('brain_dumps').update({ status: 'spec_generated' }).eq('id', dumpId)
   revalidatePath(`/projects/${projectId}`)
   return { task, specContent, specPath }
@@ -106,6 +118,16 @@ export async function approveSpec(taskId: string, projectId: string, localPath?:
     task_description: task.title, spec_path: task.spec_path, status: 'in_progress',
   })
   if (handoffError) return { error: handoffError.message }
+  await captureToVault({
+    type: 'agent_session',
+    title: `Claude Code: ${task.title.slice(0, 80)}`,
+    content: `Task: ${task.title}\n\nSpec path: ${task.spec_path ?? '(none)'}`,
+    project_id: projectId,
+    source_table: 'agent_handoffs',
+    capture_source: 'agent_handoff',
+    tags: ['agent', 'Claude Code', 'in_progress'],
+    metadata: { task_id: taskId, spec_path: task.spec_path },
+  })
   revalidatePath(`/projects/${projectId}`)
   const vscodePath = localPath ? `vscode://file/${localPath.replace(/\\/g, '/')}` : null
   return { ok: true, vscodePath }
@@ -418,7 +440,16 @@ export async function createProjectBrainDump(
   const dumpId = data.id
   await classifyBrainDump(dumpId, rawText, supabase).catch(console.error)
   await runAdvisoryBoard(dumpId, projectId).catch(console.error)
-
+  await captureToVault({
+    type: 'brain_dump_mirror',
+    title: rawText.slice(0, 120),
+    content: rawText,
+    project_id: projectId,
+    source_table: 'brain_dumps',
+    source_id: dumpId,
+    capture_source: 'brain_dump',
+    tags: ['inbox'],
+  })
   revalidatePath(`/projects/${projectId}`)
   return { id: dumpId }
 }

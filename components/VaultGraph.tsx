@@ -9,11 +9,19 @@ import type { VaultItemListItem } from '@/app/(app)/vault/actions'
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), { ssr: false })
 
 const TYPE_COLOR: Record<VaultItemType, string> = {
-  credential: '#f59e0b',
-  skill:      '#3b82f6',
-  agent:      '#8b5cf6',
-  personal:   '#f43f5e',
-  knowledge:  '#22c55e',
+  credential:       '#f59e0b',
+  skill:            '#3b82f6',
+  agent:            '#8b5cf6',
+  personal:         '#f43f5e',
+  knowledge:        '#22c55e',
+  git_push:         '#64748b',
+  file_snapshot:    '#64748b',
+  brain_dump_mirror:'#06b6d4',
+  ab_conversation:  '#a855f7',
+  build_spec:       '#10b981',
+  agent_session:    '#f97316',
+  decision_log:     '#84cc16',
+  mcp_event:        '#64748b',
 }
 
 interface GraphNode {

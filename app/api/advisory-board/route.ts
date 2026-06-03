@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { calcCost } from '@/lib/models/pricing'
+import { captureToVault } from '@/lib/vault'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 const MODEL = 'claude-sonnet-4-6'
@@ -172,6 +173,17 @@ Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
       purpose: 'advisory_board_chat',
       project_id: dump.project_id ?? null,
       brain_dump_id,
+    })
+
+    await captureToVault({
+      type: 'ab_conversation',
+      title: `Advisory Board: ${dump.raw_text.slice(0, 80)}`,
+      content,
+      project_id: dump.project_id ?? null,
+      source_table: 'ab_chats',
+      capture_source: 'ab_conversation',
+      tags: ['advisory-board', verdict],
+      metadata: { verdict, run_number: nextRun, brain_dump_id },
     })
 
     return NextResponse.json({ content, run_number: nextRun })

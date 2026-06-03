@@ -2,6 +2,7 @@
 
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { classifyBrainDump } from '@/lib/classify'
+import { captureToVault } from '@/lib/vault'
 
 export async function quickDump(formData: FormData) {
   const text = (formData.get('text') as string | null)?.trim()
@@ -23,5 +24,15 @@ export async function quickDump(formData: FormData) {
   if (data?.id) {
     // Synchronous classification (~1-2s). Failure does not block the dump save.
     await classifyBrainDump(data.id, text, supabase).catch(console.error)
+    await captureToVault({
+      type: 'brain_dump_mirror',
+      title: text.slice(0, 120),
+      content: text,
+      project_id: null,
+      source_table: 'brain_dumps',
+      source_id: data.id,
+      capture_source: 'brain_dump',
+      tags: ['inbox'],
+    })
   }
 }
