@@ -20,12 +20,16 @@ const TYPE_BADGE: Record<VaultItemType, string> = {
 }
 
 const FILTER_CHIPS: { value: VaultItemType | 'all'; label: string }[] = [
-  { value: 'all',        label: 'All' },
-  { value: 'credential', label: 'Credentials' },
-  { value: 'skill',      label: 'Skills' },
-  { value: 'agent',      label: 'Agents' },
-  { value: 'personal',   label: 'Personal' },
-  { value: 'knowledge',  label: 'Knowledge' },
+  { value: 'all',               label: 'All' },
+  { value: 'credential',        label: 'Credentials' },
+  { value: 'skill',             label: 'Skills' },
+  { value: 'agent',             label: 'Agents' },
+  { value: 'personal',          label: 'Personal' },
+  { value: 'knowledge',         label: 'Knowledge' },
+  { value: 'brain_dump_mirror', label: 'Brain Dumps' },
+  { value: 'build_spec',        label: 'Specs' },
+  { value: 'agent_session',     label: 'Agent Sessions' },
+  { value: 'ab_conversation',   label: 'Advisory Board' },
 ]
 
 interface Props {
