@@ -118,13 +118,15 @@ export async function POST(req: NextRequest) {
     content: digest || headSubject,
     project_id: projectId,
     source_table: 'github_webhook',
-    source_id: head.id,
+    // source_id stays null: it's a uuid column and a git SHA isn't a uuid.
+    // The head commit SHA lives in metadata.head_sha instead.
     capture_source: 'git_push',
     tags: ['git', fullName, branch],
     metadata: {
       repo: htmlUrl,
       branch,
       pusher,
+      head_sha: head.id,
       commit_count: commits.length,
       commit_shas: commits.map((c) => c.id),
       compare_url: payload.compare ?? null,
