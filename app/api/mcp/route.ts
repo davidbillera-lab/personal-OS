@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
+import crypto from 'crypto'
 import { MCP_TOOLS, callTool } from '@/lib/mcp-tools'
+
+export const runtime = 'nodejs' // needs Node crypto for the timing-safe token check
 
 const MCP_API_KEY = process.env.MCP_API_KEY
 
@@ -8,6 +11,23 @@ function unauthorized() {
     { jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Unauthorized' } },
     { status: 401 }
   )
+}
+
+function misconfigured() {
+  // Fail CLOSED: if no key is configured on the server, refuse everything
+  // rather than silently serving an open endpoint.
+  console.error('[mcp] MCP_API_KEY not set — refusing all requests')
+  return NextResponse.json(
+    { jsonrpc: '2.0', id: null, error: { code: -32002, message: 'Server auth not configured' } },
+    { status: 503 }
+  )
+}
+
+// Constant-time bearer comparison (avoids leaking the token via response timing).
+function authorized(req: NextRequest): boolean {
+  const presented = Buffer.from(req.headers.get('authorization') ?? '')
+  const expected = Buffer.from(`Bearer ${MCP_API_KEY}`)
+  return presented.length === expected.length && crypto.timingSafeEqual(presented, expected)
 }
 
 function jsonrpcError(id: unknown, code: number, message: string) {
@@ -19,11 +39,9 @@ function jsonrpcResult(id: unknown, result: unknown) {
 }
 
 export async function POST(req: NextRequest) {
-  // Auth
-  const auth = req.headers.get('authorization') ?? ''
-  if (MCP_API_KEY && auth !== `Bearer ${MCP_API_KEY}`) {
-    return unauthorized()
-  }
+  // Auth — fail closed. No key configured -> refuse; key configured -> require exact bearer match.
+  if (!MCP_API_KEY) return misconfigured()
+  if (!authorized(req)) return unauthorized()
 
   let body: { jsonrpc?: string; id?: unknown; method?: string; params?: Record<string, unknown> }
   try {
