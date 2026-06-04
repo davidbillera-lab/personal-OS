@@ -2,7 +2,12 @@ import { login } from './actions'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 
-export default function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>
+}) {
+  const { error } = await searchParams
   return (
     <div className="min-h-screen flex items-center justify-center p-4 bg-[oklch(0.13_0.012_265)]">
       {/* Radial glow */}
@@ -22,6 +27,11 @@ export default function LoginPage() {
         {/* Card */}
         <div className="rounded-2xl border border-white/[0.08] bg-white/[0.04] p-6 shadow-2xl backdrop-blur-sm">
           <form action={login} className="space-y-4">
+            {error && (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+                {error}
+              </div>
+            )}
             <div className="space-y-1.5">
               <label htmlFor="email" className="text-xs font-medium text-gray-400 uppercase tracking-wider">
                 Email

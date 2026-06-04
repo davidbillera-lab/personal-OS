@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
+import { logout } from '@/app/login/actions'
 
 const navLinks = [
   { href: '/', label: 'Dashboard' },
@@ -43,6 +44,14 @@ export default function Nav() {
               </Link>
             ))}
           </nav>
+          <form action={logout} className="ml-auto">
+            <button
+              type="submit"
+              className="px-3 py-1.5 rounded-md text-sm font-medium text-gray-400 transition-all duration-150 hover:text-gray-100 hover:bg-white/[0.06]"
+            >
+              Sign out
+            </button>
+          </form>
         </div>
       </div>
     </header>
