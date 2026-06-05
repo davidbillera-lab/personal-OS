@@ -3,9 +3,18 @@ import { decrypt } from '@/lib/crypto'
 import { fetchGitHubDiff } from '@/lib/github'
 import { runCodexQC, rerunCodexQCOnSpec } from '@/app/(app)/projects/[id]/actions'
 
+// 'read' = safe to expose to low-trust clients (e.g. a phone connector).
+// 'write' = mutates state OR returns secrets (mc_get_credential); full token only.
+export type McpScope = 'read' | 'write'
+
+// The privilege a presented token grants. 'full' can call everything;
+// 'read' is restricted to read-scoped tools.
+export type McpTokenScope = 'full' | 'read'
+
 export interface McpTool {
   name: string
   description: string
+  scope: McpScope
   inputSchema: {
     type: 'object'
     properties: Record<string, { type: string; description: string }>
@@ -17,6 +26,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: 'mc_get_pending_tasks',
     description: 'Returns tasks that have a generated spec and are not yet completed. Optionally filter by project_id.',
+    scope: 'read',
     inputSchema: {
       type: 'object',
       properties: {
@@ -27,6 +37,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: 'mc_claim_task',
     description: 'Claim a task for an agent. Sets agent_assigned_to and claimed_at, creates an agent_handoffs row.',
+    scope: 'write',
     inputSchema: {
       type: 'object',
       properties: {
@@ -39,6 +50,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: 'mc_complete_task',
     description: 'Mark a claimed task as complete. Updates agent_handoffs with outcome and optional commit URL, sets task status to review.',
+    scope: 'write',
     inputSchema: {
       type: 'object',
       properties: {
@@ -52,6 +64,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: 'mc_get_project_context',
     description: 'Returns the current context for a project: status, next_action, blockers, lead_model, and current_agent.',
+    scope: 'read',
     inputSchema: {
       type: 'object',
       properties: {
@@ -63,6 +76,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: 'mc_get_credential',
     description: 'Fetch a credential value by key name. Only returns credentials marked as MCP-accessible. Access is logged.',
+    scope: 'write', // returns secrets — privileged, never exposed to a read-only client
     inputSchema: {
       type: 'object',
       properties: {
@@ -75,6 +89,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: 'mc_update_project_status',
     description: 'Update a project\'s status, next_action, and/or blockers at the end of a session.',
+    scope: 'write',
     inputSchema: {
       type: 'object',
       properties: {
@@ -89,6 +104,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: 'mc_get_vault_context',
     description: 'Semantic search over vault items. Pass the current task description to get relevant skills, agent roles, and knowledge items back. Never returns encrypted or personal items.',
+    scope: 'read',
     inputSchema: {
       type: 'object',
       properties: {
@@ -101,6 +117,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: 'mc_list_skills',
     description: 'List all operator workflow skills stored in the vault. Returns title, description, and tags for each skill. Call this at session start to discover which skills apply to your task, then call mc_get_skill to fetch full content.',
+    scope: 'read',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -109,6 +126,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: 'mc_get_skill',
     description: 'Fetch the full content of a skill by name. Use mc_list_skills first to discover available skill names.',
+    scope: 'read',
     inputSchema: {
       type: 'object',
       properties: {
@@ -118,6 +136,19 @@ export const MCP_TOOLS: McpTool[] = [
     },
   },
 ]
+
+// A 'full' token sees every tool; a 'read' token only sees read-scoped tools.
+export function toolsForScope(tokenScope: McpTokenScope): McpTool[] {
+  if (tokenScope === 'full') return MCP_TOOLS
+  return MCP_TOOLS.filter(t => t.scope === 'read')
+}
+
+// Whether a token of the given scope is permitted to call the named tool.
+export function isToolAllowed(name: string, tokenScope: McpTokenScope): boolean {
+  if (tokenScope === 'full') return true
+  const tool = MCP_TOOLS.find(t => t.name === name)
+  return tool?.scope === 'read'
+}
 
 type ToolArgs = Record<string, string | undefined>
 
