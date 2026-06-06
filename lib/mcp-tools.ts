@@ -136,6 +136,19 @@ export const MCP_TOOLS: McpTool[] = [
       required: ['name'],
     },
   },
+  {
+    name: 'mc_browse_vault',
+    description: 'Enumerate vault items in reverse-chronological order (most recent first). Unlike mc_get_vault_context (semantic search), this is a plain listing for browsing what exists. Optionally filter by type. Returns id, type, title, tags, and created_at. Never returns encrypted or personal items.',
+    scope: 'read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type:   { type: 'string', description: 'Optional vault item type to filter by (e.g. agent_session, build_spec, decision_log, brain_dump_mirror, knowledge)' },
+        limit:  { type: 'number', description: 'Max items to return (default 25, max 100)' },
+        offset: { type: 'number', description: 'Number of items to skip, for paging (default 0)' },
+      },
+    },
+  },
 ]
 
 // A 'full' token sees every tool; a 'read' token only sees read-scoped tools.
@@ -403,6 +416,35 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
       tags: data.tags ?? [],
       content: data.content,
     })
+  }
+
+  if (name === 'mc_browse_vault') {
+    const { type, limit, offset } = args
+    const parsedLimit = limit ? Math.min(Math.max(parseInt(limit, 10), 1), 100) : 25
+    const parsedOffset = offset ? Math.max(parseInt(offset, 10), 0) : 0
+
+    let q = supabase
+      .from('vault_items')
+      .select('id, type, title, tags, created_at')
+      // Never expose secrets or personal items through a plain listing.
+      .eq('encrypted', false)
+      .not('type', 'in', '(credential,personal)')
+      .order('created_at', { ascending: false })
+      .range(parsedOffset, parsedOffset + parsedLimit - 1)
+
+    if (type) q = q.eq('type', type)
+
+    const { data, error } = await q
+    if (error) throw new Error(error.message)
+    return JSON.stringify(
+      (data ?? []).map(r => ({
+        id: r.id,
+        type: r.type,
+        title: r.title,
+        tags: r.tags ?? [],
+        created_at: r.created_at,
+      }))
+    )
   }
 
   throw new Error(`Unknown tool: ${name}`)
