@@ -2,6 +2,7 @@ import { createServerSupabaseClient } from '@/lib/supabase'
 import { decrypt } from '@/lib/crypto'
 import { fetchGitHubDiff } from '@/lib/github'
 import { runCodexQC, rerunCodexQCOnSpec } from '@/app/(app)/projects/[id]/actions'
+import { captureToVault } from '@/lib/vault'
 
 // 'read' = safe to expose to low-trust clients (e.g. a phone connector).
 // 'write' = mutates state OR returns secrets (mc_get_credential); full token only.
@@ -190,12 +191,30 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
       await supabase.from('projects').update({ current_agent: agent_name }).eq('id', task.project_id)
     }
 
-    await supabase.from('agent_handoffs').insert({
-      project_id: task?.project_id ?? undefined,
-      task_id,
-      agent_name,
-      task_description: task?.title ?? null,
-      status: 'in_progress',
+    const { data: handoff } = await supabase
+      .from('agent_handoffs')
+      .insert({
+        project_id: task?.project_id ?? undefined,
+        task_id,
+        agent_name,
+        task_description: task?.title ?? null,
+        status: 'in_progress',
+      })
+      .select('id')
+      .single()
+
+    // Mirror the handoff into the vault so MCP-claimed work shows up in the
+    // master view, same as the orchestrate UI claimTask path.
+    await captureToVault({
+      type: 'agent_session',
+      title: `${agent_name}: ${(task?.title ?? '').slice(0, 80)}`,
+      content: `Task: ${task?.title ?? ''}\n\nStatus: in_progress`,
+      project_id: task?.project_id ?? null,
+      source_table: 'agent_handoffs',
+      source_id: handoff?.id,
+      capture_source: 'agent_handoff',
+      tags: ['agent', agent_name, 'in_progress'],
+      metadata: { agent_name, task_id },
     })
 
     return JSON.stringify({ ok: true, claimed_at: now })
@@ -219,7 +238,7 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
       await supabase.from('projects').update({ current_agent: null }).eq('id', task.project_id)
     }
 
-    await supabase
+    const { data: handoff } = await supabase
       .from('agent_handoffs')
       .update({
         status: 'done',
@@ -229,6 +248,27 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
       })
       .eq('task_id', task_id)
       .eq('status', 'in_progress')
+      .select('id, project_id, agent_name')
+      .single()
+
+    // Mirror completion into the vault so finished handoffs land in the master
+    // view. Re-uses the same source_table/source_id as the claim capture, so a
+    // backfill re-run won't duplicate it.
+    await captureToVault({
+      type: 'agent_session',
+      title: `${handoff?.agent_name ?? 'agent'}: ${outcome.slice(0, 80)}`,
+      content: [
+        outcome ? `Outcome: ${outcome}` : '',
+        'Status: done',
+        github_commit_url ? `Commit: ${github_commit_url}` : '',
+      ].filter(Boolean).join('\n\n'),
+      project_id: handoff?.project_id ?? task?.project_id ?? null,
+      source_table: 'agent_handoffs',
+      source_id: handoff?.id,
+      capture_source: 'agent_handoff',
+      tags: ['agent', handoff?.agent_name, 'done'].filter((t): t is string => Boolean(t)),
+      metadata: { agent_name: handoff?.agent_name, task_id, github_commit_url },
+    })
 
     // Auto-QC: fetch diff and run QC when a commit URL is provided
     if (github_commit_url && task?.project_id) {
