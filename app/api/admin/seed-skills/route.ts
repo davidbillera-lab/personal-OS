@@ -716,6 +716,55 @@ Every run ends by syncing state (global rules #9, and \`[[mission-control]]\`):
 7. **Implement** — in order, minimal, cost-logged, human-voiced copy, verify honestly.
 8. **Sync** — GitHub (always) → MC (gated) → Supabase (by hand). Never end without pushing.`,
   },
+  {
+    title: 'vault-recall',
+    description: 'Use at the start of any build/agent session to recall prior context from the Mission Control vault before acting — past decisions, specs, agent sessions, and knowledge. Call when picking up work cold, when the user references something "we did before," or when a task touches a project you haven\'t loaded this session. Prevents re-deriving context that already exists.',
+    tags: ['workflow', 'session-start', 'vault', 'memory', 'recall', 'mcp'],
+    content: `---
+name: vault-recall
+description: Use at the start of any build/agent session to recall prior context from the Mission Control vault before acting — past decisions, specs, agent sessions, and knowledge. Call when picking up work cold, when the user references something "we did before," or when a task touches a project you haven't loaded this session. Prevents re-deriving context that already exists.
+---
+
+# Vault Recall
+
+The Mission Control vault (\`vault_items\`) is the cross-session memory of the holdco: decisions, build specs, agent sessions, brain dumps, and knowledge, all captured automatically as work happens. Before starting work, recall what's already there. Don't re-derive context the vault already holds.
+
+## When to invoke
+
+- **Session start** — before claiming a task or writing code, pull relevant prior context.
+- **"We did this before"** — the user references a past decision, spec, or build you don't have in context.
+- **Cold pickup** — you're resuming a project whose state you haven't loaded this session.
+- **Cross-project work** — a task touches a project you haven't read yet this session.
+
+## How to recall (two tools)
+
+**1. Semantic search — \`mc_get_vault_context\`.** Best when you can describe the task. Returns the most relevant items by meaning, not keyword.
+
+\`\`\`
+mc_get_vault_context({ query: "<the task or topic in a sentence>" })
+\`\`\`
+
+Use this first. Excludes encrypted + personal items by design, so it's always safe.
+
+**2. Browse by recency/type — \`mc_browse_vault\`.** Best when you want to see what recently landed, or scan one category.
+
+\`\`\`
+mc_browse_vault({ type: "decision_log", limit: 20 })   // optional type filter
+mc_browse_vault({ limit: 30 })                          // most recent across all types
+\`\`\`
+
+Item types worth knowing: \`decision_log\` (why something was built a certain way), \`build_spec\` (agent-ready specs already generated), \`agent_session\` (what other agents did and left behind), \`brain_dump_mirror\` (captured ideas), \`knowledge\` (project context).
+
+## The rule
+
+Recall before you build. If the vault already answers "why is this like this?" or "has someone spec'd this?", read it instead of guessing. Then proceed with the work.
+
+## What recall does NOT cover
+
+- **Secrets** — credentials live encrypted and are never returned by browse. Use \`mc_get_credential\` for those.
+- **Live project status / next_action** — that's \`mc_get_project_context\`, not the vault.
+- **The repo itself** — code is the source of truth; the vault holds the reasoning around it.`,
+  },
 ]
 
 export async function POST(req: NextRequest) {
