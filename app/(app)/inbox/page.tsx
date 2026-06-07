@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { createServerSupabaseClient } from '@/lib/supabase'
 import { InboxItem } from '@/components/InboxItem'
+import { InboxCapture } from '@/components/InboxCapture'
 import type { BrainDump, BrainDumpStatus, Project } from '@/lib/types'
 
 const tabFilters: Record<string, BrainDumpStatus[]> = {
@@ -59,6 +60,8 @@ export default async function InboxPage({ searchParams }: Props) {
         <h1 className="text-lg font-semibold text-white">Inbox</h1>
         <span className="text-xs text-gray-500">{dumpsWithProject.length} item{dumpsWithProject.length !== 1 ? 's' : ''}</span>
       </div>
+
+      <InboxCapture />
 
       {/* Tab nav */}
       <div className="flex gap-1 border-b border-border">

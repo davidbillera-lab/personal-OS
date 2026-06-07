@@ -5,6 +5,7 @@ import { createServerSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
 import type { BrainDumpType, IdeaValidationResult } from '@/lib/types'
 import { captureToVault } from '@/lib/vault'
+import { classifyBrainDump } from '@/lib/classify'
 
 async function validateIdea(rawText: string, summary: string | null): Promise<IdeaValidationResult> {
   const supabase = await createServerSupabaseClient()
@@ -162,4 +163,21 @@ export async function generateSpecAction(
   } catch (e) {
     return { ok: false, error: String(e) }
   }
+}
+
+export async function submitDump(rawText: string): Promise<void> {
+  const supabase = await createServerSupabaseClient()
+  const trimmed = rawText.trim()
+  if (!trimmed) return
+
+  const { data, error } = await supabase
+    .from('brain_dumps')
+    .insert({ raw_text: trimmed, status: 'inbox' })
+    .select('id')
+    .single()
+
+  if (error || !data) return
+
+  await classifyBrainDump(data.id, trimmed, supabase)
+  revalidatePath('/inbox')
 }
