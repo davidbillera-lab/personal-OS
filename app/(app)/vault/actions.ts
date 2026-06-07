@@ -1,6 +1,6 @@
 'use server'
 
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createServerSupabaseClient, createAdminSupabaseClient } from '@/lib/supabase'
 import { encrypt, decrypt } from '@/lib/crypto'
 import { Credential, CredentialTier, VaultItem, VaultItemType } from '@/lib/types'
 import { revalidatePath } from 'next/cache'
@@ -106,7 +106,7 @@ export async function listVaultItems(params?: {
   type?: VaultItemType | 'all'
   search?: string
 }): Promise<VaultItemListItem[]> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   let query = supabase
     .from('vault_items')
     .select('id, type, title, content, encrypted, tags, project_id, source_table, source_id, is_mcp_accessible, metadata, created_at, updated_at')
@@ -133,7 +133,7 @@ export async function createVaultItem(params: {
   is_mcp_accessible?: boolean
   metadata?: Record<string, unknown>
 }): Promise<{ id?: string; error?: string }> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const isEncrypted = params.type === 'personal' || params.type === 'credential'
   const isMcpAccessible = isEncrypted ? false : (params.is_mcp_accessible ?? false)
@@ -182,7 +182,7 @@ export async function updateVaultItem(
     metadata?: Record<string, unknown>
   }
 ): Promise<{ error?: string }> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const { data: existing } = await supabase
     .from('vault_items')
@@ -225,7 +225,7 @@ export async function updateVaultItem(
 }
 
 export async function deleteVaultItem(id: string): Promise<{ error?: string }> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { error } = await supabase.from('vault_items').delete().eq('id', id)
   if (error) return { error: error.message }
   revalidatePath('/vault')
@@ -233,7 +233,7 @@ export async function deleteVaultItem(id: string): Promise<{ error?: string }> {
 }
 
 export async function revealVaultItemContent(id: string): Promise<{ content?: string; error?: string }> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data, error } = await supabase
     .from('vault_items')
     .select('content, encrypted')
@@ -251,7 +251,7 @@ export async function revealVaultItemContent(id: string): Promise<{ content?: st
 }
 
 export async function getRelatedVaultItems(id: string): Promise<VaultItemListItem[]> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data, error } = await supabase.rpc('match_vault_items_by_id', {
     source_item_id: id,
     match_count: 3,
