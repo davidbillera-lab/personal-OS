@@ -250,6 +250,12 @@ export async function revealVaultItemContent(id: string): Promise<{ content?: st
   }
 }
 
+export async function listProjectNames(): Promise<{ id: string; name: string }[]> {
+  const supabase = await createServerSupabaseClient()
+  const { data } = await supabase.from('projects').select('id, name').order('name')
+  return (data ?? []) as { id: string; name: string }[]
+}
+
 export async function getRelatedVaultItems(id: string): Promise<VaultItemListItem[]> {
   const supabase = createAdminSupabaseClient()
   const { data, error } = await supabase.rpc('match_vault_items_by_id', {

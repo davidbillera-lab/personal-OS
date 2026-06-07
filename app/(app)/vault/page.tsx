@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useTransition } from 'react'
-import { listVaultItems, listCredentials, createVaultItem, revealCredential, updateCredential, deleteCredential, type VaultItemListItem, type CredentialListItem } from './actions'
+import { listVaultItems, listCredentials, listProjectNames, createVaultItem, revealCredential, updateCredential, deleteCredential, type VaultItemListItem, type CredentialListItem } from './actions'
 import { VaultList } from '@/components/VaultList'
 import { VaultGraph } from '@/components/VaultGraph'
 import { VaultSidePanel } from '@/components/VaultSidePanel'
@@ -260,6 +260,8 @@ function CredentialsSection({ credentials, search, onReload }: { credentials: Cr
 export default function VaultPage() {
   const [items, setItems] = useState<VaultItemListItem[]>([])
   const [credentials, setCredentials] = useState<CredentialListItem[]>([])
+  const [projects, setProjects] = useState<{ id: string; name: string }[]>([])
+  const [projectFilter, setProjectFilter] = useState<'all' | 'none' | string>('all')
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -273,9 +275,10 @@ export default function VaultPage() {
     setLoading(true)
     setLoadError(null)
     try {
-      const [data, creds] = await Promise.all([listVaultItems(), listCredentials()])
+      const [data, creds, projs] = await Promise.all([listVaultItems(), listCredentials(), listProjectNames()])
       setItems(data)
       setCredentials(creds)
+      setProjects(projs)
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Failed to load vault')
     } finally {
@@ -307,6 +310,12 @@ export default function VaultPage() {
 
   const selectedItem = items.find(i => i.id === selectedId) ?? null
 
+  const displayItems = projectFilter === 'all'
+    ? items
+    : projectFilter === 'none'
+      ? items.filter(i => !i.project_id)
+      : items.filter(i => i.project_id === projectFilter)
+
   return (
     <div className="flex flex-col gap-6">
       {/* Header */}
@@ -334,9 +343,28 @@ export default function VaultPage() {
         </div>
       ) : (
         <>
+          {/* Project filter */}
+          {projects.length > 0 && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-500 shrink-0">Project:</span>
+              <select
+                value={projectFilter}
+                onChange={e => setProjectFilter(e.target.value)}
+                className="bg-white/5 border border-white/10 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-violet-500"
+                style={{ colorScheme: 'dark' }}
+              >
+                <option value="all" style={{ backgroundColor: '#111827', color: 'white' }}>All</option>
+                <option value="none" style={{ backgroundColor: '#111827', color: 'white' }}>No project</option>
+                {projects.map(p => (
+                  <option key={p.id} value={p.id} style={{ backgroundColor: '#111827', color: 'white' }}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {view === 'list' ? (
             <VaultList
-              items={items}
+              items={displayItems}
               search={search}
               typeFilter={typeFilter}
               selectedId={selectedId}
@@ -349,7 +377,7 @@ export default function VaultPage() {
           ) : (
             <>
               <VaultList
-                items={items}
+                items={displayItems}
                 search={search}
                 typeFilter={typeFilter}
                 selectedId={selectedId}
@@ -360,7 +388,7 @@ export default function VaultPage() {
                 view={view}
               />
               <VaultGraph
-                items={items}
+                items={displayItems}
                 search={search}
                 selectedId={selectedId}
                 onSelect={handleSelect}
