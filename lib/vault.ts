@@ -73,7 +73,10 @@ export async function captureToVault(params: {
       .select('id')
       .single()
 
-    if (error || !data) return
+    if (error || !data) {
+      console.error('[captureToVault] insert failed:', error?.message ?? 'no data returned', { type: params.type, title: params.title, capture_source: params.capture_source })
+      return
+    }
 
     try {
       const embedding = await embedVaultItem(title, encrypted ? '' : content, encrypted)
@@ -81,11 +84,11 @@ export async function captureToVault(params: {
         .from('vault_items')
         .update({ embedding })
         .eq('id', data.id)
-    } catch {
-      // embedding failure is non-fatal
+    } catch (embErr) {
+      console.error('[captureToVault] embedding failed (non-fatal):', embErr)
     }
-  } catch {
-    // capture is always best-effort — never block the caller
+  } catch (err) {
+    console.error('[captureToVault] unexpected error:', err)
   }
 }
 

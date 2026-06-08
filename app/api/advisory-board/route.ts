@@ -145,13 +145,13 @@ Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
       .map(b => (b as { type: 'text'; text: string }).text)
       .join('')
 
-    await supabase.from('ab_chats').insert({
+    const { data: chatInsert } = await supabase.from('ab_chats').insert({
       brain_dump_id,
       role: 'assistant',
       content,
       is_board_run: true,
       run_number: nextRun,
-    })
+    }).select('id').single()
 
     // Parse verdict from "Agreed Recommendation:" line
     const verdictMatch = content.match(/\*\*Agreed Recommendation:\*\*\s*(.+)/i)
@@ -175,12 +175,20 @@ Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
       brain_dump_id,
     })
 
+    const sessionParts = [
+      `Brain Dump (${dump.classified_type ?? 'unclassified'}): ${dump.raw_text}`,
+      dump.ai_summary ? `Summary: ${dump.ai_summary}` : '',
+      user_message ? `\nOperator Follow-up: ${user_message}` : '',
+      `\n---\nBoard Response (Run ${nextRun}):\n${content}`,
+    ].filter(Boolean)
+
     await captureToVault({
       type: 'ab_conversation',
       title: `Advisory Board: ${dump.raw_text.slice(0, 80)}`,
-      content,
+      content: sessionParts.join('\n'),
       project_id: dump.project_id ?? null,
       source_table: 'ab_chats',
+      source_id: chatInsert?.id,
       capture_source: 'ab_conversation',
       tags: ['advisory-board', verdict],
       metadata: { verdict, run_number: nextRun, brain_dump_id },
