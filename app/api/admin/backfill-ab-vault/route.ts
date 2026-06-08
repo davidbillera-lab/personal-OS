@@ -41,14 +41,14 @@ export async function POST(req: NextRequest) {
       continue
     }
 
-    const { data: dump } = await supabase
+    const { data: dump, error: dumpErr } = await supabase
       .from('brain_dumps')
-      .select('raw_text, ai_summary, classified_type, project_id, ab_verdict')
+      .select('raw_text, ai_summary, classified_type, project_id')
       .eq('id', chat.brain_dump_id)
       .single()
 
     if (!dump) {
-      errors.push(`brain_dump ${chat.brain_dump_id} not found for chat ${chat.id}`)
+      errors.push(`brain_dump ${chat.brain_dump_id} not found for chat ${chat.id} (err: ${dumpErr?.code} ${dumpErr?.message})`)
       skipped++
       continue
     }
@@ -70,7 +70,9 @@ export async function POST(req: NextRequest) {
       `\n---\nBoard Response (Run ${chat.run_number}):\n${chat.content}`,
     ].filter(Boolean)
 
-    const verdict = (dump.ab_verdict ?? 'keep') as 'keep' | 'kill'
+    // Parse verdict from board response content (ab_verdict column not yet on brain_dumps)
+    const verdictMatch = chat.content.match(/\*\*Agreed Recommendation:\*\*\s*(.+)/i)
+    const verdict: 'keep' | 'kill' = verdictMatch?.[1]?.toLowerCase().includes('kill') ? 'kill' : 'keep'
 
     await captureToVault({
       type: 'ab_conversation',
