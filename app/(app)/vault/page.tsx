@@ -101,6 +101,7 @@ function CredentialsSection({ credentials, search, onReload }: { credentials: Cr
   const [editNotes, setEditNotes] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
+  const [saveSuccess, setSaveSuccess] = useState(false)
   const [deleting, setDeleting] = useState<Record<string, boolean>>({})
 
   const filtered = credentials.filter(c =>
@@ -128,6 +129,7 @@ function CredentialsSection({ credentials, search, onReload }: { credentials: Cr
     setEditValue('')
     setEditNotes(cred.notes ?? '')
     setSaveError('')
+    setSaveSuccess(false)
   }
 
   function cancelEdit() {
@@ -146,9 +148,13 @@ function CredentialsSection({ credentials, search, onReload }: { credentials: Cr
     const res = await updateCredential(id, params)
     setSaving(false)
     if (res.error) { setSaveError(res.error); return }
-    setEditingId(null)
-    setRevealed(prev => { const n = { ...prev }; delete n[id]; return n })
-    onReload()
+    setSaveSuccess(true)
+    setTimeout(() => {
+      setEditingId(null)
+      setSaveSuccess(false)
+      setRevealed(prev => { const n = { ...prev }; delete n[id]; return n })
+      onReload()
+    }, 800)
   }
 
   async function handleDelete(id: string, name: string) {
@@ -194,10 +200,10 @@ function CredentialsSection({ credentials, search, onReload }: { credentials: Cr
                 <button onClick={cancelEdit} className="text-xs text-gray-400 hover:text-white px-3 py-1.5 border border-white/10 rounded">Cancel</button>
                 <button
                   onClick={() => handleSave(cred.id)}
-                  disabled={saving}
-                  className="text-xs bg-violet-600 hover:bg-violet-500 text-white px-3 py-1.5 rounded disabled:opacity-40"
+                  disabled={saving || saveSuccess}
+                  className={`text-xs px-3 py-1.5 rounded disabled:opacity-40 text-white transition-colors ${saveSuccess ? 'bg-green-600' : 'bg-violet-600 hover:bg-violet-500'}`}
                 >
-                  {saving ? 'Saving…' : 'Save'}
+                  {saveSuccess ? 'Saved ✓' : saving ? 'Saving…' : 'Save'}
                 </button>
               </div>
             </div>

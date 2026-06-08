@@ -30,6 +30,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# CodexQC reports — local handoff artifacts, not for commit
+.codex-qc/
+
 # OS / editor
 .DS_Store
 Thumbs.db

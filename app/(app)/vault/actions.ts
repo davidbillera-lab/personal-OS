@@ -56,7 +56,9 @@ export async function updateCredential(
     notes?: string | null
   }
 ): Promise<{ error?: string }> {
-  const supabase = await createServerSupabaseClient()
+  // Admin client bypasses RLS — credentials table requires authenticated role,
+  // but this is operator-only data with no multi-user model.
+  const supabase = createAdminSupabaseClient()
   const updates: Record<string, unknown> = { ...params, updated_at: new Date().toISOString() }
   if (params.value) {
     updates.value = encrypt(params.value)
@@ -70,7 +72,7 @@ export async function updateCredential(
 }
 
 export async function deleteCredential(id: string): Promise<{ error?: string }> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { error } = await supabase.from('credentials').delete().eq('id', id)
   if (error) return { error: error.message }
   revalidatePath('/vault')
