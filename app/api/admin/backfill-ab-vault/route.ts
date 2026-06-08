@@ -70,7 +70,7 @@ export async function POST(req: NextRequest) {
       `\n---\nBoard Response (Run ${chat.run_number}):\n${chat.content}`,
     ].filter(Boolean)
 
-    // Parse verdict from board response content (ab_verdict column not yet on brain_dumps)
+    // Parse verdict from board response content
     const verdictMatch = chat.content.match(/\*\*Agreed Recommendation:\*\*\s*(.+)/i)
     const verdict: 'keep' | 'kill' = verdictMatch?.[1]?.toLowerCase().includes('kill') ? 'kill' : 'keep'
 
