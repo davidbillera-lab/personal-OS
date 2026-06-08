@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { getRunbook } from '@/content/runbooks/data'
+import { getRunbook, getAllSlugs } from '@/content/runbooks/data'
 import type { RunbookChapter, RunbookStep, RunbookScenario, RunbookRole } from '@/content/runbooks/types'
 import { RunbookTOC } from '@/components/RunbookTOC'
 import { RunbookAppendix } from '@/components/RunbookAppendix'
@@ -153,8 +153,13 @@ function ChapterSection({ chapter }: { chapter: RunbookChapter }) {
 
 // ─── Page ─────────────────────────────────────────────────────────────
 
-export default function RunbookPage({ params }: { params: { slug: string } }) {
-  const runbook = getRunbook(params.slug)
+export function generateStaticParams() {
+  return getAllSlugs().map(slug => ({ slug }))
+}
+
+export default async function RunbookPage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params
+  const runbook = getRunbook(slug)
   if (!runbook) notFound()
 
   const heroGradient = TIER_HERO[runbook.tier] ?? TIER_HERO[1]
