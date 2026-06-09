@@ -73,8 +73,28 @@ When an idea graduates from inbox to build:
 - **Model APIs:** Anthropic SDK + OpenAI SDK + Gemini SDK behind a single `/api/route-task` endpoint that picks the model by `complexity_tier`
 - **GitHub API:** for repo context loading and project file sync
 - **Auth:** Supabase auth (operator + Vinnie roles eventually)
+- **Vault:** `vault_items` table — cross-session memory. Stores decisions, specs, agent sessions, brain dumps. OpenAI `text-embedding-3-small` for semantic search. Auto-captured via `captureToVault()` in `lib/vault.ts`. Queried via `mc_get_vault_context` (semantic) or `mc_browse_vault` (browse by type/recency).
+- **MCP server:** `/api/mcp` endpoint deployed on Vercel. Agents connect via `Bearer MCP_API_KEY` (token in `.mcp.json` + `.claude/settings.local.json`). Exposes: project context, tasks, vault, credentials, skills. On Windows, always source MCP_API_KEY from `settings.local.json` — OS env propagation is unreliable.
+
+**Supabase pattern:** All server-side calls use `createAdminSupabaseClient()` (service role key, bypasses RLS). Never use `createServerSupabaseClient()` in server actions or API routes — it silently fails behind RLS.
 
 **Explicitly not used for the OS itself:** Lovable (clashes with multi-agent pushes), Make/Zapier/n8n (fragile).
+
+---
+
+## Active Skills (Claude Code Superpowers)
+
+Skills are installed in `~/.claude/skills/`. Any agent working on this project must invoke them. Invoked via the `Skill` tool in Claude Code.
+
+| Skill | Trigger | What it does |
+|---|---|---|
+| `davids-way` | Any task touching 2+ files or any new feature | Model tier audit, targeted reads only, plan-first approval gate, one-commit-per-piece discipline |
+| `vault-recall` | Session start, cold pickup, "we did this before" | Pulls prior decisions/specs/knowledge from vault before touching code |
+| `session-context` | Session start | 4-step protocol: vault search → recent decisions → credentials → project status |
+| `mission-control` | Session start (read) and session end (write) | `mc_get_project_context` for briefing, `mc_update_project_status` + push to GitHub at close |
+| `decisions-sync` | Session end, if any architectural decision was made | Appends to `decisions.md`, commits, pushes, updates MC |
+| `CodexQC` | `/CodexQC` or before merging a branch | GPT-5.x independent second-opinion review. Output saved to `.codex-qc/`. Claude fixes; Codex reports only. |
+| `advisoryboard` | `/advisoryboard`, "Team", business decision, pivot | Four-persona accountability panel: Partner, Advisor, Colleague, Friend. Verdict first, no rescuing bad ideas. |
 
 ---
 
@@ -194,9 +214,13 @@ See `decisions.md` for the canonical log. Summary of pre-build decisions:
 2. Every new project added to the OS must have a `CLAUDE.md`, `kill-criteria.md`, and `decisions.md` from day one. No exceptions.
 3. Every kill criteria check that comes back "fail" gets surfaced to the operator within 24 hours.
 4. The OS itself follows its own rules. It has a `kill-criteria.md`. It logs decisions. It reports its own model costs.
+5. **Invoke `davids-way` before any non-trivial build task.** Every session.
+6. **Invoke `session-context` or `vault-recall` before reading code.** Don't re-derive what the vault already knows.
+7. **Session end protocol:** push to GitHub → `mc_update_project_status` → run `decisions-sync` if architecture changed.
+8. **Never use `createServerSupabaseClient()` in server actions or API routes.** Always use `createAdminSupabaseClient()`.
 
 ---
 
 ## Last Updated
 
-Initial draft: May 2026. Update on every meaningful decision.
+Initial draft: May 2026. Skills + vault + MCP server documented: June 2026. Update on every meaningful decision.
