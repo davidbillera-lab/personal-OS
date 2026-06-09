@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { createServerSupabaseClient } from '@/lib/supabase'
+﻿import { NextRequest, NextResponse } from 'next/server'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { embedVaultItem } from '@/lib/vault'
 
 const SKILLS = [
@@ -775,7 +775,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const { data: existing } = await supabase
     .from('vault_items')

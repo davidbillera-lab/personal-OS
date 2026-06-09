@@ -2,11 +2,11 @@
 
 import { redirect } from 'next/navigation'
 import { revalidatePath } from 'next/cache'
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import type { ProjectStage, ProjectTier } from '@/lib/types'
 
 export async function updateProject(projectId: string, formData: FormData) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const name = (formData.get('name') as string).trim()
   const tier = parseInt(formData.get('tier') as string) as ProjectTier

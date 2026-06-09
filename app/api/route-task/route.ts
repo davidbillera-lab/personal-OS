@@ -1,5 +1,5 @@
-import { NextResponse } from 'next/server'
-import { createServerSupabaseClient } from '@/lib/supabase'
+﻿import { NextResponse } from 'next/server'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
 
 export async function POST(req: Request) {
@@ -22,7 +22,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    const supabase = await createServerSupabaseClient()
+    const supabase = createAdminSupabaseClient()
     const result = await routeTask({
       prompt: prompt as string,
       complexity_tier: complexity_tier as 1 | 2 | 3 | 4,

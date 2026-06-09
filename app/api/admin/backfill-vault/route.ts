@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { createServerSupabaseClient } from '@/lib/supabase'
+﻿import { NextRequest, NextResponse } from 'next/server'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { captureToVault } from '@/lib/vault'
 import type { VaultItemType } from '@/lib/types'
 
@@ -14,7 +14,7 @@ type TableResult = { seeded: number; skipped: number }
 
 // Fetch the set of source_ids already mirrored for a given source_table, so we skip them.
 async function existingSourceIds(
-  supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
+  supabase: ReturnType<typeof createAdminSupabaseClient>,
   sourceTable: string
 ): Promise<Set<string>> {
   const { data } = await supabase
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const results: Record<string, TableResult> = {}
 
   // Helper: backfill one source table given a row→capture mapper.

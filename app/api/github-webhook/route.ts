@@ -1,6 +1,6 @@
-import { NextRequest, NextResponse } from 'next/server'
+﻿import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { captureToVault } from '@/lib/vault'
 
 export const runtime = 'nodejs' // needs Node crypto + Supabase server client
@@ -84,7 +84,7 @@ export async function POST(req: NextRequest) {
   // 5. Attribute to project via normalized repo_url match (nullable).
   let projectId: string | null = null
   if (htmlUrl) {
-    const supabase = await createServerSupabaseClient()
+    const supabase = createAdminSupabaseClient()
     const { data: projects } = await supabase.from('projects').select('id, repo_url')
     const target = normalizeRepoUrl(htmlUrl)
     const match = (projects ?? []).find(

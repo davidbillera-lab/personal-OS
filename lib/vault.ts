@@ -1,5 +1,5 @@
-import OpenAI from 'openai'
-import { createServerSupabaseClient } from '@/lib/supabase'
+﻿import OpenAI from 'openai'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { encrypt } from '@/lib/crypto'
 import type { VaultItem, VaultItemType } from '@/lib/types'
 
@@ -21,7 +21,7 @@ export async function embedVaultItem(title: string, content: string, isEncrypted
 
 // MCP semantic search: returns only is_mcp_accessible items, excludes encrypted + personal
 export async function queryVaultContext(query: string, limit = 8): Promise<Omit<VaultItem, 'embedding'>[]> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const queryEmbedding = await embedVaultItem(query, '', false)
 
   const { data, error } = await supabase.rpc('match_vault_items', {
@@ -46,7 +46,7 @@ export async function captureToVault(params: {
   encrypted?: boolean
 }): Promise<void> {
   try {
-    const supabase = await createServerSupabaseClient()
+    const supabase = createAdminSupabaseClient()
     const {
       type, title, content, project_id = null,
       source_table, source_id, capture_source,
@@ -94,7 +94,7 @@ export async function captureToVault(params: {
 
 // One-time seed: copy existing credentials table rows into vault_items
 export async function seedCredentialsToVault(): Promise<{ seeded: number; skipped: number }> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const { data: existing } = await supabase
     .from('vault_items')

@@ -1,6 +1,6 @@
-'use server'
+﻿'use server'
 
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { revalidatePath } from 'next/cache'
 
 export async function updateShipChecklistItem(
@@ -8,7 +8,7 @@ export async function updateShipChecklistItem(
   key: string,
   checked: boolean
 ): Promise<{ ok?: boolean; error?: string }> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data: project } = await supabase
     .from('projects')
     .select('ship_checklist')

@@ -1,6 +1,6 @@
-import { NextRequest, NextResponse } from 'next/server'
+﻿import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { calcCost } from '@/lib/models/pricing'
 import { captureToVault } from '@/lib/vault'
 
@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'brain_dump_id required' }, { status: 400 })
     }
 
-    const supabase = await createServerSupabaseClient()
+    const supabase = createAdminSupabaseClient()
 
     const { data: dump } = await supabase
       .from('brain_dumps')

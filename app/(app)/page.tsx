@@ -1,5 +1,5 @@
-import Link from 'next/link'
-import { createServerSupabaseClient } from '@/lib/supabase'
+﻿import Link from 'next/link'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { QuickDumpForm } from '@/components/QuickDumpForm'
 import type { Project, AgentHandoff, ProjectStage } from '@/lib/types'
 
@@ -125,7 +125,7 @@ function PipelineCard({ project, counts }: { project: Project; counts: PipelineC
 }
 
 export default async function CommandCenter() {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const [
     { data: projects },

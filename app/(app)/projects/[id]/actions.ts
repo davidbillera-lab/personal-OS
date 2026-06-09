@@ -1,13 +1,13 @@
 ﻿'use server'
 
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
 import { classifyBrainDump } from '@/lib/classify'
 import { captureToVault } from '@/lib/vault'
 import { revalidatePath } from 'next/cache'
 
 export async function runAdvisoryBoard(dumpId: string, projectId: string) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data: dump } = await supabase
     .from('brain_dumps')
     .select('raw_text, classified_type, ai_summary')
@@ -55,7 +55,7 @@ Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
 }
 
 export async function generateSpec(dumpId: string, projectId: string, claudeMd: string, decisionsMd: string) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data: dump } = await supabase.from('brain_dumps')
     .select('raw_text, classified_type, ai_summary, ab_verdict, ab_reasoning')
     .eq('id', dumpId).single()
@@ -108,7 +108,7 @@ Be specific. No fluff. The engineer reading this has zero context about the proj
 }
 
 export async function approveSpec(taskId: string, projectId: string, localPath?: string) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data: task } = await supabase.from('tasks').select('title, spec_path, generated_spec').eq('id', taskId).single()
   if (!task) return { error: 'Task not found' }
   const { error: updateError } = await supabase.from('tasks').update({ status: 'in_progress' }).eq('id', taskId)
@@ -134,7 +134,7 @@ export async function approveSpec(taskId: string, projectId: string, localPath?:
 }
 
 export async function runCodexQC(taskId: string, projectId: string, diff: string, commitUrl?: string) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data: task } = await supabase.from('tasks').select('title, generated_spec').eq('id', taskId).single()
   if (!task) return { error: 'Task not found' }
   const system = `You are a code reviewer. Review the diff against the original spec.
@@ -173,7 +173,7 @@ Respond ONLY with valid JSON:
 }
 
 export async function rerunCodexQCOnSpec(taskId: string, projectId: string, diff: string, commitUrl?: string) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data: task } = await supabase
     .from('tasks')
     .select('title, generated_spec, codex_qc_status')
@@ -267,7 +267,7 @@ export async function updateAgentHandoff(
   projectId: string,
   fields: { status?: string; outcome?: string; github_commit_url?: string }
 ) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const update: Record<string, string | null> = {}
   if (fields.status !== undefined) update.status = fields.status
   if (fields.outcome !== undefined) update.outcome = fields.outcome
@@ -280,7 +280,7 @@ export async function updateAgentHandoff(
 }
 
 export async function markTaskDone(taskId: string, projectId: string) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { error } = await supabase.from('tasks').update({ status: 'done' }).eq('id', taskId)
   if (error) return { error: error.message }
   revalidatePath(`/projects/${projectId}`)
@@ -288,7 +288,7 @@ export async function markTaskDone(taskId: string, projectId: string) {
 }
 
 export async function archiveProject(projectId: string) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   // Kill all pending/in-progress tasks so they don't linger
   await supabase
     .from('tasks')
@@ -312,7 +312,7 @@ export async function archiveProject(projectId: string) {
 }
 
 export async function runProjectShipAdvisoryBoard(projectId: string) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   // Only run if all tasks are done — bail fast for intermediate completions
   const { count } = await supabase
@@ -383,7 +383,7 @@ All tasks are done. Is this project ready to ship?`
 }
 
 export async function generateSuggestions(projectId: string) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data: project } = await supabase.from('projects')
     .select('name, stage, status, next_action, blockers, description').eq('id', projectId).single()
   if (!project) return { error: 'Project not found', suggestions: null }
@@ -403,7 +403,7 @@ export async function generateSuggestions(projectId: string) {
 }
 
 export async function sendChatMessage(projectId: string, text: string, focusedContext?: string) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data: project } = await supabase.from('projects')
     .select('name, stage, status, next_action, blockers, description').eq('id', projectId).single()
   if (!project) return { error: 'Project not found' }
@@ -424,7 +424,7 @@ export async function createProjectBrainDump(
   projectId: string,
   rawText: string
 ): Promise<{ id?: string; error?: string }> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data, error } = await supabase
     .from('brain_dumps')
     .insert({

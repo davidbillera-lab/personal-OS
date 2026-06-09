@@ -1,6 +1,6 @@
-'use server'
+﻿'use server'
 
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { classifyBrainDump } from '@/lib/classify'
 import { captureToVault } from '@/lib/vault'
 
@@ -8,7 +8,7 @@ export async function quickDump(formData: FormData) {
   const text = (formData.get('text') as string | null)?.trim()
   if (!text) return
 
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const { data } = await supabase
     .from('brain_dumps')

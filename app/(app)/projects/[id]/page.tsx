@@ -1,5 +1,5 @@
 import { notFound } from 'next/navigation'
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { ProjectWorkspaceTabs } from '@/components/ProjectWorkspaceTabs'
 import { getProjectHealth } from '@/lib/health'
 import type { AgentHandoff, KillCriteriaCheck } from '@/lib/types'
@@ -10,7 +10,7 @@ interface Props {
 
 export default async function ProjectWorkspacePage({ params }: Props) {
   const { id } = await params
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const [
     { data: project },

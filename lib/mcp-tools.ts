@@ -1,4 +1,4 @@
-import { createServerSupabaseClient } from '@/lib/supabase'
+﻿import { createAdminSupabaseClient } from '@/lib/supabase'
 import { decrypt } from '@/lib/crypto'
 import { fetchGitHubDiff } from '@/lib/github'
 import { runCodexQC, rerunCodexQCOnSpec } from '@/app/(app)/projects/[id]/actions'
@@ -167,7 +167,7 @@ export function isToolAllowed(name: string, tokenScope: McpTokenScope): boolean 
 type ToolArgs = Record<string, string | undefined>
 
 export async function callTool(name: string, args: ToolArgs): Promise<string> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   if (name === 'mc_get_pending_tasks') {
     let query = supabase

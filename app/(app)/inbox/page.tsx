@@ -1,5 +1,5 @@
-import Link from 'next/link'
-import { createServerSupabaseClient } from '@/lib/supabase'
+﻿import Link from 'next/link'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { InboxItem } from '@/components/InboxItem'
 import { InboxCapture } from '@/components/InboxCapture'
 import type { BrainDump, BrainDumpStatus, Project } from '@/lib/types'
@@ -27,7 +27,7 @@ export default async function InboxPage({ searchParams }: Props) {
   const activeTab = (tab && tab in tabFilters) ? tab : 'active'
   const statuses = tabFilters[activeTab]
 
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const [{ data: projects }, { data: dumps }, { data: taskRows }] = await Promise.all([
     supabase.from('projects').select('id, name').order('name'),

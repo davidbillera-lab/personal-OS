@@ -1,14 +1,14 @@
-'use server'
+﻿'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
 import type { BrainDumpType, IdeaValidationResult } from '@/lib/types'
 import { captureToVault } from '@/lib/vault'
 import { classifyBrainDump } from '@/lib/classify'
 
 async function validateIdea(rawText: string, summary: string | null): Promise<IdeaValidationResult> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const prompt = `Evaluate this idea against four kill criteria. Be direct and honest.
 
 Idea: "${summary ?? rawText}"
@@ -47,7 +47,7 @@ Internal tools are fine — only flag if the idea itself is incoherent or imposs
 }
 
 export async function archiveDump(id: string): Promise<void> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   await supabase
     .from('brain_dumps')
     .update({ status: 'archived' })
@@ -56,7 +56,7 @@ export async function archiveDump(id: string): Promise<void> {
 }
 
 export async function routeDump(id: string, projectId: string): Promise<void> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   await supabase
     .from('brain_dumps')
     .update({ project_id: projectId, status: 'actioned' })
@@ -75,7 +75,7 @@ export async function promoteDump(
   if (validation.verdict === 'flag' && !validation.is_internal) {
     return { warn: validation.reason }
   }
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   await supabase.from('tasks').insert({
     brain_dump_id: id,
     project_id: projectId,
@@ -95,7 +95,7 @@ export async function promoteDumpAnyway(
   projectId: string | null,
   title: string
 ): Promise<void> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   await supabase.from('tasks').insert({
     brain_dump_id: id,
     project_id: projectId,
@@ -110,7 +110,7 @@ export async function promoteDumpAnyway(
 }
 
 export async function reclassifyDump(id: string, newType: BrainDumpType): Promise<void> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   await supabase
     .from('brain_dumps')
     .update({ classified_type: newType })
@@ -124,7 +124,7 @@ export async function generateSpecAction(
   rawText: string,
   projectId: string | null
 ): Promise<{ ok: boolean; error?: string }> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   try {
     const result = await routeTask({
       prompt: `Generate an agent-ready implementation spec for this task:\n\n${rawText}\n\nInclude: objective, inputs/outputs, recommended approach, files to touch, verification steps.`,
@@ -166,7 +166,7 @@ export async function generateSpecAction(
 }
 
 export async function submitDump(rawText: string): Promise<void> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const trimmed = rawText.trim()
   if (!trimmed) return
 

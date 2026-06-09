@@ -1,11 +1,11 @@
-'use server'
+﻿'use server'
 
 import { redirect } from 'next/navigation'
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import type { ProjectStage, ProjectTier } from '@/lib/types'
 
 export async function createProject(formData: FormData) {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const name = (formData.get('name') as string).trim()
   const tier = parseInt(formData.get('tier') as string) as ProjectTier

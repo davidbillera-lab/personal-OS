@@ -1,5 +1,5 @@
-import Link from 'next/link'
-import { createServerSupabaseClient } from '@/lib/supabase'
+﻿import Link from 'next/link'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { OrchestrateItem } from '@/components/OrchestrateItem'
 import type { Task, Project, AgentHandoff } from '@/lib/types'
 
@@ -32,7 +32,7 @@ export default async function OrchestratePage({ searchParams }: Props) {
   const { tab } = await searchParams
   const activeTab = (tab && TABS.some(t => t.key === tab)) ? tab : 'pending'
 
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const [{ data: projects }, { data: tasks }, { data: handoffs }] = await Promise.all([
     supabase.from('projects').select('id, name').order('name'),

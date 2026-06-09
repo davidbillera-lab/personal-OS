@@ -1,4 +1,4 @@
-import { createServerSupabaseClient } from '@/lib/supabase'
+﻿import { createAdminSupabaseClient } from '@/lib/supabase'
 import { ShipChecklist } from '@/components/ShipChecklist'
 import type { Project } from '@/lib/types'
 
@@ -17,7 +17,7 @@ const STAGE_COLOR: Record<string, string> = {
 }
 
 export default async function ShipPage() {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data } = await supabase
     .from('projects')
     .select('*')

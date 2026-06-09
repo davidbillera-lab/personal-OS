@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { createServerSupabaseClient } from '@/lib/supabase'
+﻿import { NextRequest, NextResponse } from 'next/server'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import type { KillVerdict } from '@/lib/types'
 
 export async function POST(req: NextRequest) {
@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
     const min = Math.min(...scores)
     const verdict: KillVerdict = min <= 2 ? 'fail' : min <= 3 ? 'warning' : 'pass'
 
-    const supabase = await createServerSupabaseClient()
+    const supabase = createAdminSupabaseClient()
 
     const { data: check, error: insertError } = await supabase
       .from('kill_criteria_checks')

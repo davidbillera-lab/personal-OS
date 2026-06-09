@@ -1,5 +1,5 @@
 import { notFound } from 'next/navigation'
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { ProjectForm } from '@/components/ProjectForm'
 import { updateProject } from './actions'
 import Link from 'next/link'
@@ -8,7 +8,7 @@ interface Props { params: Promise<{ id: string }> }
 
 export default async function EditProjectPage({ params }: Props) {
   const { id } = await params
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const { data: project } = await supabase
     .from('projects')

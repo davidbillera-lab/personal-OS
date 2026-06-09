@@ -1,6 +1,6 @@
-'use server'
+﻿'use server'
 
-import { createServerSupabaseClient, createAdminSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { encrypt, decrypt } from '@/lib/crypto'
 import { Credential, CredentialTier, VaultItem, VaultItemType } from '@/lib/types'
 import { revalidatePath } from 'next/cache'
@@ -9,7 +9,7 @@ import { embedVaultItem } from '@/lib/vault'
 export type CredentialListItem = Omit<Credential, 'value'> & { masked_value: string }
 
 export async function listCredentials(): Promise<CredentialListItem[]> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data, error } = await supabase
     .from('credentials')
     .select('id, name, key_name, tier, project_id, is_mcp_accessible, notes, created_at, updated_at')
@@ -28,7 +28,7 @@ export async function addCredential(params: {
   is_mcp_accessible?: boolean
   notes?: string | null
 }): Promise<{ error?: string }> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const encrypted = encrypt(params.value)
   const { error } = await supabase.from('credentials').insert({
     name: params.name,
@@ -80,7 +80,7 @@ export async function deleteCredential(id: string): Promise<{ error?: string }> 
 }
 
 export async function revealCredential(id: string): Promise<{ value?: string; error?: string }> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data, error } = await supabase
     .from('credentials')
     .select('value, key_name')
@@ -253,7 +253,7 @@ export async function revealVaultItemContent(id: string): Promise<{ content?: st
 }
 
 export async function listProjectNames(): Promise<{ id: string; name: string }[]> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   const { data } = await supabase.from('projects').select('id, name').order('name')
   return (data ?? []) as { id: string; name: string }[]
 }

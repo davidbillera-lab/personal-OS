@@ -1,5 +1,5 @@
-import { NextResponse } from 'next/server'
-import { createServerSupabaseClient } from '@/lib/supabase'
+﻿import { NextResponse } from 'next/server'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { classifyBrainDump } from '@/lib/classify'
 
 export async function POST(req: Request) {
@@ -17,7 +17,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    const supabase = await createServerSupabaseClient()
+    const supabase = createAdminSupabaseClient()
     await classifyBrainDump(id as string, raw_text as string, supabase)
     return NextResponse.json({ ok: true })
   } catch (err) {

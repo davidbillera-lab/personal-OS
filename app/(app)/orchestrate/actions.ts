@@ -1,12 +1,12 @@
-'use server'
+﻿'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
 import { captureToVault } from '@/lib/vault'
 
 export async function generateSpec(taskId: string): Promise<{ error?: string }> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const { data: task } = await supabase
     .from('tasks')
@@ -138,19 +138,19 @@ SCOPE and OFF-LIMITS are required sections. Be explicit — list specific files,
 }
 
 export async function markDone(taskId: string): Promise<void> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   await supabase.from('tasks').update({ status: 'done' }).eq('id', taskId)
   revalidatePath('/orchestrate')
 }
 
 export async function archiveTask(taskId: string): Promise<void> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
   await supabase.from('tasks').update({ status: 'killed' }).eq('id', taskId)
   revalidatePath('/orchestrate')
 }
 
 export async function claimTask(taskId: string, agentName: string): Promise<void> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const { data: task } = await supabase
     .from('tasks')
@@ -203,7 +203,7 @@ export async function completeTask(
   taskId: string,
   commitUrl: string
 ): Promise<void> {
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const { data: task } = await supabase
     .from('tasks')

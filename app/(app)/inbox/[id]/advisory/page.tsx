@@ -1,5 +1,5 @@
 import { notFound } from 'next/navigation'
-import { createServerSupabaseClient } from '@/lib/supabase'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 import type { BrainDump, AbChat } from '@/lib/types'
 import { AdvisoryBoardChat } from '@/components/AdvisoryBoardChat'
 
@@ -9,7 +9,7 @@ interface Props {
 
 export default async function AdvisoryBoardPage({ params }: Props) {
   const { id } = await params
-  const supabase = await createServerSupabaseClient()
+  const supabase = createAdminSupabaseClient()
 
   const { data: dump } = await supabase
     .from('brain_dumps')
