@@ -137,6 +137,27 @@ export const MCP_TOOLS: McpTool[] = [
     },
   },
   {
+    name: 'mc_list_agents',
+    description: 'List all reusable subagent definitions stored in the vault. Returns name, description, crew, and tags for each agent. Call this to discover which agents are available for delegation, then call mc_get_agent to fetch the full definition.',
+    scope: 'read',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'mc_get_agent',
+    description: 'Fetch the full definition (frontmatter + system prompt) of a subagent by name. Use mc_list_agents first to discover available agent names.',
+    scope: 'read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'The agent name exactly as returned by mc_list_agents' },
+      },
+      required: ['name'],
+    },
+  },
+  {
     name: 'mc_browse_vault',
     description: 'Enumerate vault items in reverse-chronological order (most recent first). Unlike mc_get_vault_context (semantic search), this is a plain listing for browsing what exists. Optionally filter by type. Returns id, type, title, tags, and created_at. Never returns encrypted or personal items.',
     scope: 'read',
@@ -413,6 +434,47 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
     return JSON.stringify({
       name: data.title,
       description: (data.metadata as Record<string, string> | null)?.description ?? '',
+      tags: data.tags ?? [],
+      content: data.content,
+    })
+  }
+
+  if (name === 'mc_list_agents') {
+    const { data, error } = await supabase
+      .from('vault_items')
+      .select('id, title, metadata, tags')
+      .eq('type', 'agent')
+      .eq('is_mcp_accessible', true)
+      .order('title', { ascending: true })
+
+    if (error) throw new Error(error.message)
+    return JSON.stringify(
+      (data ?? []).map(r => ({
+        name: r.title,
+        description: (r.metadata as Record<string, string> | null)?.description ?? '',
+        crew: (r.metadata as Record<string, string> | null)?.crew ?? '',
+        tags: r.tags ?? [],
+      }))
+    )
+  }
+
+  if (name === 'mc_get_agent') {
+    const { name: agentName } = args
+    if (!agentName) throw new Error('name is required')
+
+    const { data, error } = await supabase
+      .from('vault_items')
+      .select('title, content, metadata, tags')
+      .eq('type', 'agent')
+      .eq('is_mcp_accessible', true)
+      .ilike('title', agentName)
+      .single()
+
+    if (error || !data) throw new Error(`Agent not found: ${agentName}`)
+    return JSON.stringify({
+      name: data.title,
+      description: (data.metadata as Record<string, string> | null)?.description ?? '',
+      crew: (data.metadata as Record<string, string> | null)?.crew ?? '',
       tags: data.tags ?? [],
       content: data.content,
     })
