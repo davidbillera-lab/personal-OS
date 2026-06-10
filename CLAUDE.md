@@ -98,6 +98,29 @@ Skills are installed in `~/.claude/skills/`. Any agent working on this project m
 
 ---
 
+## Agent Roster (reusable subagents)
+
+Portfolio-wide subagents, callable from any project — via Claude Code's Agent tool (auto-delegation driven by each agent's description) or from any MCP client via `mc_list_agents` / `mc_get_agent`.
+
+**Source of truth:** `agents/*.md` in this repo (canonical Claude Code subagent format: YAML frontmatter + system prompt). **Distribution:** `npm run sync:agents` upserts each into the vault (`vault_items` type `agent`, tagged by crew, embedded for semantic search) and installs to `~/.claude/agents/` (global — all projects). Claude Code discovers installed agents at session start, so new agents need a restart before they're dispatchable by name.
+
+| Agent | Crew | Job |
+|---|---|---|
+| `code-reviewer` | Build | Second-opinion diff/branch review before merge; reports, never fixes |
+| `qa-verifier` | Build | Runs tests + smoke checks; pass/fail with evidence |
+| `session-auditor` | Build | Reads session transcripts; reports token waste, re-reads, compaction causes |
+| `spec-writer` | Build | Brain dump/idea → agent-ready build spec with context bundled |
+| `doc-writer` | Build | Generates `docs/operator/` (JJ-tier) + `docs/runbooks/` (Vinnie-tier) |
+| `researcher` | Revenue | Market signal, comps, competitor scans → findings brief |
+| `copywriter` | Revenue | Human-voice pass on customer-facing copy; no AI-template feel |
+| `seo-geo-auditor` | Revenue | SEO + AI-answer-engine readiness audits (Marblism clients) |
+| `kill-criteria-examiner` | Holdco | Runs the 4 kill criteria; verdict first, no rescuing |
+| `exit-readiness-scorer` | Holdco | Scores against acquirer due-diligence dimensions /100 |
+
+Crew assignment lives in the `CREWS` map in `scripts/sync-agents.mjs`, not in frontmatter — agent files stay canonical Claude Code format.
+
+---
+
 ## Core Data Model (initial sketch — refine in build)
 
 - `projects` — id, name, tier, stage, status, kill_criteria_status, last_update, repo_url, claude_md_url
@@ -223,4 +246,4 @@ See `decisions.md` for the canonical log. Summary of pre-build decisions:
 
 ## Last Updated
 
-Initial draft: May 2026. Skills + vault + MCP server documented: June 2026. Update on every meaningful decision.
+Initial draft: May 2026. Skills + vault + MCP server documented: June 2026. Agent roster added: June 2026. Update on every meaningful decision.
