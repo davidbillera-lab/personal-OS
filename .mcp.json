@@ -1,9 +1,9 @@
 {
   "mcpServers": {
     "mission-control": {
-      "type": "http",
-      "url": "https://personal-os-jsg1.vercel.app/api/mcp",
-      "headers": { "Authorization": "Bearer ${MCP_API_KEY}" }
+      "type": "stdio",
+      "command": "node",
+      "args": ["./mcp-server.mjs"]
     }
   }
 }
