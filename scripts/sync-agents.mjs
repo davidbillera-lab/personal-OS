@@ -108,7 +108,7 @@ async function syncAgent(filePath) {
   if (existing) {
     const { error } = await supabase
       .from('vault_items')
-      .update({ content, tags, metadata })
+      .update({ content, tags, metadata, is_mcp_accessible: true })
       .eq('id', existing.id)
     if (error) throw new Error(error.message)
     id = existing.id
