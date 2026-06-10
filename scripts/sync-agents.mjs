@@ -41,7 +41,8 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false },
 })
 
-// Crew assignment lives here, not in frontmatter — Claude Code agent files stay canonical format.
+// Crew assignment + knowledge graph tags — shared tags create edges in the vault graph UI.
+// Tags overlap with skills/sessions intentionally: e.g. 'advisory' links agents to advisoryboard skill.
 const CREWS = {
   'code-reviewer': 'build',
   'qa-verifier': 'build',
@@ -53,6 +54,19 @@ const CREWS = {
   'seo-geo-auditor': 'revenue',
   'kill-criteria-examiner': 'holdco',
   'exit-readiness-scorer': 'holdco',
+}
+
+const AGENT_TAGS = {
+  'code-reviewer':          ['build', 'agent', 'code-review', 'workflow', 'quality'],
+  'qa-verifier':            ['build', 'agent', 'testing', 'workflow', 'quality'],
+  'session-auditor':        ['build', 'agent', 'workflow', 'session-end', 'mcp', 'token-usage'],
+  'spec-writer':            ['build', 'agent', 'planning', 'spec', 'workflow'],
+  'doc-writer':             ['build', 'agent', 'documentation', 'workflow'],
+  'researcher':             ['revenue', 'agent', 'research', 'strategy', 'market'],
+  'copywriter':             ['revenue', 'agent', 'copy', 'marketing', 'workflow'],
+  'seo-geo-auditor':        ['revenue', 'agent', 'seo', 'marketing', 'audit'],
+  'kill-criteria-examiner': ['holdco', 'agent', 'advisory', 'decision-support', 'kill-criteria'],
+  'exit-readiness-scorer':  ['holdco', 'agent', 'advisory', 'decision-support', 'exit'],
 }
 
 // Minimal YAML frontmatter parse — flat string keys only, which is all agent files use.
@@ -87,7 +101,7 @@ async function syncAgent(filePath) {
   const fm = parseFrontmatter(content)
   const name = fm.name || basename(filePath, '.md')
   const crew = CREWS[name] ?? 'unassigned'
-  const tags = [crew, 'agent']
+  const tags = AGENT_TAGS[name] ?? [crew, 'agent']
   const metadata = {
     description: fm.description ?? '',
     model: fm.model ?? '',
