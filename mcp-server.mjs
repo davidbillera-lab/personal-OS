@@ -524,12 +524,16 @@ rl.on('line', async (line) => {
       return
     }
 
+    _inflight++
     try {
       const text = await callTool(toolName, toolArgs)
       send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${message}` }], isError: true } })
+    } finally {
+      _inflight--
+      if (_stdinClosed && _inflight === 0) process.exit(0)
     }
     return
   }
@@ -537,6 +541,12 @@ rl.on('line', async (line) => {
   send({ jsonrpc: '2.0', id: id ?? null, error: { code: -32601, message: `Method not found: ${method}` } })
 })
 
-rl.on('close', () => process.exit(0))
+// Track in-flight async ops so we don't exit mid-request when stdin closes
+let _stdinClosed = false
+let _inflight = 0
+rl.on('close', () => {
+  _stdinClosed = true
+  if (_inflight === 0) process.exit(0)
+})
 
 process.stderr.write('[mcp-server] Mission Control stdio server ready\n')
