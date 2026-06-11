@@ -5,19 +5,19 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import type { Project, KillCriteriaStatus, ProjectStage } from '@/lib/types'
 
 const stageColors: Record<ProjectStage, string> = {
-  idea:  'bg-slate-100 text-slate-700',
-  spec:  'bg-blue-100 text-blue-700',
+  idea: 'bg-slate-100 text-slate-700',
+  spec: 'bg-blue-100 text-blue-700',
   build: 'bg-yellow-100 text-yellow-700',
-  ship:  'bg-green-100 text-green-700',
+  ship: 'bg-green-100 text-green-700',
   scale: 'bg-emerald-100 text-emerald-700',
-  kill:  'bg-red-100 text-red-700',
+  kill: 'bg-red-100 text-red-700',
 }
 
 const killColors: Record<KillCriteriaStatus, string> = {
-  pass:    'bg-green-100 text-green-700',
+  pass: 'bg-green-100 text-green-700',
   warning: 'bg-yellow-100 text-yellow-800',
-  fail:    'bg-red-100 text-red-700',
-  exempt:  'bg-purple-100 text-purple-700',
+  fail: 'bg-red-100 text-red-700',
+  exempt: 'bg-purple-100 text-purple-700',
 }
 
 function timeSince(iso: string): string {
