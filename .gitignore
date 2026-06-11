@@ -11,6 +11,19 @@ out/
 .env.local
 .env.*.local
 
+# Ignore any per-project local envs
+**/.env.local
+
+# Local Claude Code settings that may contain MCP API keys
+# (settings.local.json should never be committed)
+**/.claude/settings.local.json
+
+# Seed script secrets (local file expected, not committed)
+scripts/*.secrets.json
+
+# Vercel local env previews
+.vercel/.env*
+
 # .env.example IS committed (it's a template with no real values)
 
 # Production builds
