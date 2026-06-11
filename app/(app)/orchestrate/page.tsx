@@ -1,20 +1,20 @@
 ﻿import Link from 'next/link'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { OrchestrateItem } from '@/components/OrchestrateItem'
-import type { Task, Project, AgentHandoff } from '@/lib/types'
+import type { Task, AgentHandoff } from '@/lib/types'
 
 const TABS = [
-  { key: 'pending',    label: 'Pending' },
+  { key: 'pending', label: 'Pending' },
   { key: 'spec_ready', label: 'Spec Ready' },
-  { key: 'done',       label: 'Done' },
-  { key: 'handoffs',   label: 'Handoff Log' },
+  { key: 'done', label: 'Done' },
+  { key: 'handoffs', label: 'Handoff Log' },
 ]
 
 const handoffStatusColors: Record<string, string> = {
   in_progress: 'bg-blue-100 text-blue-700',
-  done:        'bg-green-100 text-green-700',
-  review:      'bg-yellow-100 text-yellow-700',
-  failed:      'bg-red-100 text-red-700',
+  done: 'bg-green-100 text-green-700',
+  review: 'bg-yellow-100 text-yellow-700',
+  failed: 'bg-red-100 text-red-700',
 }
 
 function formatDate(iso: string | null): string {
@@ -48,9 +48,9 @@ export default async function OrchestratePage({ searchParams }: Props) {
       project_name: t.project_id ? (projectMap.get(t.project_id) ?? null) : null,
     }))
     .filter(t => {
-      if (activeTab === 'pending')    return !t.generated_spec && t.status !== 'done' && t.status !== 'killed'
+      if (activeTab === 'pending') return !t.generated_spec && t.status !== 'done' && t.status !== 'killed'
       if (activeTab === 'spec_ready') return !!t.generated_spec && t.status !== 'done' && t.status !== 'killed'
-      if (activeTab === 'done')       return t.status === 'done' || t.status === 'killed'
+      if (activeTab === 'done') return t.status === 'done' || t.status === 'killed'
       return false
     }) as (Task & { project_name: string | null })[]
 

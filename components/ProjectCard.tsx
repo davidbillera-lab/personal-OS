@@ -1,5 +1,6 @@
 import Link from 'next/link'
-import { Badge } from '@/components/ui/badge'
+// Badge removed (unused) — kept import commented out for quick re-enable if needed
+// import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import type { Project, KillCriteriaStatus, ProjectStage } from '@/lib/types'
 
