@@ -1,7 +1,7 @@
 # CLAUDE.md — Personal OS (Mission Control)
 
 **Location:** `<personal-os-repo>/CLAUDE.md` (committed to repo)
-**Purpose:** Source of truth for what this project is, why it exists, what's been decided, and how any agent should work on it. Loaded automatically by Claude Code; should be referenced by Codex, Manus, and any other tool working in this repo.
+**Purpose:** Source of truth for what this project is, why it exists, what's been decided, and how any agent should work on it. Loaded automatically by the active agent environment; should be referenced by any tool or harness working in this repo.
 **Status:** Living document. Updated as decisions get made.
 **Read first:** `~/.claude/CLAUDE.md` (operator profile) before this file.
 mission_control_id: 698d6376-5819-400b-babc-cd664ee36c04
@@ -60,7 +60,7 @@ Nothing dies in a notebook. Nothing requires the operator to remember where it g
 When an idea graduates from inbox to build:
 
 - OS generates a context-loaded spec (project CLAUDE.md + decisions.md + idea + relevant code refs)
-- OS recommends which tool to hand it to (Claude Code / Codex / Manus / Lovable) based on job type
+- OS recommends which runtime harness to hand it to based on job type
 - OS recommends which model tier (1–4) for the work
 - One-click handoff: spec ready, context bundled
 
@@ -82,9 +82,9 @@ When an idea graduates from inbox to build:
 
 ---
 
-## Active Skills (Claude Code Superpowers)
+## Active Skills (tool-agnostic superpowers)
 
-Skills are installed in `~/.claude/skills/`. Any agent working on this project must invoke them. Invoked via the `Skill` tool in Claude Code.
+Skills are installed in `~/.claude/skills/`. Any agent working on this project must invoke them. Invoked via the project’s `Skill` tool.
 
 | Skill | Trigger | What it does |
 |---|---|---|
@@ -100,9 +100,9 @@ Skills are installed in `~/.claude/skills/`. Any agent working on this project m
 
 ## Agent Roster (reusable subagents)
 
-Portfolio-wide subagents, callable from any project — via Claude Code's Agent tool (auto-delegation driven by each agent's description) or from any MCP client via `mc_list_agents` / `mc_get_agent`.
+Portfolio-wide subagents, callable from any project — via the active agent environment's Agent tool or from any MCP client via `mc_list_agents` / `mc_get_agent`.
 
-**Source of truth:** `agents/*.md` in this repo (canonical Claude Code subagent format: YAML frontmatter + system prompt). **Distribution:** `npm run sync:agents` upserts each into the vault (`vault_items` type `agent`, tagged by crew, embedded for semantic search) and installs to `~/.claude/agents/` (global — all projects). Claude Code discovers installed agents at session start, so new agents need a restart before they're dispatchable by name.
+**Source of truth:** `agents/*.md` in this repo (canonical agent format: YAML frontmatter + system prompt). **Distribution:** `npm run sync:agents` upserts each into the vault (`vault_items` type `agent`, tagged by crew, embedded for semantic search) and installs to `~/.claude/agents/` (global — all projects). The active agent environment discovers installed agents at session start, so new agents need a restart before they're dispatchable by name.
 
 | Agent | Crew | Job |
 |---|---|---|
