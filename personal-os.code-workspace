@@ -1,0 +1,23 @@
+{
+  "folders": [
+    {
+      "path": "C:\\Users\\david\\Documents\\personal-os",
+      "name": "🧠 Mission Control (personal-os)"
+    },
+    {
+      "path": "C:\\Users\\david\\vendor-zen-tool",
+      "name": "🏷️ VZT (vendor-zen-tool)"
+    },
+    {
+      "path": "C:\\Users\\david\\liquidation-motivation-portal",
+      "name": "📦 Liquidation Motivation Portal"
+    },
+    {
+      "path": "C:\\Users\\david\\moms-morning-light",
+      "name": "🌅 Mom's Morning Light"
+    }
+  ],
+  "settings": {
+    "editor.formatOnSave": true
+  }
+}
