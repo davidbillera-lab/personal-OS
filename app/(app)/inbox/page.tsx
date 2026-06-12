@@ -2,18 +2,18 @@
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { InboxItem } from '@/components/InboxItem'
 import { InboxCapture } from '@/components/InboxCapture'
-import type { BrainDump, BrainDumpStatus, Project } from '@/lib/types'
+import type { BrainDump, BrainDumpStatus } from '@/lib/types'
 
 const tabFilters: Record<string, BrainDumpStatus[]> = {
-  active:   ['inbox', 'reviewed'],
-  all:      ['inbox', 'reviewed', 'actioned', 'archived', 'spec_generated'],
+  active: ['inbox', 'reviewed'],
+  all: ['inbox', 'reviewed', 'actioned', 'archived', 'spec_generated'],
   actioned: ['actioned', 'spec_generated'],
   archived: ['archived'],
 }
 
 const TABS = [
-  { key: 'active',   label: 'Active' },
-  { key: 'all',      label: 'All' },
+  { key: 'active', label: 'Active' },
+  { key: 'all', label: 'All' },
   { key: 'actioned', label: 'Actioned' },
   { key: 'archived', label: 'Archived' },
 ]

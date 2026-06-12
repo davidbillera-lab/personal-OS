@@ -26,7 +26,7 @@ export function InboxCapture() {
       return
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const Ctor = typeof window !== 'undefined'
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ? ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)
