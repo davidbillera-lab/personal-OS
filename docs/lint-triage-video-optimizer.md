@@ -25,6 +25,6 @@ Files with notable remaining errors (excerpt):
 - `components/ProjectGraph.tsx` — refs-in-render
 - `components/VaultGraph.tsx` — refs-in-render
 - `components/VaultSidePanel.tsx` — setState-in-effect
-- `projects/video-optimizer-app/client/src/components/*` — multiple setState-in-effect and typing issues
+- `client/src/components/*` in the video-optimizer-app repo (relocated to `C:\Users\david\video-optimizer-app` on 2026-06-11) — multiple setState-in-effect and typing issues
 
 If you approve, I'll create and push the PR branch that implements the **Safe fixes** now.

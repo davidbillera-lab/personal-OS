@@ -1,6 +1,6 @@
 # Video Optimizer App — imported into Mission Control
 
-- Path: `projects/video-optimizer-app`
+- Path: `C:\Users\david\video-optimizer-app` (standalone sibling repo — relocated out of personal-os on 2026-06-11; previously a nested gitlink at `projects/video-optimizer-app`)
 - Source: https://github.com/davidbillera-lab/video-optimizer-app
 
 Imported items:
@@ -21,7 +21,7 @@ Mission Control notes:
 
 Import summary (performed):
 
-- Cloned repository into `projects/video-optimizer-app` and added to workspace.
+- Cloned repository into `projects/video-optimizer-app` and added to workspace. (Later relocated to `C:\Users\david\video-optimizer-app`, 2026-06-11.)
 - Created `CLAUDE.md` and added `docs/video-optimizer-app.md` for MC context.
 - Added `.env.example` (no secrets committed).
 - Added `scripts/mcp-handshake.js` to verify local MCP stdio handshake.
