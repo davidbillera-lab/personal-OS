@@ -93,6 +93,7 @@ Skills are installed in `~/.claude/skills/`. Any agent working on this project m
 | `session-context` | Session start | 4-step protocol: vault search → recent decisions → credentials → project status |
 | `mission-control` | Session start (read) and session end (write) | `mc_get_project_context` for briefing, `mc_update_project_status` + push to GitHub at close |
 | `decisions-sync` | Session end, if any architectural decision was made | Appends to `decisions.md`, commits, pushes, updates MC |
+| `checkpoint` | Start of any multi-step task; resume after compaction or `/clear`; `/checkpoint` | Maintains gitignored `.claude/checkpoint.md` (goal, state w/ NEXT marker, key files, decisions, gotchas, verbatim constraints). Post-compaction: read checkpoint first, vault second, never re-read source files until editing. SessionStart(compact) hook in `~/.claude/settings.json` reinforces it. |
 | `CodexQC` | `/CodexQC` or before merging a branch | GPT-5.x independent second-opinion review. Output saved to `.codex-qc/`. Claude fixes; Codex reports only. |
 | `advisoryboard` | `/advisoryboard`, "Team", business decision, pivot | Four-persona accountability panel: Partner, Advisor, Colleague, Friend. Verdict first, no rescuing bad ideas. |
 
