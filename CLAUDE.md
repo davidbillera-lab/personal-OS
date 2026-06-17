@@ -96,6 +96,7 @@ Skills are installed in `~/.claude/skills/`. Any agent working on this project m
 | `checkpoint` | Start of any multi-step task; resume after compaction or `/clear`; `/checkpoint` | Maintains gitignored `.claude/checkpoint.md` (goal, state w/ NEXT marker, key files, decisions, gotchas, verbatim constraints). Post-compaction: read checkpoint first, vault second, never re-read source files until editing. SessionStart(compact) hook in `~/.claude/settings.json` reinforces it. |
 | `CodexQC` | `/CodexQC` or before merging a branch | GPT-5.x independent second-opinion review. Output saved to `.codex-qc/`. Claude fixes; Codex reports only. |
 | `advisoryboard` | `/advisoryboard`, "Team", business decision, pivot | Four-persona accountability panel: Partner, Advisor, Colleague, Friend. Verdict first, no rescuing bad ideas. |
+| `handoff` | `/handoff <project>` or "give me a VZT handoff" | Pulls MC status + vault context + checkpoint into a single paste-ready brief. Drop it as the first message in a fresh project window to resume without losing a step. |
 
 ---
 
