@@ -418,6 +418,7 @@ export default function VaultPage() {
           onClose={handleClose}
           onUpdated={handleUpdated}
           onDeleted={handleDeleted}
+          onSelect={handleSelect}
         />
       )}
 

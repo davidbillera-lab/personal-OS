@@ -26,9 +26,10 @@ interface Props {
   onClose: () => void
   onUpdated: () => void
   onDeleted: (id: string) => void
+  onSelect?: (item: VaultItemListItem) => void
 }
 
-export function VaultSidePanel({ item, onClose, onUpdated, onDeleted }: Props) {
+export function VaultSidePanel({ item, onClose, onUpdated, onDeleted, onSelect }: Props) {
   const [editMode, setEditMode] = useState(false)
   const [title, setTitle] = useState(item.title)
   const [content, setContent] = useState('')
@@ -301,13 +302,20 @@ export function VaultSidePanel({ item, onClose, onUpdated, onDeleted }: Props) {
               ) : (
                 <div className="flex flex-col gap-2">
                   {related.map(r => (
-                    <div key={r.id} className="rounded-lg border border-white/10 bg-white/3 px-3 py-2">
-                      <div className="flex items-center gap-2">
+                    <div
+                      key={r.id}
+                      onClick={() => onSelect?.(r)}
+                      className={`rounded-lg border border-white/10 bg-white/3 px-3 py-2 ${onSelect ? 'cursor-pointer hover:border-violet-500/50 hover:bg-white/5 transition-colors' : ''}`}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
                         <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-medium ring-1 ${TYPE_BADGE[r.type]}`}>
                           {r.type}
                         </span>
-                        <span className="text-xs text-gray-300 truncate">{r.title}</span>
+                        <span className="text-xs text-gray-300">{r.title}</span>
                       </div>
+                      {!r.encrypted && r.content && (
+                        <p className="text-[11px] text-gray-500 leading-relaxed line-clamp-3">{r.content}</p>
+                      )}
                     </div>
                   ))}
                 </div>
