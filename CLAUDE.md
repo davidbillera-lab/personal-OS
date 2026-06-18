@@ -10,7 +10,7 @@ mission_control_id: 698d6376-5819-400b-babc-cd664ee36c04
 
 ## What This Is
 
-A portfolio operating system — "Mission Control" — for an AI-native holding company. JSG Estate Liquidators is the cash-flowing parent; underneath it, multiple potentially-millions-of-dollars SaaS plays are being incubated (VZT multi-tenant, REELFLOW multi-tenant, Marblism agency, Deal Finder, College Climb).
+A portfolio operating system — "Mission Control" — for an AI-native holding company. JSG Estate Liquidators is the cash-flowing parent; underneath it, multiple potentially-millions-of-dollars SaaS plays are being incubated (VZT multi-tenant, REELFLOW multi-tenant, Marblism agency, FlipRadar, College Climb).
 
 **This is not a personal productivity tool. It is the connective tissue of a future holdco.**
 
