@@ -97,6 +97,7 @@ Skills are installed in `~/.claude/skills/`. Any agent working on this project m
 | `CodexQC` | `/CodexQC` or before merging a branch | GPT-5.x independent second-opinion review. Output saved to `.codex-qc/`. Claude fixes; Codex reports only. |
 | `advisoryboard` | `/advisoryboard`, "Team", business decision, pivot | Four-persona accountability panel: Partner, Advisor, Colleague, Friend. Verdict first, no rescuing bad ideas. |
 | `handoff` | `/handoff <project>` or "give me a VZT handoff" | Pulls MC status + vault context + checkpoint into a single paste-ready brief. Drop it as the first message in a fresh project window to resume without losing a step. |
+| `phase-relay` | `/phase-relay` or auto-triggered from davids-way Step 4 on 3+ sequential pieces | Serial multi-agent relay for phased builds. Each piece gets its own fresh context window connected by a handoff doc. Prevents context rot and compact thrashing on long sequential builds. |
 
 ---
 
