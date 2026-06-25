@@ -1,5 +1,5 @@
 ﻿import { createAdminSupabaseClient } from '@/lib/supabase'
-import { decrypt } from '@/lib/crypto'
+import { decrypt, encrypt } from '@/lib/crypto'
 import { fetchGitHubDiff } from '@/lib/github'
 import { runCodexQC, rerunCodexQCOnSpec } from '@/app/(app)/projects/[id]/actions'
 import { captureToVault } from '@/lib/vault'
@@ -168,6 +168,53 @@ export const MCP_TOOLS: McpTool[] = [
         limit:  { type: 'number', description: 'Max items to return (default 25, max 100)' },
         offset: { type: 'number', description: 'Number of items to skip, for paging (default 0)' },
       },
+    },
+  },
+  {
+    name: 'mc_write_vault',
+    description: 'Insert a new vault_items row with embedding. Use to push specs, decisions, agent sessions, or knowledge from any project agent into Mission Control\'s vault.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title:    { type: 'string', description: 'Title for the vault item' },
+        content:  { type: 'string', description: 'Full content body to store and embed' },
+        type:     { type: 'string', description: 'Vault item type (e.g. spec, decision, agent-session, knowledge)' },
+        tags:     { type: 'string', description: 'JSON array of string tags, e.g. ["build","flipradar"]' },
+        metadata: { type: 'string', description: 'JSON object of additional metadata' },
+      },
+      required: ['title', 'content', 'type'],
+    },
+  },
+  {
+    name: 'mc_update_vault',
+    description: 'Update an existing vault_items row. Looks up by id, or by title+type if id is not provided. Re-embeds if content changes.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id:       { type: 'string', description: 'UUID of the vault item to update (preferred)' },
+        title:    { type: 'string', description: 'Title of the item (used for lookup when id is absent; also updated if provided alongside id)' },
+        type:     { type: 'string', description: 'Type of the item (required for title+type lookup when id is absent)' },
+        content:  { type: 'string', description: 'New content body (triggers re-embedding)' },
+        tags:     { type: 'string', description: 'JSON array of string tags to replace existing tags' },
+        metadata: { type: 'string', description: 'JSON object to replace existing metadata' },
+      },
+    },
+  },
+  {
+    name: 'mc_capture_credential',
+    description: 'Write an AES-256-GCM encrypted credential to the credentials table. Use to store API keys and secrets from any project. NEVER writes to vault_items.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name:        { type: 'string', description: 'Human-readable credential name (e.g. "FlipRadar OpenAI Key")' },
+        value:       { type: 'string', description: 'The secret value to encrypt and store' },
+        description: { type: 'string', description: 'Optional notes about the credential' },
+        project_id:  { type: 'string', description: 'Optional project UUID to associate with this credential' },
+      },
+      required: ['name', 'value'],
     },
   },
 ]
@@ -507,6 +554,119 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
         created_at: r.created_at,
       }))
     )
+  }
+
+  if (name === 'mc_write_vault') {
+    const { title, content, type: itemType } = args
+    if (!title || !content || !itemType) throw new Error('title, content, and type are required')
+
+    let tags: string[] = []
+    let metadata: Record<string, unknown> = {}
+    try { if (args.tags) tags = JSON.parse(args.tags as string) } catch { /* ignore */ }
+    try { if (args.metadata) metadata = JSON.parse(args.metadata as string) } catch { /* ignore */ }
+
+    const { data, error } = await supabase
+      .from('vault_items')
+      .insert({
+        type: itemType,
+        title,
+        content,
+        encrypted: false,
+        tags,
+        metadata,
+        is_mcp_accessible: true,
+        capture_source: 'mcp_write',
+      })
+      .select('id, title, type')
+      .single()
+
+    if (error || !data) throw new Error(error?.message ?? 'Insert failed')
+
+    try {
+      const { embedVaultItem } = await import('@/lib/vault')
+      const embedding = await embedVaultItem(title, content, false)
+      await supabase.from('vault_items').update({ embedding }).eq('id', data.id)
+    } catch (embErr) {
+      console.error('[mc_write_vault] embed failed (non-fatal):', embErr)
+    }
+
+    return JSON.stringify({ id: data.id, title: data.title, type: data.type })
+  }
+
+  if (name === 'mc_update_vault') {
+    const { id, title, content, type: itemType } = args
+
+    // Resolve the target row
+    let targetId = id
+    if (!targetId) {
+      if (!title || !itemType) throw new Error('Provide id, or both title and type for lookup')
+      const { data: found, error: findErr } = await supabase
+        .from('vault_items')
+        .select('id')
+        .eq('title', title)
+        .eq('type', itemType)
+        .single()
+      if (findErr || !found) throw new Error(`Vault item not found: type=${itemType} title=${title}`)
+      targetId = found.id
+    }
+
+    const updates: Record<string, unknown> = {}
+    if (content !== undefined) updates.content = content
+    if (args.tags !== undefined) {
+      try { updates.tags = JSON.parse(args.tags as string) } catch { /* ignore */ }
+    }
+    if (args.metadata !== undefined) {
+      try { updates.metadata = JSON.parse(args.metadata as string) } catch { /* ignore */ }
+    }
+    if (title !== undefined) updates.title = title
+
+    if (Object.keys(updates).length === 0) throw new Error('No fields provided to update')
+
+    const { data: updated, error: updateErr } = await supabase
+      .from('vault_items')
+      .update(updates)
+      .eq('id', targetId)
+      .select('id, title, type')
+      .single()
+
+    if (updateErr || !updated) throw new Error(updateErr?.message ?? 'Update failed')
+
+    if (content !== undefined) {
+      try {
+        const { embedVaultItem } = await import('@/lib/vault')
+        const embTitle = (updates.title as string | undefined) ?? updated.title
+        const embedding = await embedVaultItem(embTitle, content, false)
+        await supabase.from('vault_items').update({ embedding }).eq('id', targetId)
+      } catch (embErr) {
+        console.error('[mc_update_vault] embed failed (non-fatal):', embErr)
+      }
+    }
+
+    return JSON.stringify({ id: updated.id, title: updated.title, updated: true })
+  }
+
+  if (name === 'mc_capture_credential') {
+    const { name: credName, value, description, project_id } = args
+    if (!credName || !value) throw new Error('name and value are required')
+
+    const encryptedValue = encrypt(value)
+
+    const { data, error } = await supabase
+      .from('credentials')
+      .insert({
+        name: credName,
+        key_name: credName.toUpperCase().replace(/\s+/g, '_'),
+        value: encryptedValue,
+        tier: 'standard',
+        project_id: project_id ?? null,
+        is_mcp_accessible: false,
+        notes: description ?? null,
+      })
+      .select('id, name')
+      .single()
+
+    if (error || !data) throw new Error(error?.message ?? 'Insert failed')
+    return JSON.stringify({ id: data.id, name: data.name })
   }
 
   throw new Error(`Unknown tool: ${name}`)
