@@ -39,16 +39,15 @@ function createAdminSupabaseClient() {
   })
 }
 
-// AES-256-GCM decrypt — format: ivHex:authTagHex:cipherHex (matches lib/crypto.ts)
+// AES-256-GCM decrypt — format: iv(24 hex) + authTag(32 hex) + ciphertext(hex) — no separators, matches lib/crypto.ts
 function decrypt(encrypted) {
   const key = Buffer.from(process.env.CREDENTIAL_ENCRYPTION_KEY, 'hex')
-  const [ivHex, authTagHex, cipherHex] = encrypted.split(':')
-  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'))
-  decipher.setAuthTag(Buffer.from(authTagHex, 'hex'))
-  return Buffer.concat([
-    decipher.update(Buffer.from(cipherHex, 'hex')),
-    decipher.final(),
-  ]).toString('utf8')
+  const iv = Buffer.from(encrypted.slice(0, 24), 'hex')
+  const tag = Buffer.from(encrypted.slice(24, 56), 'hex')
+  const cipher = Buffer.from(encrypted.slice(56), 'hex')
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv)
+  decipher.setAuthTag(tag)
+  return Buffer.concat([decipher.update(cipher), decipher.final()]).toString('utf8')
 }
 
 // AES-256-GCM encrypt — format: iv(24 hex) + authTag(32 hex) + ciphertext(hex) — no separators, matches lib/crypto.ts
