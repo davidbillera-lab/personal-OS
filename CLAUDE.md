@@ -98,6 +98,8 @@ Skills are installed in `~/.claude/skills/`. Any agent working on this project m
 | `advisoryboard` | `/advisoryboard`, "Team", business decision, pivot | Four-persona accountability panel: Partner, Advisor, Colleague, Friend. Verdict first, no rescuing bad ideas. |
 | `handoff` | `/handoff <project>` or "give me a VZT handoff" | Pulls MC status + vault context + checkpoint into a single paste-ready brief. Drop it as the first message in a fresh project window to resume without losing a step. |
 | `phase-relay` | `/phase-relay` or auto-triggered from davids-way Step 4 on 3+ sequential pieces | Serial multi-agent relay for phased builds. Each piece gets its own fresh context window connected by a handoff doc. Prevents context rot and compact thrashing on long sequential builds. |
+| `davids-agents` | `/davids-agents` or any sequential multi-step task with 3+ heavy steps | Pre-task context evaluation gate → serial subagent relay if thrash risk detected. Each subagent handles one step in a fresh window; handoff summaries passed as cold-start context. Eliminates autocompact thrashing on long sequential builds. |
+| `handoff-summary` | `/handoff-summary` or "give me a handoff summary" | Synthesizes the CURRENT SESSION state into a single paste-ready block — what was done, what's next, key files, constraints, and a suggested first message. Paste into a fresh window to resume exactly where you left off. Distinct from `/handoff` (which is project-named, pulls from MC/vault). |
 
 ---
 
