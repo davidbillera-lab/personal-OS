@@ -224,3 +224,12 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 **Reasoning:** The nested-repo gitlink forced double commits — every nested change required a pointer-bump commit in personal-os — with none of the benefits of a real submodule (no `.gitmodules`, no pinning intent). The project has its own GitHub remote and release cadence; sibling-repo layout matches the rest of the portfolio and keeps personal-os a pure command layer (repos are the source of truth, the OS reflects state).
 **Consequence:** Agents working on video-optimizer-app open `C:\Users\david\video-optimizer-app` directly; personal-os no longer tracks its state in git. Docs referencing the old `projects/` path were updated (`docs/video-optimizer-app.md`, `docs/lint-triage-video-optimizer.md`).
 **Made by:** operator + agent
+
+---
+
+### 2026-07-01 — mc_capture_credential fixed: tier must derive from scope, not 'standard'
+
+**Decision:** `mcp-server.mjs` `mc_capture_credential` now writes `tier: project_id ? 'project' : 'global'`. It previously hardcoded `tier: 'standard'`, which violates the `credentials_tier_check` DB constraint (`tier IN ('global','project')`) — every capture failed. Existing rows predate the drift.
+**Reasoning:** Schema and server drifted; the constraint is the correct source of truth (global vs project scoping matches how credentials are actually used). Discovered when vaulting College Climb's SCORECARD_API_KEY. Interim rows (Scorecard key + campus-climb Supabase/Stripe creds) were written via direct SQL using the identical AES-256-GCM format and round-trip verified through the live server's `mc_get_credential`.
+**Consequence:** The running MCP server process still has the old code — the fix takes effect on next Claude Code session (or MCP reconnect). Sensitive creds (service role, Stripe secrets, webhook) are stored `is_mcp_accessible=false`: vault-recorded but not agent-fetchable, matching existing convention.
+**Made by:** agent (root-cause fix during College Climb credential sync)

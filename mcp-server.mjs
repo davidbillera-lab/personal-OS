@@ -676,7 +676,8 @@ async function callTool(name, args) {
         name: credName,
         key_name: credName.toUpperCase().replace(/\s+/g, '_'),
         value: encryptedValue,
-        tier: 'standard',
+        // DB check constraint allows only 'global' | 'project' — derive from scope.
+        tier: project_id ? 'project' : 'global',
         project_id: project_id ?? null,
         is_mcp_accessible: false,
         notes: description ?? null,
