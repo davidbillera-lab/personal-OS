@@ -1,6 +1,7 @@
 // Pure graph-building logic for the Vault galaxy. No canvas, no React —
 // everything here is unit-testable in isolation.
 import type { VaultItemType } from '@/lib/types'
+import type { VaultItemListItem } from '@/app/(app)/vault/actions'
 
 export type NodeClass = 'planet' | 'star' | 'hub'
 
@@ -50,4 +51,84 @@ export function hashPhase(id: string): number {
   let h = 0
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0
   return (Math.abs(h) % 6283) / 1000
+}
+
+export interface GalaxyNode {
+  id: string
+  label: string
+  cls: NodeClass
+  type?: VaultItemType
+  item?: VaultItemListItem
+  degree: number
+  radius: number
+  brightness: number
+  fresh: boolean
+  phase: number
+  x?: number
+  y?: number
+}
+
+export interface GalaxyLink { source: string; target: string }
+
+export interface Galaxy {
+  nodes: GalaxyNode[]
+  links: GalaxyLink[]
+  neighbors: Map<string, Set<string>>
+}
+
+export const UNTAGGED_HUB_ID = 'tag:__untagged'
+
+// Tag-hub model: items link to their tags, never to each other.
+// Edge count is linear in item count; force physics forms the clusters.
+export function buildGalaxy(items: VaultItemListItem[], now: number = Date.now()): Galaxy {
+  const links: GalaxyLink[] = []
+  const hubMembers = new Map<string, number>()
+  const neighbors = new Map<string, Set<string>>()
+
+  const connect = (itemId: string, hubId: string) => {
+    links.push({ source: itemId, target: hubId })
+    hubMembers.set(hubId, (hubMembers.get(hubId) ?? 0) + 1)
+    if (!neighbors.has(itemId)) neighbors.set(itemId, new Set())
+    if (!neighbors.has(hubId)) neighbors.set(hubId, new Set())
+    neighbors.get(itemId)!.add(hubId)
+    neighbors.get(hubId)!.add(itemId)
+  }
+
+  for (const item of items) {
+    if (item.tags.length === 0) {
+      connect(item.id, UNTAGGED_HUB_ID)
+    } else {
+      for (const tag of item.tags) connect(item.id, `tag:${tag}`)
+    }
+  }
+
+  const itemNodes: GalaxyNode[] = items.map(item => {
+    const cls = classifyType(item.type)
+    const degree = Math.max(item.tags.length, 1)
+    return {
+      id: item.id,
+      label: item.title,
+      cls,
+      type: item.type,
+      item,
+      degree,
+      radius: nodeRadius(cls, degree),
+      brightness: ageBrightness(item.updated_at, now, cls),
+      fresh: isFresh(item.updated_at, now),
+      phase: hashPhase(item.id),
+    }
+  })
+
+  const hubNodes: GalaxyNode[] = [...hubMembers.entries()].map(([hubId, count]) => ({
+    id: hubId,
+    label: hubId === UNTAGGED_HUB_ID ? 'untagged' : hubId.slice(4),
+    cls: 'hub' as const,
+    degree: count,
+    radius: nodeRadius('hub', count),
+    brightness: 0.9,
+    fresh: false,
+    phase: hashPhase(hubId),
+  }))
+
+  return { nodes: [...itemNodes, ...hubNodes], links, neighbors }
 }
