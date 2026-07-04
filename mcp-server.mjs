@@ -186,7 +186,7 @@ const MCP_TOOLS = [
   },
   {
     name: 'mc_get_vault_context',
-    description: 'Semantic search over vault items. Pass the current task description to get relevant skills, agent roles, and knowledge items back. Never returns encrypted or personal items.',
+    description: 'Semantic search over vault items. Pass the current task description to get relevant skills, agent roles, and knowledge items back as 200-char previews with ids. Call mc_get_vault_item with an id to fetch full content — do NOT re-search with broader queries to see more text. Never returns encrypted or personal items.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -194,6 +194,17 @@ const MCP_TOOLS = [
         limit: { type: 'number', description: 'Max items to return (default 8, max 20)' },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: 'mc_get_vault_item',
+    description: "Fetch ONE vault item's full content by id. Token-lean pattern: search with mc_get_vault_context or list with mc_browse_vault (cheap previews), then call this for the single item you actually need. Never returns encrypted or personal items.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Vault item UUID from a prior search or browse result' },
+      },
+      required: ['id'],
     },
   },
   {
@@ -464,10 +475,26 @@ async function callTool(name, args) {
         id: r.id,
         type: r.type,
         title: r.title,
-        content: r.content.slice(0, 500),
+        content: r.content.slice(0, 200),
+        truncated: r.content.length > 200,
         tags: r.tags,
       }))
     )
+  }
+
+  if (name === 'mc_get_vault_item') {
+    const { id } = args
+    if (!id) throw new Error('id is required')
+    const { data, error } = await supabase
+      .from('vault_items')
+      .select('id, type, title, content, tags, project_id, created_at, updated_at')
+      .eq('id', id)
+      .eq('encrypted', false)
+      .eq('is_mcp_accessible', true)
+      .not('type', 'in', '(credential,personal)')
+      .single()
+    if (error || !data) throw new Error(`Vault item not found or not MCP-accessible: ${id}`)
+    return JSON.stringify(data)
   }
 
   if (name === 'mc_list_skills') {
