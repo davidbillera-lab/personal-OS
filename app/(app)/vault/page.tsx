@@ -1,9 +1,9 @@
 'use client'
 
 import { useEffect, useState, useTransition } from 'react'
+import Link from 'next/link'
 import { listVaultItems, listCredentials, listProjectNames, createVaultItem, revealCredential, updateCredential, deleteCredential, type VaultItemListItem, type CredentialListItem } from './actions'
 import { VaultList } from '@/components/VaultList'
-import { VaultGraph } from '@/components/VaultGraph'
 import { VaultSidePanel } from '@/components/VaultSidePanel'
 import type { VaultItemType } from '@/lib/types'
 
@@ -272,7 +272,6 @@ export default function VaultPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState<VaultItemType | 'all'>('all')
-  const [view, setView] = useState<'list' | 'graph'>('list')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
   const [, startLoad] = useTransition()
@@ -368,39 +367,36 @@ export default function VaultPage() {
             </div>
           )}
 
-          {view === 'list' ? (
-            <VaultList
-              items={displayItems}
-              search={search}
-              typeFilter={typeFilter}
-              selectedId={selectedId}
-              onSearch={setSearch}
-              onTypeFilter={setTypeFilter}
-              onSelect={handleSelect}
-              onViewChange={setView}
-              view={view}
-            />
-          ) : (
-            <>
-              <VaultList
-                items={displayItems}
-                search={search}
-                typeFilter={typeFilter}
-                selectedId={selectedId}
-                onSearch={setSearch}
-                onTypeFilter={setTypeFilter}
-                onSelect={handleSelect}
-                onViewChange={setView}
-                view={view}
-              />
-              <VaultGraph
-                items={displayItems}
-                search={search}
-                selectedId={selectedId}
-                onSelect={handleSelect}
-              />
-            </>
-          )}
+          <Link
+            href="/vault/graph"
+            className="group relative flex items-center justify-between rounded-xl border border-white/10 bg-gradient-to-r from-[#0b1120] to-[#151030] px-5 py-4 overflow-hidden hover:border-violet-500/40 transition-colors"
+          >
+            <div className="relative z-10">
+              <p className="text-sm font-medium text-white">✦ Galaxy view</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {items.length} items orbiting {new Set(items.flatMap(i => i.tags)).size} topics — explore the second brain as a living map
+              </p>
+            </div>
+            <span className="relative z-10 text-xs text-violet-300 group-hover:text-violet-200">Open →</span>
+            <svg className="absolute inset-0 w-full h-full opacity-40" aria-hidden="true">
+              <circle cx="72%" cy="30%" r="2.5" fill="#22c55e" />
+              <circle cx="80%" cy="60%" r="1.5" fill="#3b82f6" />
+              <circle cx="88%" cy="38%" r="2" fill="#f59e0b" />
+              <circle cx="64%" cy="68%" r="1" fill="#94a3b8" />
+              <circle cx="93%" cy="70%" r="1" fill="#94a3b8" />
+              <circle cx="58%" cy="42%" r="1.2" fill="#a855f7" />
+            </svg>
+          </Link>
+
+          <VaultList
+            items={displayItems}
+            search={search}
+            typeFilter={typeFilter}
+            selectedId={selectedId}
+            onSearch={setSearch}
+            onTypeFilter={setTypeFilter}
+            onSelect={handleSelect}
+          />
         </>
       )}
 
