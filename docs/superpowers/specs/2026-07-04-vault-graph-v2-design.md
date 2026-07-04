@@ -50,6 +50,13 @@ The Vault graph has become an unreadable hairball as the vault grows:
 
 **Labels:** zoom-gated. Far zoom shows only tag-hub territory labels; item labels fade in past a zoom threshold or on hover/selection. This removes the label-collision mess entirely.
 
+**Ambient motion — "living galaxy" (operator requirement):**
+
+- **Shimmer:** stars twinkle — a slow per-node brightness oscillation with randomized phase offsets (seeded from node id) so the field flickers organically, never in unison. Planets get a subtle animated sheen drift on their gradient highlight. Both are time-based effects inside the canvas draw loop; no physics involvement.
+- **Galaxy rotation:** the entire field drifts in a very slow rotation around the graph centroid (~minutes per revolution — barely perceptible while watching). Implemented as a camera/coordinate transform, not by moving node physics positions.
+- **Interaction guard:** ambient rotation eases to a stop on any interaction (hover, drag, pan, zoom-in past the reading threshold, tour active) and eases back in after a few seconds idle. Hover targets never slide out from under the cursor. Shimmer stays on always — it doesn't affect hit targets.
+- All ambient animation runs off a single `requestAnimationFrame` clock; effects must degrade gracefully (rotation and shimmer off) if the tab reports reduced-motion preference.
+
 **Search/filter behavior:** unchanged in spirit — matches stay bright, non-matches dim to ~10%; hover/selection neighborhood highlighting preserved.
 
 ### 3. Guided tour — "What is this?"
@@ -115,3 +122,4 @@ Net effect: typical context pull drops from ~4k chars of previews to ~1.6k, and 
 - Explainer: **guided tour on live graph**, not a separate page
 - Approach: **evolve existing engine + promote graph to full-screen route** (~2 sessions)
 - Operator addition at approval: **hover-grow emphasis** on all nodes
+- Operator addition post-approval: **living-galaxy ambient motion** — star twinkle, planet sheen, slow whole-field rotation that pauses during interaction
