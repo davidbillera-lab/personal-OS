@@ -73,7 +73,7 @@ When an idea graduates from inbox to build:
 - **Model APIs:** Anthropic SDK + OpenAI SDK + Gemini SDK behind a single `/api/route-task` endpoint that picks the model by `complexity_tier`
 - **GitHub API:** for repo context loading and project file sync
 - **Auth:** Supabase auth (operator + Vinnie roles eventually)
-- **Vault:** `vault_items` table — cross-session memory. Stores decisions, specs, agent sessions, brain dumps. OpenAI `text-embedding-3-small` for semantic search. Auto-captured via `captureToVault()` in `lib/vault.ts`. Queried via `mc_get_vault_context` (semantic) or `mc_browse_vault` (browse by type/recency).
+- **Vault:** `vault_items` table — cross-session memory. Stores decisions, specs, agent sessions, brain dumps. OpenAI `text-embedding-3-small` for semantic search. Auto-captured via `captureToVault()` in `lib/vault.ts`. Queried via `mc_get_vault_context` (semantic, 200-char previews) or `mc_browse_vault` (browse by type/recency), with `mc_get_vault_item` for full single-item fetch.
 - **MCP server:** `/api/mcp` endpoint deployed on Vercel. Agents connect via `Bearer MCP_API_KEY` (token in `.mcp.json` + `.claude/settings.local.json`). Exposes: project context, tasks, vault, credentials, skills. On Windows, always source MCP_API_KEY from `settings.local.json` — OS env propagation is unreliable.
 
 **Supabase pattern:** All server-side calls use `createAdminSupabaseClient()` (service role key, bypasses RLS). Never use `createServerSupabaseClient()` in server actions or API routes — it silently fails behind RLS.
