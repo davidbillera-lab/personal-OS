@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { listVaultItems, listProjectNames, type VaultItemListItem } from '../actions'
 import { VaultGraph, type VaultGraphHandle } from '@/components/VaultGraph'
 import { VaultSidePanel } from '@/components/VaultSidePanel'
+import { VaultGraphTour } from '@/components/VaultGraphTour'
 import { STAR_TYPES } from '@/lib/vault-graph'
 import type { VaultItemType } from '@/lib/types'
 
@@ -28,6 +29,7 @@ export default function VaultGraphPage() {
   const [projectFilter, setProjectFilter] = useState<'all' | string>('all')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [tourOpen, setTourOpen] = useState(false)
+  const [tourDim, setTourDim] = useState<Set<string> | null>(null)
   const graphHandle = useRef<VaultGraphHandle | null>(null)
 
   async function load() {
@@ -68,6 +70,7 @@ export default function VaultGraphPage() {
         search={search}
         selectedId={selectedId}
         onSelect={item => setSelectedId(item.id)}
+        dimExcept={tourDim}
         paused={tourOpen}
         handleRef={graphHandle}
       />
@@ -142,7 +145,13 @@ export default function VaultGraphPage() {
         />
       )}
 
-      {/* TOUR MOUNT — Task 6 renders <VaultGraphTour> here when tourOpen */}
+      {tourOpen && (
+        <VaultGraphTour
+          handle={graphHandle}
+          onDim={setTourDim}
+          onClose={() => setTourOpen(false)}
+        />
+      )}
     </div>
   )
 }
