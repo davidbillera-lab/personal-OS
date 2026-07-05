@@ -73,7 +73,7 @@ export default function VaultGraphPage() {
     }`
 
   return (
-    <div className="fixed inset-0 z-40 bg-[#030712]">
+    <div className="fixed inset-0 z-40" style={{ background: '#030712' }}>
       <VaultGraph
         items={displayItems}
         search={search}

@@ -153,15 +153,18 @@ export function VaultGraph({ items, search, selectedId, onSelect, onSelectHub, d
     }
     if (n === 0) return
     cx /= n; cy /= n
-    let maxR = 0
+    // Robust radius: 92nd percentile of node distances (×1.1) — one straggler
+    // clump shouldn't shrink the whole galaxy into the middle of the frame.
+    const dists: number[] = []
     for (const node of nodes) {
       if (node.x === undefined || node.y === undefined) continue
-      const d = Math.hypot(node.x - cx, node.y - cy) + node.radius * 2
-      if (d > maxR) maxR = d
+      dists.push(Math.hypot(node.x - cx, node.y - cy) + node.radius * 2)
     }
+    dists.sort((a, b) => a - b)
+    const fitR = dists[Math.floor(0.92 * (dists.length - 1))] * 1.1
     const { w, h } = sizeRef.current
     // 72px breathing room: clears the toolbar and keeps labels off the edges
-    const k = Math.min(Math.max((Math.min(w, h) - 144) / (2 * Math.max(maxR, 1)), 0.05), 4)
+    const k = Math.min(Math.max((Math.min(w, h) - 144) / (2 * Math.max(fitR, 1)), 0.05), 4)
     fg.centerAt(cx, cy, ms)
     fg.zoom(k, ms)
   }, [])
@@ -536,16 +539,16 @@ export function VaultGraph({ items, search, selectedId, onSelect, onSelectHub, d
     lastInteraction.current = performance.now()
   }, [])
 
-  if (items.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-full min-h-96 text-sm text-gray-500">
-        No vault items to display in graph.
-      </div>
-    )
-  }
-
+  // The container div must render on EVERY pass — including the empty/loading
+  // state — so the ResizeObserver attaches on first mount. An early return
+  // here once left the ref null forever and froze the canvas at 800×600.
   return (
-    <div ref={containerRef} className="w-full h-full bg-[#030712]">
+    <div ref={containerRef} className="w-full h-full" style={{ background: '#030712' }}>
+      {items.length === 0 ? (
+        <div className="flex items-center justify-center h-full text-sm text-gray-500">
+          No vault items to display in graph.
+        </div>
+      ) : (
       <ForceGraph2D
         fgRef={fgRef}
         graphData={galaxy}
@@ -579,6 +582,7 @@ export function VaultGraph({ items, search, selectedId, onSelect, onSelectHub, d
           }
         }) as never}
       />
+      )}
     </div>
   )
 }
