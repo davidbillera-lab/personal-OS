@@ -4,9 +4,28 @@ import type { VaultItemType } from '@/lib/types'
 import type { VaultItemListItem } from '@/app/(app)/vault/actions'
 
 export type NodeClass = 'planet' | 'star' | 'hub'
+export type PlanetVariant = 'ringed' | 'banded' | 'swirl' | 'smooth'
 
 // Auto-captured exhaust renders as tiny "distant stars"; everything else is a planet.
 export const STAR_TYPES: VaultItemType[] = ['git_push', 'agent_session', 'file_snapshot', 'mcp_event']
+
+// Significance per type — drives node size so the galaxy reads at a glance:
+// decisions/specs are gas giants, knowledge/skills mid planets, dumps small, exhaust dim stars.
+export const TYPE_WEIGHT: Record<VaultItemType, number> = {
+  decision_log:      1,
+  build_spec:        1,
+  knowledge:         0.85,
+  skill:             0.8,
+  agent:             0.8,
+  personal:          0.65,
+  credential:        0.65,
+  ab_conversation:   0.55,
+  brain_dump_mirror: 0.5,
+  agent_session:     0.45,
+  git_push:          0.3,
+  file_snapshot:     0.25,
+  mcp_event:         0.2,
+}
 
 export function classifyType(type: VaultItemType): 'planet' | 'star' {
   return STAR_TYPES.includes(type) ? 'star' : 'planet'
@@ -38,19 +57,34 @@ export function isFresh(updatedAt: string, now: number): boolean {
   return (now - ts) / DAY_MS <= FRESH_DAYS
 }
 
-// Size bands: planets 5–9px by connectivity (never grape-sized), stars 1.5–2.5px,
-// tag hubs 4–9px by member count.
-export function nodeRadius(cls: NodeClass, degree: number): number {
-  if (cls === 'planet') return 5 + Math.min(degree, 8) * 0.5
-  if (cls === 'star') return 1.5 + Math.min(degree, 4) * 0.25
-  return Math.min(4 + Math.sqrt(Math.max(degree, 0)), 9)
+// Size bands driven by significance (weight² spreads the range) PLUS content
+// volume (log of chars — a 40k-char spec is a gas giant, a one-liner a rock)
+// plus connectivity: planets ~3–17px, stars ~1–2.5px, hub suns 5–14px.
+export function nodeRadius(cls: NodeClass, degree: number, weight = 0.7, contentLength = 0): number {
+  if (cls === 'planet') {
+    const volume = Math.max(Math.log10(Math.max(contentLength, 10)) - 1, 0) // 0 at ≤10 chars → ~4 at 100k
+    return Math.min(2 + weight * weight * 7 + volume * 1.7 + Math.min(degree, 6) * 0.6, 17)
+  }
+  if (cls === 'star') return 0.8 + weight * 1.6 + Math.min(degree, 4) * 0.15
+  return Math.min(5 + Math.sqrt(Math.max(degree, 0)) * 1.6, 14)
+}
+
+function hashCode(id: string): number {
+  let h = 0
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0
+  return Math.abs(h)
 }
 
 // Deterministic per-node phase offset in [0, 2π) so twinkle/sheen never sync up.
 export function hashPhase(id: string): number {
-  let h = 0
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0
-  return (Math.abs(h) % 6283) / 1000
+  return (hashCode(id) % 6283) / 1000
+}
+
+// Deterministic surface look. Top-significance planets get rings; the rest
+// split between banded (Jupiter), swirl (storm), and smooth surfaces.
+export function planetVariant(id: string, weight: number): PlanetVariant {
+  if (weight >= 0.95) return 'ringed'
+  return (['banded', 'swirl', 'smooth'] as const)[hashCode(id) % 3]
 }
 
 export interface GalaxyNode {
@@ -61,6 +95,8 @@ export interface GalaxyNode {
   item?: VaultItemListItem
   degree: number
   radius: number
+  weight: number
+  variant?: PlanetVariant
   brightness: number
   fresh: boolean
   phase: number
@@ -105,6 +141,7 @@ export function buildGalaxy(items: VaultItemListItem[], now: number = Date.now()
   const itemNodes: GalaxyNode[] = items.map(item => {
     const cls = classifyType(item.type)
     const degree = Math.max(item.tags.length, 1)
+    const weight = TYPE_WEIGHT[item.type] ?? 0.6
     return {
       id: item.id,
       label: item.title,
@@ -112,7 +149,9 @@ export function buildGalaxy(items: VaultItemListItem[], now: number = Date.now()
       type: item.type,
       item,
       degree,
-      radius: nodeRadius(cls, degree),
+      radius: nodeRadius(cls, degree, weight, item.content.length),
+      weight,
+      variant: cls === 'planet' ? planetVariant(item.id, weight) : undefined,
       brightness: ageBrightness(item.updated_at, now, cls),
       fresh: isFresh(item.updated_at, now),
       phase: hashPhase(item.id),
@@ -125,6 +164,7 @@ export function buildGalaxy(items: VaultItemListItem[], now: number = Date.now()
     cls: 'hub' as const,
     degree: count,
     radius: nodeRadius('hub', count),
+    weight: 1,
     brightness: 0.9,
     fresh: false,
     phase: hashPhase(hubId),

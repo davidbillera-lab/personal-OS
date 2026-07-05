@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   classifyType, ageBrightness, nodeRadius, hashPhase, isFresh, STAR_TYPES,
-  buildGalaxy, UNTAGGED_HUB_ID,
+  buildGalaxy, UNTAGGED_HUB_ID, TYPE_WEIGHT, planetVariant,
 } from '@/lib/vault-graph'
 import type { VaultItemListItem } from '@/app/(app)/vault/actions'
 
@@ -53,18 +53,48 @@ describe('ageBrightness', () => {
 })
 
 describe('nodeRadius', () => {
-  it('planets stay in the 5–9px band', () => {
-    expect(nodeRadius('planet', 0)).toBe(5)
-    expect(nodeRadius('planet', 100)).toBeLessThanOrEqual(9)
-    expect(nodeRadius('planet', 4)).toBeGreaterThan(nodeRadius('planet', 1))
+  it('planet size scales with significance weight (equal content volume)', () => {
+    const dump = nodeRadius('planet', 1, TYPE_WEIGHT.brain_dump_mirror, 1000)
+    const know = nodeRadius('planet', 1, TYPE_WEIGHT.knowledge, 1000)
+    const decision = nodeRadius('planet', 1, TYPE_WEIGHT.decision_log, 1000)
+    expect(dump).toBeLessThan(know)
+    expect(know).toBeLessThan(decision)
+    expect(decision).toBeGreaterThanOrEqual(12)   // gas giant
+    expect(dump).toBeLessThanOrEqual(8)           // small rock
   })
-  it('stars stay in the 1.5–2.5px band', () => {
-    expect(nodeRadius('star', 0)).toBe(1.5)
-    expect(nodeRadius('star', 100)).toBeLessThanOrEqual(2.5)
+  it('planet size scales with content volume (same type)', () => {
+    const brief = nodeRadius('planet', 1, TYPE_WEIGHT.knowledge, 100)
+    const spec = nodeRadius('planet', 1, TYPE_WEIGHT.knowledge, 100_000)
+    expect(brief).toBeLessThan(spec)
+    expect(spec - brief).toBeGreaterThan(3)       // the difference is visible, not cosmetic
+    expect(spec).toBeLessThanOrEqual(17)
   })
-  it('hubs scale with item count, capped at 9', () => {
-    expect(nodeRadius('hub', 1)).toBeGreaterThanOrEqual(4)
-    expect(nodeRadius('hub', 500)).toBeLessThanOrEqual(9)
+  it('planet size grows with connectivity but caps', () => {
+    expect(nodeRadius('planet', 4, 1)).toBeGreaterThan(nodeRadius('planet', 1, 1))
+    expect(nodeRadius('planet', 100, 1, 1_000_000)).toBeLessThanOrEqual(17)
+  })
+  it('stars stay tiny regardless of degree', () => {
+    expect(nodeRadius('star', 0, TYPE_WEIGHT.mcp_event)).toBeGreaterThan(0.8)
+    expect(nodeRadius('star', 100, TYPE_WEIGHT.agent_session)).toBeLessThanOrEqual(2.5)
+  })
+  it('hubs scale with item count, capped at 14', () => {
+    expect(nodeRadius('hub', 1)).toBeGreaterThanOrEqual(5)
+    expect(nodeRadius('hub', 500)).toBeLessThanOrEqual(14)
+  })
+})
+
+describe('planetVariant', () => {
+  it('is deterministic per id', () => {
+    expect(planetVariant('abc', 0.8)).toBe(planetVariant('abc', 0.8))
+  })
+  it('top-significance planets are ringed', () => {
+    expect(planetVariant('anything', 1)).toBe('ringed')
+    expect(planetVariant('other', 0.95)).toBe('ringed')
+  })
+  it('lower-significance planets never get rings', () => {
+    for (const id of ['a', 'b', 'c', 'd', 'e']) {
+      expect(['banded', 'swirl', 'smooth']).toContain(planetVariant(id, 0.8))
+    }
   })
 })
 
@@ -135,6 +165,10 @@ describe('buildGalaxy', () => {
     expect(k.brightness).toBe(1)
     expect(k.fresh).toBe(true)
     expect(k.degree).toBe(2)
+    expect(k.weight).toBe(TYPE_WEIGHT.knowledge)
+    expect(['ringed', 'banded', 'swirl', 'smooth']).toContain(k.variant)
+    expect(p.variant).toBeUndefined() // stars have no surface
+    expect(k.radius).toBeGreaterThan(p.radius)
     const hub = g.nodes.find(n => n.id === 'tag:repo')!
     expect(hub.degree).toBe(2) // two members
   })

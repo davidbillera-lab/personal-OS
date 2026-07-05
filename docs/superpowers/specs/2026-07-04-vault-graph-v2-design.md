@@ -33,7 +33,7 @@ The Vault graph has become an unreadable hairball as the vault grows:
 
 | Class | Types | Rendering |
 |---|---|---|
-| **Planet** | `knowledge`, `build_spec`, `decision_log`, `brain_dump_mirror`, `credential`, `skill`, `agent`, `personal`, `ab_conversation` | Larger (5–9px band, scaled gently by connection count — never grape-sized), full type color, radial-gradient body (light core → type color → darker limb) for depth. Fresh planets get an outer glow halo. |
+| **Planet** | `knowledge`, `build_spec`, `decision_log`, `brain_dump_mirror`, `credential`, `skill`, `agent`, `personal`, `ab_conversation` | Sized ~3–17px by type significance (`TYPE_WEIGHT`) **plus content volume** (log of chars — a 40k-char spec is a gas giant, a one-liner a small rock) plus connectivity. Full type color, radial-gradient body with drifting sheen and day/night terminator. Deterministic surface variants per item: top-significance types get rings, others banded (Jupiter), storm-swirl, or smooth. Fresh planets get a pulsing glow halo. *(Revised 2026-07-05 from the original 5–9px flat band after operator smoke test.)* |
 | **Star** | `git_push`, `agent_session`, `file_snapshot`, `mcp_event` | Tiny (1.5–2.5px) dim points, label-less at rest, positioned by physics on the cluster rim. Every record stays individually present — no collapsing, no aggregates. |
 | **Tag hub** | synthetic node per tag | Small (~6px) dark disc with violet ring; tag name label visible at far zoom (these are the "territory" labels). |
 

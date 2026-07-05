@@ -33,11 +33,39 @@ const TYPE_COLOR: Record<VaultItemType, string> = {
   mcp_event:        '#94a3b8',
 }
 
-const HUB_RING = '#8b5cf6'
-const HUB_FILL = '#151030'
-const ROTATION_RAD_PER_SEC = (2 * Math.PI) / 360   // one revolution ≈ 6 minutes
+const ROTATION_RAD_PER_SEC = (2 * Math.PI) / 150   // one revolution ≈ 2.5 minutes — visibly alive
 const IDLE_RESUME_MS = 3000                        // rotation resumes this long after last interaction
 const READING_ZOOM = 1.3                           // zoomed past this = reading; rotation stays off
+
+// Deterministic PRNG so the backdrop starfield is stable across renders
+function mulberry32(seed: number) {
+  let a = seed
+  return () => {
+    a |= 0; a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+interface BackdropStar { x: number; y: number; r: number; a: number; ph: number; sp: number }
+
+function makeBackdrop(): BackdropStar[] {
+  const rand = mulberry32(1337)
+  return Array.from({ length: 240 }, () => ({
+    x: rand(), y: rand(),
+    r: 0.3 + rand() * 1.1,
+    a: 0.12 + rand() * 0.45,
+    ph: rand() * Math.PI * 2,
+    sp: 0.4 + rand() * 1.2,
+  }))
+}
+
+const NEBULAE: { x: number; y: number; r: number; color: string }[] = [
+  { x: 0.72, y: 0.22, r: 0.55, color: '139,92,246' },  // violet
+  { x: 0.18, y: 0.68, r: 0.5,  color: '59,130,246' },  // blue
+  { x: 0.55, y: 0.92, r: 0.45, color: '6,182,212' },   // cyan
+]
 
 function lighten(hex: string, amount: number): string {
   const n = parseInt(hex.slice(1), 16)
@@ -76,6 +104,8 @@ type FgMethods = {
   centerAt: (x?: number, y?: number, ms?: number) => void
   zoom: (k?: number, ms?: number) => void
   zoomToFit: (ms?: number, px?: number) => void
+  d3Force: (name: string) => unknown
+  d3ReheatSimulation?: () => void
 }
 
 export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, paused, handleRef }: Props) {
@@ -83,6 +113,10 @@ export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, pau
   const fgRef = useRef<FgMethods | null>(null)
   const [hoverId, setHoverId] = useState<string | null>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
+  const sizeRef = useRef(size)
+  useEffect(() => { sizeRef.current = size }, [size])
+  const backdrop = useMemo(() => makeBackdrop(), [])
+  const didFit = useRef(false)
 
   // Refs for values the rAF/draw loop reads every frame (avoid re-creating callbacks)
   const hoverIdRef = useRef<string | null>(null)
@@ -97,6 +131,8 @@ export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, pau
   useEffect(() => { pausedRef.current = !!paused }, [paused])
 
   const galaxy = useMemo(() => buildGalaxy(items), [items])
+  // Re-fit the viewport whenever the node set changes (filters, reload)
+  useEffect(() => { didFit.current = false }, [galaxy])
   const galaxyRef = useRef(galaxy)
   // Mirror the latest galaxy into a ref for the rAF loop + imperative handle,
   // which read it after commit (never during render).
@@ -130,6 +166,26 @@ export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, pau
 
   useEffect(() => {
     reducedMotion.current = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  }, [])
+
+  // Spread the clusters: stronger repulsion + longer leashes = real void between
+  // territories, so the map reads as space instead of a huddle. The force graph
+  // mounts async (next/dynamic), so retry until the ref is live.
+  useEffect(() => {
+    let tries = 0
+    const id = setInterval(() => {
+      const fg = fgRef.current
+      tries++
+      if (fg?.d3Force) {
+        const charge = fg.d3Force('charge') as { strength?: (v: number) => void } | undefined
+        charge?.strength?.(-140)
+        const link = fg.d3Force('link') as { distance?: (v: number) => void } | undefined
+        link?.distance?.(45)
+        fg.d3ReheatSimulation?.()
+        clearInterval(id)
+      } else if (tries > 50) clearInterval(id)
+    }, 100)
+    return () => clearInterval(id)
   }, [])
 
   // Ambient galaxy rotation: slowly rotate node positions around the centroid.
@@ -187,13 +243,43 @@ export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, pau
 
   const searchLower = search.toLowerCase()
 
+  // Deep-space backdrop drawn in screen space (unaffected by pan/zoom):
+  // faint nebula washes + a twinkling starfield behind the whole galaxy.
+  const renderBackdrop = useCallback(
+    (ctx: CanvasRenderingContext2D) => {
+      const t = performance.now()
+      const { w, h } = sizeRef.current
+      ctx.save()
+      const dpr = window.devicePixelRatio || 1
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      for (const neb of NEBULAE) {
+        const nx = neb.x * w, ny = neb.y * h, nr = neb.r * Math.max(w, h)
+        const g = ctx.createRadialGradient(nx, ny, 0, nx, ny, nr)
+        g.addColorStop(0, `rgba(${neb.color},0.07)`)
+        g.addColorStop(1, 'rgba(0,0,0,0)')
+        ctx.fillStyle = g
+        ctx.fillRect(nx - nr, ny - nr, nr * 2, nr * 2)
+      }
+      ctx.fillStyle = '#e2e8f0'
+      for (const s of backdrop) {
+        const tw = 0.65 + 0.35 * Math.sin(t / 1000 * s.sp + s.ph)
+        ctx.globalAlpha = s.a * tw
+        ctx.beginPath()
+        ctx.arc(s.x * w, s.y * h, s.r, 0, 2 * Math.PI)
+        ctx.fill()
+      }
+      ctx.globalAlpha = 1
+      ctx.restore()
+    },
+    [backdrop]
+  )
+
   const nodeCanvasObject = useCallback(
     (node: GalaxyNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
       const t = performance.now()
       const x = node.x ?? 0, y = node.y ?? 0
       const isSelected = node.id === selectedId
       const isHovered = node.id === hoverIdRef.current
-      const anim = !reducedMotion.current
 
       // Hover-grow: ease each node's scale toward 1.8 while hovered, back to 1 after
       let grow = hoverGrow.current.get(node.id) ?? 0
@@ -209,23 +295,37 @@ export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, pau
       else if (search) vis = node.label.toLowerCase().includes(searchLower) ? 1 : 0.1
       else if (highlight) vis = highlight.has(node.id) ? 1 : 0.12
 
-      // Age brightness + star twinkle (slow per-node flicker, phase-offset)
+      // Age brightness + star twinkle (per-node flicker, phase-offset)
       let bright = node.brightness
-      if (anim && node.cls === 'star') bright *= 0.82 + 0.18 * Math.sin(t / 1400 + node.phase * 3)
+      if (node.cls === 'star') bright *= 0.65 + 0.35 * Math.sin(t / 900 + node.phase * 3)
       const alpha = vis * Math.min(bright + grow * 0.3, 1)
 
       if (node.cls === 'hub') {
-        ctx.globalAlpha = alpha * 0.9
+        // Tag hubs are suns: white-hot core, violet corona, slow breathing pulse
+        const pulse = 1 + 0.08 * Math.sin(t / 1600 + node.phase)
+        const coronaR = r * (isHovered ? 3.6 : 2.8) * pulse
+        const corona = ctx.createRadialGradient(x, y, r * 0.3, x, y, coronaR)
+        corona.addColorStop(0, 'rgba(196,132,252,0.5)')
+        corona.addColorStop(0.5, 'rgba(139,92,246,0.18)')
+        corona.addColorStop(1, 'rgba(0,0,0,0)')
+        ctx.globalAlpha = alpha
+        ctx.beginPath(); ctx.arc(x, y, coronaR, 0, 2 * Math.PI)
+        ctx.fillStyle = corona; ctx.fill()
+
+        const body = ctx.createRadialGradient(x - r * 0.2, y - r * 0.2, 0, x, y, r)
+        body.addColorStop(0, '#fdf4ff')
+        body.addColorStop(0.45, '#d8b4fe')
+        body.addColorStop(1, '#7c3aed')
         ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI)
-        ctx.fillStyle = HUB_FILL; ctx.fill()
-        ctx.strokeStyle = HUB_RING; ctx.lineWidth = 1 / globalScale + 0.4; ctx.stroke()
+        ctx.fillStyle = body; ctx.fill()
+
         // Territory labels: visible from far out — these ARE the map
         if (globalScale > 0.3 || isHovered) {
           const fontSize = Math.max(9, 12 / globalScale)
           ctx.font = `${fontSize}px ui-sans-serif, system-ui, sans-serif`
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-          ctx.fillStyle = `rgba(167,139,250,${0.85 * vis})`
-          ctx.fillText(node.label, x, y - r - fontSize * 0.8)
+          ctx.fillStyle = `rgba(216,180,254,${0.9 * vis})`
+          ctx.fillText(node.label, x, y - coronaR / pulse - fontSize * 0.6)
         }
         ctx.globalAlpha = 1
         return
@@ -234,34 +334,103 @@ export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, pau
       const color = TYPE_COLOR[node.type!] ?? '#94a3b8'
 
       if (node.cls === 'star') {
+        // Distant star: point of light, brightness = age; young stars get a glint cross
         ctx.globalAlpha = alpha
         ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI)
-        ctx.fillStyle = lighten(color, 0.3); ctx.fill()
+        ctx.fillStyle = lighten(color, 0.45); ctx.fill()
+        if (node.brightness > 0.45 || isHovered) {
+          ctx.globalAlpha = alpha * 0.5
+          ctx.strokeStyle = lighten(color, 0.6); ctx.lineWidth = 0.5
+          const g = r * 2.6
+          ctx.beginPath()
+          ctx.moveTo(x - g, y); ctx.lineTo(x + g, y)
+          ctx.moveTo(x, y - g); ctx.lineTo(x, y + g)
+          ctx.stroke()
+          ctx.globalAlpha = alpha
+        }
         if (isHovered || isSelected) {
           ctx.beginPath(); ctx.arc(x, y, r + 2.5 / globalScale, 0, 2 * Math.PI)
           ctx.strokeStyle = 'rgba(226,232,240,0.8)'; ctx.lineWidth = 0.8 / globalScale; ctx.stroke()
         }
       } else {
-        // Planet: outer glow halo (pulses while fresh), then gradient body with sheen
-        const pulse = anim && node.fresh ? 1 + 0.15 * Math.sin(t / 900 + node.phase) : 1
-        const glowR = r * (isHovered || isSelected ? 3.4 : 2.4) * pulse
+        // Planet: glow halo (pulses while fresh) → optional back ring → gradient
+        // body with drifting sheen → surface variant → terminator → front ring
+        const pulse = node.fresh ? 1 + 0.15 * Math.sin(t / 900 + node.phase) : 1
+        const glowR = r * (isHovered || isSelected ? 3 : 2.2) * pulse
         const glow = ctx.createRadialGradient(x, y, r * 0.5, x, y, glowR)
         glow.addColorStop(0, color); glow.addColorStop(1, 'rgba(0,0,0,0)')
-        ctx.globalAlpha = alpha * (isHovered || isSelected ? 0.55 : node.fresh ? 0.4 : 0.25)
+        ctx.globalAlpha = alpha * (isHovered || isSelected ? 0.55 : node.fresh ? 0.42 : 0.28)
         ctx.beginPath(); ctx.arc(x, y, glowR, 0, 2 * Math.PI)
         ctx.fillStyle = glow; ctx.fill()
 
+        const ringed = node.variant === 'ringed'
+        const tilt = -0.35 + (node.phase % 1) * 0.5
+        if (ringed) {
+          // Back half of the ring, hidden later by the body's top arc
+          ctx.globalAlpha = alpha * 0.55
+          ctx.strokeStyle = lighten(color, 0.35); ctx.lineWidth = r * 0.16
+          ctx.beginPath(); ctx.ellipse(x, y, r * 1.9, r * 0.55, tilt, Math.PI, 2 * Math.PI)
+          ctx.stroke()
+        }
+
         // Sheen: the gradient highlight slowly drifts — light moving across the surface
-        const sheenA = anim ? t / 5000 + node.phase : -0.6
-        const hx = x + Math.cos(sheenA) * r * 0.35
-        const hy = y + Math.sin(sheenA) * r * 0.35
+        const sheenA = t / 3000 + node.phase
+        const hx = x + Math.cos(sheenA) * r * 0.4
+        const hy = y + Math.sin(sheenA) * r * 0.4
         ctx.globalAlpha = alpha
         const body = ctx.createRadialGradient(hx, hy, r * 0.1, x, y, r)
-        body.addColorStop(0, lighten(color, 0.6))
-        body.addColorStop(0.6, color)
-        body.addColorStop(1, darken(color, 0.35))
+        body.addColorStop(0, lighten(color, 0.65))
+        body.addColorStop(0.55, color)
+        body.addColorStop(1, darken(color, 0.45))
         ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI)
         ctx.fillStyle = body; ctx.fill()
+
+        // Surface details, clipped to the disc
+        ctx.save()
+        ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.clip()
+        if (node.variant === 'banded') {
+          ctx.globalAlpha = alpha * 0.3
+          ctx.fillStyle = darken(color, 0.4)
+          for (const [oy, hgt] of [[-0.45, 0.16], [0.05, 0.22], [0.5, 0.14]] as const) {
+            ctx.fillRect(x - r, y + oy * r - (hgt * r) / 2, r * 2, hgt * r)
+          }
+          ctx.globalAlpha = alpha * 0.2
+          ctx.fillStyle = lighten(color, 0.5)
+          ctx.fillRect(x - r, y - 0.25 * r, r * 2, 0.1 * r)
+        } else if (node.variant === 'swirl') {
+          // Great-storm eye, drifting slowly around the disc
+          const sa = t / 9000 + node.phase * 2
+          const sx = x + Math.cos(sa) * r * 0.45, sy = y + Math.sin(sa) * r * 0.35
+          ctx.globalAlpha = alpha * 0.4
+          ctx.fillStyle = lighten(color, 0.45)
+          ctx.beginPath(); ctx.ellipse(sx, sy, r * 0.32, r * 0.2, sa, 0, 2 * Math.PI); ctx.fill()
+          ctx.globalAlpha = alpha * 0.25
+          ctx.fillStyle = darken(color, 0.35)
+          ctx.beginPath(); ctx.ellipse(sx, sy, r * 0.16, r * 0.1, sa, 0, 2 * Math.PI); ctx.fill()
+        }
+        // Day/night terminator: dark limb opposite the sheen highlight
+        ctx.globalAlpha = alpha * 0.45
+        const shadow = ctx.createRadialGradient(
+          x - Math.cos(sheenA) * r * 0.9, y - Math.sin(sheenA) * r * 0.9, r * 0.3,
+          x - Math.cos(sheenA) * r * 0.9, y - Math.sin(sheenA) * r * 0.9, r * 1.8
+        )
+        shadow.addColorStop(0, 'rgba(2,6,23,0.9)')
+        shadow.addColorStop(0.55, 'rgba(2,6,23,0.35)')
+        shadow.addColorStop(1, 'rgba(0,0,0,0)')
+        ctx.fillStyle = shadow
+        ctx.fillRect(x - r, y - r, r * 2, r * 2)
+        ctx.restore()
+
+        if (ringed) {
+          ctx.globalAlpha = alpha * 0.85
+          ctx.strokeStyle = lighten(color, 0.35); ctx.lineWidth = r * 0.16
+          ctx.beginPath(); ctx.ellipse(x, y, r * 1.9, r * 0.55, tilt, 0, Math.PI)
+          ctx.stroke()
+          ctx.globalAlpha = alpha * 0.35
+          ctx.strokeStyle = lighten(color, 0.6); ctx.lineWidth = r * 0.05
+          ctx.beginPath(); ctx.ellipse(x, y, r * 2.15, r * 0.62, tilt, 0, Math.PI)
+          ctx.stroke()
+        }
       }
 
       if (isSelected) {
@@ -368,9 +537,18 @@ export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, pau
         backgroundColor="#030712"
         width={size.w}
         height={size.h}
+        warmupTicks={60}
         cooldownTicks={120}
         d3VelocityDecay={0.3}
         autoPauseRedraw={false}
+        onRenderFramePre={renderBackdrop as never}
+        onEngineStop={(() => {
+          // First settle after a data change: frame the whole galaxy
+          if (!didFit.current) {
+            didFit.current = true
+            fgRef.current?.zoomToFit(700, 80)
+          }
+        }) as never}
       />
     </div>
   )
