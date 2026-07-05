@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { listVaultItems, listProjectNames, type VaultItemListItem } from '../actions'
 import { VaultGraph, type VaultGraphHandle } from '@/components/VaultGraph'
 import { VaultSidePanel } from '@/components/VaultSidePanel'
+import { VaultTopicPanel } from '@/components/VaultTopicPanel'
 import { VaultGraphTour } from '@/components/VaultGraphTour'
 import { STAR_TYPES } from '@/lib/vault-graph'
 import type { VaultItemType } from '@/lib/types'
@@ -28,6 +29,7 @@ export default function VaultGraphPage() {
   const [group, setGroup] = useState('all')
   const [projectFilter, setProjectFilter] = useState<'all' | string>('all')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [topicHubId, setTopicHubId] = useState<string | null>(null)
   const [tourOpen, setTourOpen] = useState(false)
   const [tourDim, setTourDim] = useState<Set<string> | null>(null)
   const graphHandle = useRef<VaultGraphHandle | null>(null)
@@ -57,6 +59,13 @@ export default function VaultGraphPage() {
   }, [items, group, projectFilter])
 
   const selectedItem = items.find(i => i.id === selectedId) ?? null
+
+  // Members of the open topic — respects the active filters, matching the graph
+  const topicTag = topicHubId?.slice(4) ?? null   // strip the `tag:` prefix
+  const topicItems = topicTag === null ? [] : displayItems.filter(i =>
+    topicTag === '__untagged' ? i.tags.length === 0 : i.tags.includes(topicTag)
+  )
+
   const chipCls = (active: boolean) =>
     `px-3 py-1.5 rounded-full text-xs transition-colors border ${
       active ? 'bg-violet-600/30 border-violet-500/50 text-violet-200'
@@ -68,8 +77,13 @@ export default function VaultGraphPage() {
       <VaultGraph
         items={displayItems}
         search={search}
-        selectedId={selectedId}
-        onSelect={item => setSelectedId(item.id)}
+        selectedId={selectedId ?? topicHubId}
+        onSelect={item => { setSelectedId(item.id); setTopicHubId(null) }}
+        onSelectHub={hubId => {
+          setSelectedId(null)
+          setTopicHubId(hubId)
+          graphHandle.current?.centerOn(hubId, 1.7, 700)
+        }}
         dimExcept={tourDim}
         paused={tourOpen}
         handleRef={graphHandle}
@@ -135,13 +149,21 @@ export default function VaultGraphPage() {
         </div>
       )}
 
-      {selectedItem && (
+      {selectedItem ? (
         <VaultSidePanel
+          floating
           item={selectedItem}
           onClose={() => setSelectedId(null)}
           onUpdated={load}
           onDeleted={() => { setSelectedId(null); load() }}
           onSelect={item => setSelectedId(item.id)}
+        />
+      ) : topicHubId && (
+        <VaultTopicPanel
+          topic={topicTag!}
+          items={topicItems}
+          onClose={() => setTopicHubId(null)}
+          onOpenItem={item => setSelectedId(item.id)}
         />
       )}
 

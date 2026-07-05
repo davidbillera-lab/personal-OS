@@ -17,7 +17,7 @@ const ForceGraph2D = dynamic(async () => {
   return Wrapper
 }, { ssr: false })
 
-const TYPE_COLOR: Record<VaultItemType, string> = {
+export const TYPE_COLOR: Record<VaultItemType, string> = {
   credential:       '#f59e0b',
   skill:            '#3b82f6',
   agent:            '#8b5cf6',
@@ -94,6 +94,7 @@ interface Props {
   search: string
   selectedId: string | null
   onSelect: (item: VaultItemListItem) => void
+  onSelectHub?: (hubId: string) => void
   dimExcept?: Set<string> | null
   paused?: boolean
   handleRef?: MutableRefObject<VaultGraphHandle | null>
@@ -108,7 +109,7 @@ type FgMethods = {
   d3ReheatSimulation?: () => void
 }
 
-export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, paused, handleRef }: Props) {
+export function VaultGraph({ items, search, selectedId, onSelect, onSelectHub, dimExcept, paused, handleRef }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const fgRef = useRef<FgMethods | null>(null)
   const [hoverId, setHoverId] = useState<string | null>(null)
@@ -138,6 +139,33 @@ export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, pau
   // which read it after commit (never during render).
   useEffect(() => { galaxyRef.current = galaxy }, [galaxy])
 
+  // Rotation-invariant framing: fit the galaxy's bounding CIRCLE around its
+  // centroid, not its bounding box — the ambient rotation sweeps the layout
+  // through every angle, so a box fit clips corners at "weird angles" while
+  // a circle fit never does.
+  const frameGalaxy = useCallback((ms = 700) => {
+    const fg = fgRef.current
+    const nodes = galaxyRef.current.nodes
+    if (!fg || nodes.length === 0) return
+    let cx = 0, cy = 0, n = 0
+    for (const node of nodes) {
+      if (node.x !== undefined && node.y !== undefined) { cx += node.x; cy += node.y; n++ }
+    }
+    if (n === 0) return
+    cx /= n; cy /= n
+    let maxR = 0
+    for (const node of nodes) {
+      if (node.x === undefined || node.y === undefined) continue
+      const d = Math.hypot(node.x - cx, node.y - cy) + node.radius * 2
+      if (d > maxR) maxR = d
+    }
+    const { w, h } = sizeRef.current
+    // 72px breathing room: clears the toolbar and keeps labels off the edges
+    const k = Math.min(Math.max((Math.min(w, h) - 144) / (2 * Math.max(maxR, 1)), 0.05), 4)
+    fg.centerAt(cx, cy, ms)
+    fg.zoom(k, ms)
+  }, [])
+
   // Expose the imperative handle for the tour + toolbar
   useEffect(() => {
     if (!handleRef) return
@@ -148,11 +176,11 @@ export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, pau
         fgRef.current.centerAt(n.x, n.y, ms)
         fgRef.current.zoom(zoom, ms)
       },
-      zoomToFit: (ms = 800) => fgRef.current?.zoomToFit(ms, 60),
+      zoomToFit: (ms = 800) => frameGalaxy(ms),
       getGalaxy: () => galaxyRef.current,
     }
     return () => { handleRef.current = null }
-  }, [handleRef])
+  }, [handleRef, frameGalaxy])
 
   // Track container size (full-bleed layouts resize)
   useEffect(() => {
@@ -493,7 +521,8 @@ export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, pau
   const handleNodeClick = useCallback((node: GalaxyNode) => {
     lastInteraction.current = performance.now()
     if (node.item) onSelect(node.item)
-  }, [onSelect])
+    else if (node.cls === 'hub') onSelectHub?.(node.id)
+  }, [onSelect, onSelectHub])
 
   const handleNodeHover = useCallback((node: GalaxyNode | null) => {
     hoverIdRef.current = node?.id ?? null
@@ -546,7 +575,7 @@ export function VaultGraph({ items, search, selectedId, onSelect, dimExcept, pau
           // First settle after a data change: frame the whole galaxy
           if (!didFit.current) {
             didFit.current = true
-            fgRef.current?.zoomToFit(700, 80)
+            frameGalaxy(700)
           }
         }) as never}
       />

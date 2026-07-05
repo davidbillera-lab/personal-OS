@@ -27,9 +27,11 @@ interface Props {
   onUpdated: () => void
   onDeleted: (id: string) => void
   onSelect?: (item: VaultItemListItem) => void
+  /** Floating card over the galaxy: no backdrop, sized to content, graph stays live behind it. */
+  floating?: boolean
 }
 
-export function VaultSidePanel({ item, onClose, onUpdated, onDeleted, onSelect }: Props) {
+export function VaultSidePanel({ item, onClose, onUpdated, onDeleted, onSelect, floating }: Props) {
   const [editMode, setEditMode] = useState(false)
   const [title, setTitle] = useState(item.title)
   const [content, setContent] = useState('')
@@ -124,12 +126,22 @@ export function VaultSidePanel({ item, onClose, onUpdated, onDeleted, onSelect }
   const inputCls = 'w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-violet-500'
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+    <div
+      className={
+        floating
+          ? 'fixed right-4 top-16 bottom-4 z-50 flex items-start justify-end pointer-events-none'
+          : 'fixed inset-0 z-40 flex justify-end'
+      }
+    >
+      {!floating && <div className="absolute inset-0 bg-black/40" onClick={onClose} />}
 
       <div
         ref={panelRef}
-        className="relative z-50 w-[380px] h-full bg-gray-950 border-l border-white/10 flex flex-col overflow-y-auto shadow-2xl"
+        className={
+          floating
+            ? 'pointer-events-auto w-[400px] max-w-[90vw] max-h-full bg-gray-950/95 backdrop-blur border border-white/10 rounded-2xl flex flex-col overflow-y-auto shadow-2xl'
+            : 'relative z-50 w-[380px] h-full bg-gray-950 border-l border-white/10 flex flex-col overflow-y-auto shadow-2xl'
+        }
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
