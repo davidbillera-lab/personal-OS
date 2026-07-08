@@ -169,6 +169,7 @@ The Claude environment stores workflow skills in `~/.claude/skills/` and syncs t
 - `phase-relay`: serial multi-agent relay for long phased builds.
 - `davids-agents`: context evaluation gate and subagent relay for heavy sequential work.
 - `handoff-summary`: paste-ready summary of current session state.
+- `lean-code`: on-demand Output Token Discipline — pre-write ladder plus a review mode that flags over-engineering in diffs, ranked by lines saved.
 
 For Codex, map these to available Codex skills/tools and local judgment. If no equivalent tool exists, follow the behavior manually and be explicit about the fallback.
 
@@ -234,6 +235,23 @@ College Climb:
 - Phase 3: iterate on top issues.
 - Phase 4: ship workflow activates.
 - Do not treat it as validated or shipping-ready before those gates.
+
+## Output Token Discipline (all agents, all tools)
+
+Output tokens cost ~5x input. Gate BEFORE generating — review-after-the-fact pays for the bloat twice. Full callable version: `lean-code` skill (`~/.claude/skills/lean-code/SKILL.md`, also in the vault as type `skill`).
+
+Pre-write ladder — stop at the first rung that holds:
+
+1. YAGNI — not asked for = not built.
+2. Reuse — the codebase may already have it; grep before you generate.
+3. Stdlib / platform — the language or platform may already provide it.
+4. Installed deps — a package already in the project may solve it.
+5. One line — can this be a one-liner?
+6. Minimum — write the smallest working diff.
+
+Output rules: edit, never rewrite full files; don't echo written code back into chat (reference file:line); one implementation, not a menu of options; no unrequested artifacts (READMEs, docstrings, example files); plans and summaries sized to the task; one runnable check for non-trivial logic; mark intentional shortcuts with a `minimal:` comment.
+
+Never trim: problem comprehension, input validation at trust boundaries, error handling that prevents data loss, security, accessibility, explicitly requested features.
 
 ## Build And Product Discipline
 

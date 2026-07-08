@@ -1,8 +1,5 @@
 # CLAUDE.md — Personal OS (Mission Control)
 
-**Location:** `<personal-os-repo>/CLAUDE.md` (committed to repo)
-**Purpose:** Source of truth for what this project is, why it exists, what's been decided, and how any agent should work on it. Loaded automatically by the active agent environment; should be referenced by any tool or harness working in this repo.
-**Status:** Living document. Updated as decisions get made.
 **Read first:** `~/.claude/CLAUDE.md` (operator profile) before this file.
 mission_control_id: 698d6376-5819-400b-babc-cd664ee36c04
 
@@ -100,6 +97,7 @@ Skills are installed in `~/.claude/skills/`. Any agent working on this project m
 | `phase-relay` | `/phase-relay` or auto-triggered from davids-way Step 4 on 3+ sequential pieces | Serial multi-agent relay for phased builds. Each piece gets its own fresh context window connected by a handoff doc. Prevents context rot and compact thrashing on long sequential builds. |
 | `davids-agents` | `/davids-agents` or any sequential multi-step task with 3+ heavy steps | Pre-task context evaluation gate → serial subagent relay if thrash risk detected. Each subagent handles one step in a fresh window; handoff summaries passed as cold-start context. Eliminates autocompact thrashing on long sequential builds. |
 | `handoff-summary` | `/handoff-summary` or "give me a handoff summary" | Synthesizes the CURRENT SESSION state into a single paste-ready block — what was done, what's next, key files, constraints, and a suggested first message. Paste into a fresh window to resume exactly where you left off. Distinct from `/handoff` (which is project-named, pulls from MC/vault). |
+| `lean-code` | `/lean-code`, "trim/slim this code", over-engineering review, or any environment not loading the global rules | On-demand Output Token Discipline (Ponytail adaptation): pre-write ladder + output-side rules, plus a review mode that flags over-engineering in a diff ranked by lines saved. Always-on version lives in `~/.claude/CLAUDE.md` → "Output Token Discipline". |
 
 ---
 
@@ -173,52 +171,10 @@ The OS reads these files to power the dashboard and to bundle context for agent 
 
 ## Open Questions
 
-### A. VZT Protection Level — LOCKED: Medium now, Heavy before first paying tenant
+None currently open. Formerly-open items, both LOCKED 2026-05-02 — full detail in `decisions.md`:
 
-**Operator profile (2026-05-02):**
-
-- Recoverable if broken, but don't test it
-- Solo-touch codebase — operator is sole code committer; Vinnie does not touch VZT code
-- Pre-revenue, internal time-saver and production multiplier; revenue expected soon
-- Multi-tenant ship target: next few months
-- Mobile-recoverable via Claude Cowork — fast rollback path exists
-
-**Active now (Medium protection):**
-
-1. VZT flagged `tier: 1, protected: true` in OS — pinned to dashboard every session
-2. All VZT changes get Codex second-opinion review before merge (sanity check, not blocking gate)
-3. Staging Supabase environment separate from production; every change tested there first
-4. Automated tests on two critical paths: listing generation pipeline + image processing pipeline (happy-path coverage catches ~80% of regressions)
-5. `decisions.md` mandatory for VZT — every architectural change logged with reasoning
-
-**Triggered before first paying tenant (escalate to Heavy):**
-6. Feature flags for all new tenant-facing features
-7. Manual approval gate for production deploys (operator approval, mobile-friendly)
-8. Daily VZT health monitoring surfaced in OS dashboard (uptime, error rate, processing volume)
-9. Tenant data isolation testing
-10. Incident response playbook — minimum: who to call, where rollback lives, what Vinnie can do from mobile
-
-**Bus factor — succession plan:** Operator is currently the only person who can maintain VZT code. Two-tier succession plan adopted (2026-05-02):
-
-- **Tier 1 secondary — JJ (16, AI-capable, building his own AI businesses).** With proper architecture and decisions documentation in place, JJ becomes a legitimate emergency maintainer. Doubles as his training ground for holdco involvement. Docs for JJ should be at *operator level* — explain the *why*, the architecture, the tradeoffs.
-- **Tier 2 execution runbooks — Vinnie (capable beginner, AI-novice).** Vinnie does not need to *modify* VZT code; he needs to *execute pre-defined recovery procedures* if both operator and JJ are unreachable. Docs for Vinnie should be *AI-idiot-proof*: step-by-step, screenshots, "if X, click Y, then call David" decision trees. No API references, no architecture diagrams.
-
-Before first paying tenant, both tiers of documentation must exist. The OS should generate and surface two doc flavors for protected projects: `docs/operator/` (architecture, decisions, code-level) and `docs/runbooks/` (execution-only, beginner-safe).
-
-### B. College Climb Ship Workflow — LOCKED: Light workflow now, validation-gated to ship
-
-**Operator answer (2026-05-02):** Only operator and Codex have run tests on College Climb to date — smoke tests only. No real high schoolers, no real parents, no real end-to-end usage. App is unvalidated.
-
-**Phased validation plan:**
-
-- **Phase 1 — JJ smoke test with real data.** JJ (16, junior, target user) runs his actual college search through the app end-to-end. Real scholarship matching, real essay help, real college targets. Records screen + voice while using it (UX research goldmine). Notes what breaks, what confuses, what feels wrong.
-- **Phase 2 — Beta cohort.** Recruit 5–10 high schoolers + 2–3 parents. Structured feedback survey: what worked, what confused, what would they pay for, would they recommend. Time-boxed to 2 weeks.
-- **Phase 3 — Iteration.** Address top issues from Phase 2. Re-test with same cohort if changes are significant.
-- **Phase 4 — Ship workflow activates.** OS generates the Ship Checklist (landing page, App Store assets via Despia, analytics, first 100 users plan, weekly progress tracking, exit-readiness scorecard).
-
-**Sequencing:** VZT keeps priority on operator attention. College Climb runs in parallel but consumes JJ bandwidth + beta tester bandwidth, not operator bandwidth, until Phase 3 completes. Operator only gets pulled in for architecture decisions and Phase 4 ship work.
-
-**Status:** Phase 1 — pending JJ kickoff.
+- **A. VZT Protection Level** — Medium now (Codex review before merge, staging Supabase env, critical-path tests on listing + image pipelines, mandatory `decisions.md`); escalates to Heavy before first paying tenant (feature flags, deploy approval gate, daily health monitoring, tenant isolation testing, incident playbook). Succession: JJ = tier-1 emergency maintainer (`docs/operator/`), Vinnie = tier-2 execution-only recovery (`docs/runbooks/`); both doc tiers must exist before first paying tenant.
+- **B. College Climb Ship Workflow** — Light workflow, validation-gated: Phase 1 JJ real-data smoke test (screen + voice recorded) → Phase 2 beta cohort (5–10 students + 2–3 parents, 2 weeks) → Phase 3 iteration → Phase 4 ship checklist activates. Runs on JJ/beta bandwidth, not operator bandwidth, until Phase 3. **Status: Phase 1 — pending JJ kickoff.**
 
 ---
 
@@ -251,4 +207,4 @@ See `decisions.md` for the canonical log. Summary of pre-build decisions:
 
 ## Last Updated
 
-Initial draft: May 2026. Skills + vault + MCP server documented: June 2026. Agent roster added: June 2026. Update on every meaningful decision.
+Initial draft: May 2026. Skills + vault + MCP server documented: June 2026. Agent roster added: June 2026. Context trim + `lean-code` skill: July 2026. Update on every meaningful decision.
