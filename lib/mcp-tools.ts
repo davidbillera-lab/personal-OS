@@ -398,7 +398,7 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
 
     const { data, error } = await supabase
       .from('projects')
-      .select('name, status, next_action, blockers, lead_model, current_agent, stage')
+      .select('name, status, next_action, blockers, lead_model, current_agent, stage, asset_class')
       .eq('id', project_id)
       .single()
 
