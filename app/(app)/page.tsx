@@ -1,7 +1,7 @@
 ﻿import Link from 'next/link'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { QuickDumpForm } from '@/components/QuickDumpForm'
-import type { Project, AgentHandoff, ProjectStage } from '@/lib/types'
+import type { Project, AgentHandoff, ProjectStage, AssetClass } from '@/lib/types'
 
 export const dynamic = 'force-dynamic'
 
@@ -16,29 +16,54 @@ function timeSince(iso: string): string {
   return `${days}d ago`
 }
 
-const TIER_STYLES = {
-  1: {
-    label: 'Tier 1',
-    sub: 'Protect & Accelerate',
+const ASSET_CLASS_SECTIONS: { key: AssetClass; label: string; sub: string; accent: string; bar: string; empty: string }[] = [
+  {
+    key: 'venture',
+    label: 'Ventures',
+    sub: 'Built to scale & sell',
     accent: 'text-purple-400',
     bar: 'bg-purple-500',
     empty: 'text-purple-400/50',
   },
-  2: {
-    label: 'Tier 2',
-    sub: 'Active Builds',
+  {
+    key: 'operating_tool',
+    label: 'Operating Tools',
+    sub: 'Runs JSG & the studio',
     accent: 'text-blue-400',
     bar: 'bg-blue-500',
     empty: 'text-blue-400/50',
   },
-  3: {
-    label: 'Tier 3',
-    sub: 'Personal & Long-shot',
+  {
+    key: 'personal',
+    label: 'Personal',
+    sub: 'Body of work',
     accent: 'text-gray-400',
     bar: 'bg-gray-500',
     empty: 'text-gray-400/50',
   },
-} as const
+  {
+    key: 'web_property',
+    label: 'Web Properties',
+    sub: 'David-owned sites',
+    accent: 'text-emerald-400',
+    bar: 'bg-emerald-500',
+    empty: 'text-emerald-400/50',
+  },
+  {
+    key: 'client_service',
+    label: 'Client Services',
+    sub: 'Agency & client work',
+    accent: 'text-cyan-400',
+    bar: 'bg-cyan-500',
+    empty: 'text-cyan-400/50',
+  },
+]
+
+const TIER_BADGE: Record<1 | 2 | 3, string> = {
+  1: 'text-purple-400 border-purple-400/30',
+  2: 'text-blue-400 border-blue-400/30',
+  3: 'text-gray-400 border-gray-500/30',
+}
 
 const HANDOFF_STATUS: Record<string, string> = {
   in_progress: 'text-yellow-400',
@@ -84,9 +109,14 @@ function PipelineCard({ project, counts }: { project: Project; counts: PipelineC
             }`} />
           )}
         </div>
-        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${stage}`}>
-          {project.stage}
-        </span>
+        <div className="flex shrink-0 items-center gap-1">
+          <span className={`rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${TIER_BADGE[project.tier]}`}>
+            T{project.tier}
+          </span>
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${stage}`}>
+            {project.stage}
+          </span>
+        </div>
       </div>
 
       {/* Pipeline summary */}
@@ -179,10 +209,14 @@ export default async function CommandCenter() {
   const allHO   = (handoffs ?? []) as AgentHandoff[]
   const activeAgents = allHO.filter(h => h.status === 'in_progress').length
 
-  const tier1 = all.filter(p => p.tier === 1)
-  const tier2 = all.filter(p => p.tier === 2)
-  const tier3 = all.filter(p => p.tier === 3)
   const atRisk = all.filter(p => p.kill_criteria_status === 'fail').length
+
+  const byAssetClass = new Map<AssetClass, Project[]>()
+  for (const p of all) {
+    const list = byAssetClass.get(p.asset_class) ?? []
+    list.push(p)
+    byAssetClass.set(p.asset_class, list)
+  }
 
   // Build per-project pipeline counts
   const taskRows = (taskCountRows ?? []) as { project_id: string | null; status: string; generated_spec: string | null }[]
@@ -255,13 +289,12 @@ export default async function CommandCenter() {
         </Link>
       </div>
 
-      {/* Three-tier project grid */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {([1, 2, 3] as const).map(tier => {
-          const items = tier === 1 ? tier1 : tier === 2 ? tier2 : tier3
-          const s = TIER_STYLES[tier]
+      {/* Asset-class project sections */}
+      <div className="flex flex-col gap-6">
+        {ASSET_CLASS_SECTIONS.map(s => {
+          const items = byAssetClass.get(s.key) ?? []
           return (
-            <section key={tier} className="flex flex-col gap-3">
+            <section key={s.key} className="flex flex-col gap-3">
               <div className="flex items-center gap-2">
                 <div className={`h-3 w-0.5 rounded-full ${s.bar}`} />
                 <span className={`text-xs font-semibold uppercase tracking-widest ${s.accent}`}>
@@ -272,7 +305,9 @@ export default async function CommandCenter() {
               {items.length === 0 ? (
                 <p className={`text-xs ${s.empty}`}>No projects.</p>
               ) : (
-                items.map(p => <PipelineCard key={p.id} project={p} counts={pipelineByProject.get(p.id) ?? { dumps: 0, specReady: 0, inFlight: 0 }} />)
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {items.map(p => <PipelineCard key={p.id} project={p} counts={pipelineByProject.get(p.id) ?? { dumps: 0, specReady: 0, inFlight: 0 }} />)}
+                </div>
               )}
             </section>
           )

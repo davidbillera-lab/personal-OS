@@ -4,6 +4,7 @@
 // ============================================================
 
 export type ProjectTier = 1 | 2 | 3
+export type AssetClass = 'venture' | 'operating_tool' | 'personal' | 'web_property' | 'client_service'
 export type ProjectStage = 'idea' | 'spec' | 'build' | 'ship' | 'scale' | 'kill'
 export type KillCriteriaStatus = 'pass' | 'warning' | 'fail' | 'exempt'
 export type BrainDumpType = 'idea' | 'task' | 'bug' | 'decision' | 'kill_candidate' | 'unclassified'
@@ -44,6 +45,7 @@ export interface Project {
   name: string
   slug: string
   tier: ProjectTier
+  asset_class: AssetClass
   protected: boolean
   stage: ProjectStage
   status: string | null
