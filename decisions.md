@@ -245,6 +245,15 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 ---
 
+### 2026-07-12 — New agents/harnesses earn `mc_get_credential` access; no blanket credential exposure
+
+**Decision:** Hermes Agent (Nous Research's open-source MCP-capable harness, self-hosted, stood up 2026-07-12) will NOT be given blanket credential access via the shared `MCP_API_KEY` token, despite hitting `is_mcp_accessible=false` blocks and requiring manual `.env.local` entry a few times. Credential access stays case-by-case: individual keys get `is_mcp_accessible` flipped to `true` only after review; Stripe secrets, Supabase service role keys, and webhook secrets stay permanently agent-blocked regardless of friction. New agents/harnesses generally must prove trust over time before broader vault access, rather than being granted parity with established agents (Claude Code, Codex) on day one.
+**Reasoning:** There is currently one shared full-scope `MCP_API_KEY` token used by every agent and project — no per-agent or per-project credential scoping exists yet. Opening `is_mcp_accessible` broadly would expose every secret in the vault (including VZT's, which is locked at Medium-escalating-to-Heavy protection) to whichever agent holds that token, including a harness with zero track record. This directly matches the existing 2026-07-01 convention (sensitive creds default `is_mcp_accessible=false`) — the friction was working as designed, not a bug.
+**Consequence:** When Hermes (or any future harness) hits a blocked credential, resolve it per-key: evaluate whether that specific credential is safe to expose, flip only that row, and leave the sensitive tier locked. If Hermes becomes a regular tool-caller, consider issuing it a separate `'read'`-scope token instead of reusing the `'full'` token, so it can browse without ever reaching `mc_get_credential`. Revisit this policy once Hermes has an established track record.
+**Made by:** operator + agent
+
+---
+
 ### 2026-07-05 - Codex skill layer mirrors David's Claude workflow
 
 **Decision:** Add Codex-native workflow skills under `codex-skills/` and sync them globally to `C:\Users\david\.codex\skills` with `npm run sync:codex-skills`. The initial set is `jsg-build-routing`, `mission-control-context`, `davids-way`, `codex-relay`, `checkpoint`, `decisions-sync`, `advisoryboard`, `self-improving-ai`, and `claude-qc`. `AGENTS.md` now tells future Codex sessions to treat Claude-style commands such as `/davids-way`, `/davids-agents`, `/phase-relay`, `/checkpoint`, `/handoff`, `/advisoryboard`, and `/ClaudeQC` as triggers for the matching Codex skills.
