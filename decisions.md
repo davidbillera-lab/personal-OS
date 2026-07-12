@@ -245,6 +245,18 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 ---
 
+### 2026-07-12 — Venture Studio framework v1: `asset_class` becomes the second axis alongside `tier`
+
+**Decision:** Added `projects.asset_class` (`venture` / `operating_tool` / `personal` / `web_property` / `client_service`; NOT NULL, default `venture`, check-constrained) to the Mission Control Supabase. `tier` is unchanged and remains the priority/protection axis. All 18 existing projects backfilled per the spec map; 4 web-property rows inserted (jsgliquidators.com, skincarebynicole.com, rodanheatingandair.com, jsgestatecleanouts.com — tier 3, stage ship). Dashboard groups cards by asset_class (five sections) with tier as a T1/T2/T3 badge on cards; `mc_get_project_context` returns `asset_class` in both MCP implementations (route.ts delegates, no edit needed).
+
+**Reasoning:** Tier encoded priority, not asset class — the two were tangled (launch-ready College Climb at tier 3; live-billing Meridian at tier 2). A venture studio needs the axes separate: what kind of asset it is vs. how protected/prioritized it is. Additive-only; nothing destructive.
+
+**Consequence:** Personal stays ONE class (live-vs-archive is already captured by `stage`). David-owned websites are `web_property`, distinct from Marblism `client_service` work. Financial roll-ups, entity/equity modeling, and studio P&L deferred to v2. jsgestatecleanouts.com was included by lead judgment from the Lovable published-projects list; blast-off-hvac and nicoles-side-hustle-hub read as prototypes and were excluded — operator may reclassify any row. Full design: docs/superpowers/specs/2026-07-12-venture-studio-framework-design.md.
+
+**Made by:** operator (design locked 2026-07-12) + agent (implementation)
+
+---
+
 ### 2026-07-12 — New agents/harnesses earn `mc_get_credential` access; no blanket credential exposure
 
 **Decision:** Hermes Agent (Nous Research's open-source MCP-capable harness, self-hosted, stood up 2026-07-12) will NOT be given blanket credential access via the shared `MCP_API_KEY` token, despite hitting `is_mcp_accessible=false` blocks and requiring manual `.env.local` entry a few times. Credential access stays case-by-case: individual keys get `is_mcp_accessible` flipped to `true` only after review; Stripe secrets, Supabase service role keys, and webhook secrets stay permanently agent-blocked regardless of friction. New agents/harnesses generally must prove trust over time before broader vault access, rather than being granted parity with established agents (Claude Code, Codex) on day one.
