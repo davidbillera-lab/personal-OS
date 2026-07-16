@@ -62,7 +62,9 @@ Both lanes use the **same Telegram bot token already in Hermes's `.env`**. Becau
 
 **Correction (found by Hermes, 2026-07-16):** The original build order said "repoint Hermes to the read token." That was wrong. Hermes connects to MC over **local stdio** (`node ./mcp-server.mjs`), and `mcp-server.mjs` enforces **no auth and no scope** — it serves every tool to any local caller. A read token over stdio does nothing. The read-scope layer only exists on the **HTTP** path (`app/api/mcp/route.ts`).
 
-The real downgrade is a **transport switch**: move the GPT Hermes profile's `mission-control` server from local stdio to the production HTTPS endpoint `https://personal-os.vercel.app/api/mcp` with `Authorization: Bearer <MCP_READONLY_API_KEY>`. Only then do `mc_get_credential` and every write path cease to exist for Hermes — filtered from `tools/list` and rejected at the route even if the tool name is guessed.
+The real downgrade is a **transport switch**: move the GPT Hermes profile's `mission-control` server from local stdio to the production HTTPS endpoint `https://personal-os-git-main-jsg1.vercel.app/api/mcp` with `Authorization: Bearer <MCP_READONLY_API_KEY>`.
+
+**URL correction (2026-07-16):** use the **git-main alias** `personal-os-git-main-jsg1.vercel.app`, NOT the apex `personal-os.vercel.app`. The apex has Vercel Deployment Protection in front of it and 307-redirects bearer calls to a signin wall before the route runs. The git-main alias reaches the route directly. This is the first real use of the HTTPS MCP endpoint — every agent to date used local stdio (which enforces no auth), so the protection wall was never noticed. Only then do `mc_get_credential` and every write path cease to exist for Hermes — filtered from `tools/list` and rejected at the route even if the tool name is guessed.
 
 Note: local stdio remains full-access for trusted builder clients (Claude Code). The scope boundary is an HTTP-path property by design; this is fine because stdio requires local machine access.
 
