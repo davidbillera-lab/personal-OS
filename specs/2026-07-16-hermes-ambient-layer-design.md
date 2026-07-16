@@ -60,11 +60,17 @@ Both lanes use the **same Telegram bot token already in Hermes's `.env`**. Becau
 
 ## Trust posture — this tightens Hermes
 
-Hermes currently holds the **full** MC token. Under this design it is repointed to `MCP_READONLY_API_KEY`.
+**Correction (found by Hermes, 2026-07-16):** The original build order said "repoint Hermes to the read token." That was wrong. Hermes connects to MC over **local stdio** (`node ./mcp-server.mjs`), and `mcp-server.mjs` enforces **no auth and no scope** — it serves every tool to any local caller. A read token over stdio does nothing. The read-scope layer only exists on the **HTTP** path (`app/api/mcp/route.ts`).
 
-This is a **downgrade**: `mc_get_credential` and every write path cease to exist for Hermes — filtered from `tools/list` and rejected at the route even if the tool name is guessed.
+The real downgrade is a **transport switch**: move the GPT Hermes profile's `mission-control` server from local stdio to the production HTTPS endpoint `https://personal-os.vercel.app/api/mcp` with `Authorization: Bearer <MCP_READONLY_API_KEY>`. Only then do `mc_get_credential` and every write path cease to exist for Hermes — filtered from `tools/list` and rejected at the route even if the tool name is guessed.
+
+Note: local stdio remains full-access for trusted builder clients (Claude Code). The scope boundary is an HTTP-path property by design; this is fine because stdio requires local machine access.
 
 This honors the 2026-07-12 decision (`decisions.md`) exactly as written: *"If Hermes becomes a regular tool-caller, consider issuing it a separate 'read'-scope token instead of reusing the 'full' token."* Hermes gets a bigger job and less access on the same day. Access is revisited only on track record.
+
+## Model / cost note — conversational lane runs on subscription
+
+The lane that answers Telegram replies is the **GPT Hermes profile** (`gpt-5.6-sol` via OpenAI Codex OAuth / ChatGPT subscription), **not** the Opus default the vault entry records. This is deliberate: replies run flat-rate against the subscription, not metered per-token. Docs must state this explicitly so a future session doesn't "fix" it back to Opus and start metering.
 
 ## Digest content
 
@@ -105,15 +111,27 @@ One runnable check on the digest builder (pure function, separated from the Tele
 
 The Telegram POST itself is not worth mocking.
 
+## Poller collision — move Telegram, do not copy (hardening)
+
+Hermes's plan copies the bot token onto the GPT profile and leaves it on the default profile, relying on "keep the default gateway stopped." Per `hermes-config-layout` memory, the desktop app auto-starts backends per-profile and reaps them after 600s idle — so the default gateway can wake on its own. Two pollers on one bot token → Telegram 409 conflict → alerts and replies silently break.
+
+**Fix:** *move* Telegram to the GPT profile — strip it from the default profile entirely. One bot, one poller.
+
+## Executor split (decided 2026-07-16)
+
+Per HQ-window-workflow + credential-trust rules, production surface stays with the proven builder:
+
+- **Claude Code (fresh build window)** — Tasks 1–5 + 7: digest builder + tests, `/api/alerts/digest` route, `vercel.json` cron, `.mcp.json` commit, docs, Vercel production env vars, deploy, production verification.
+- **Hermes (self-configuration only)** — Task 6: switch its own GPT-profile `mission-control` transport from stdio to the read-only HTTPS endpoint, and take over the Telegram lane (move, not copy). Hermes only ever touches its own config.
+
 ## Build order
 
-1. Generate + set `MCP_READONLY_API_KEY` in Vercel env (activates the dormant read scope).
-2. Repoint Hermes from the full token to the read token — the access downgrade. Verify `tools/list` shrinks to read-scoped tools only.
-3. Copy `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` + `CRON_SECRET` into Vercel env.
-4. Build `/api/alerts/digest` (digest builder + Telegram POST + cron auth) and `vercel.json` cron entry.
-5. Commit the `.mcp.json` Hermes wiring (currently uncommitted).
-6. Document Hermes as the ambient layer in `CLAUDE.md`; update the vault agent entry to note read-scope.
-7. Log the role + trust decisions in `decisions.md`.
+1. **[Claude Code]** Build `/api/alerts/digest` (pure digest builder + tests, Telegram POST, `CRON_SECRET` auth) and `vercel.json` cron entry.
+2. **[Claude Code]** Generate + set `MCP_READONLY_API_KEY`, `CRON_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` in Vercel production env. Deploy.
+3. **[Claude Code]** Verify the production read-only endpoint: `tools/list` returns only the 9 read-scoped tools; a guessed write call 403s.
+4. **[Claude Code]** Commit the `.mcp.json` Hermes wiring; document ambient role in `CLAUDE.md` + `AGENTS.md`; log role + trust + transport-correction decisions in `decisions.md`; update the vault agent entry.
+5. **[Hermes]** Switch GPT-profile `mission-control` from stdio to the HTTPS read-only endpoint; move Telegram onto GPT (strip from default); restart gateway; verify from a fresh process that only 9 read tools appear and Telegram runs under GPT.
+6. **[Claude Code]** End-to-end + graceful-degradation test (stop GPT gateway, confirm alert still delivers); MC closeout.
 
 ## Out of scope (future sub-projects)
 
