@@ -4,6 +4,11 @@
       "type": "stdio",
       "command": "node",
       "args": ["./mcp-server.mjs"]
+    },
+    "hermes": {
+      "type": "stdio",
+      "command": "hermes",
+      "args": ["mcp", "serve"]
     }
   }
 }
