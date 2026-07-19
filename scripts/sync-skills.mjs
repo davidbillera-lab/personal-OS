@@ -48,6 +48,7 @@ const SKILL_TAGS = {
   'checkpoint':           ['workflow', 'session-start', 'context', 'resume', 'compaction'],
   'CodexQC':             ['quality', 'code-review', 'openai', 'second-opinion', 'build'],
   'davids-agents':        ['workflow', 'subagents', 'relay', 'compaction', 'token-efficiency', 'sequential'],
+  'davids-rules':         ['canonical', 'workflow', 'session-start', 'roles', 'cross-check', 'guardrails', 'hermes', 'claude-code'],
   'davids-way':           ['skill', 'methodology', 'build', 'davids-way', 'model-routing'],
   'decisions-sync':       ['workflow', 'decisions', 'session-end', 'github', 'mission-control'],
   'dynamic-workflow':     ['workflow', 'planning', 'plan-mode', 'build-loop', 'process', 'handoff'],

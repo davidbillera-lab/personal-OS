@@ -85,6 +85,7 @@ Skills are installed in `~/.claude/skills/`. Any agent working on this project m
 
 | Skill | Trigger | What it does |
 |---|---|---|
+| `davids-rules` | **Session start** (any agent), `/davids-rules` | Canonical operating rules: where to ideate vs execute, the mandatory cross-check loop, artifact + persistence contracts, research routing, 12 stop-and-flag guardrails. Bootstrap only — canonical doc is `specs/2026-07-18-ideation-execution-workflow.md` + vault `fb27cf0d`. Reachable by Hermes via `mc_get_skill`. |
 | `davids-way` | Any task touching 2+ files or any new feature | Model tier audit, targeted reads only, plan-first approval gate, one-commit-per-piece discipline |
 | `vault-recall` | Session start, cold pickup, "we did this before" | Pulls prior decisions/specs/knowledge from vault before touching code |
 | `session-context` | Session start | 4-step protocol: vault search → recent decisions → credentials → project status |
