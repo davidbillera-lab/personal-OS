@@ -74,3 +74,6 @@ nextinit/
 supabase/.temp/
 
 .vercel
+
+# Hermes MCP server stderr capture (local runtime noise)
+mcp_stderr.txt
