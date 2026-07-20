@@ -31,8 +31,13 @@ Hermes is deliberately the swappable component. It holds no durable state, ever.
 Phase 0  CAPTURE          Hermes (Telegram or Desktop) — messy is fine
 Phase 1  DEVELOP          Hermes — clarify, challenge, research, kill criteria
 Phase 2  DRAFT SPEC       Hermes — emits Build Spec Draft + Handoff
+Phase 2.5 AB GATE         Hermes-side — NEW VENTURES & PIVOTS ONLY. David engages
+   │                      the four-persona panel on the finished handoff.
+   │                      GO → proceed. KILL → stop; David carries the verdict to
+   │                      a Claude session to log. MODIFY → back to Phase 1.
    ├─────► CROSS-CHECK A: Claude Code attacks the draft against repo reality
-Phase 3  FINALIZE+PERSIST Claude Code — specs/ + vault + decisions.md
+   │                      (existing-codebase work; N/A for greenfield)
+Phase 3  FINALIZE+PERSIST Claude Code — specs/ + vault + decisions.md (+ AB verdict)
 Phase 4  PLAN             Either — implementation plan
    ├─────► CROSS-CHECK B: the OTHER one attacks the plan
 Phase 5  EXECUTE          Claude Code — fresh project window, davids-way
@@ -59,6 +64,24 @@ Neither agent would have produced that result alone. The reviewer's advantage is
 **How to run it:** paste the draft into the other agent with: *"Attack this. What's wrong, what's missing, what would break? Do not be agreeable."*
 
 ---
+
+## The advisory-board gate (new ventures & pivots)
+
+A **second, distinct gate** from the cross-check. They answer different questions:
+
+- **Cross-check** = *will it work?* Technical, agent-vs-agent, adversarial.
+- **AB gate** = *should we build it at all?* Strategic and behavioral, David-facing. Verdict first, names avoidance/shiny-object patterns, does not rescue bad ideas.
+
+**When it fires:** new projects, new revenue lines, and significant pivots — mirroring the `advisoryboard` skill's own triggers. Features and fixes on already-validated projects skip it (they still get the cross-check and kill-criteria). Do not run it on routine work — a gate that fires on everything becomes a rubber stamp and gets skipped.
+
+**Where it runs:** on the **Hermes side**, on the finished handoff, *before* anything crosses to a Claude Code build window. This is the last cheap moment before expensive execution — by now scope, time-to-revenue, and kill criteria are concrete, so the verdict is grounded in specifics, and Hermes ideation was flat-rate so nothing costly is yet spent. Hermes runs the panel by pulling the `advisoryboard` skill via `mc_get_skill`; David engages the four personas directly.
+
+**Verdicts:**
+- **GO** → the AB verdict travels inside the handoff; Claude Code persists it as an `ab_conversation` during Phase 3. No extra effort.
+- **KILL** → stop. Because Hermes cannot write to the vault, the kill does not auto-persist — and a kill is the highest-value verdict to keep (so the same dead idea doesn't return in three months). David carries the verdict into a Claude/HQ session with "log this kill"; Claude writes it to `decisions.md` + vault. One deliberate step, on a rare event.
+- **MODIFY** → back to Phase 1 with the panel's concerns.
+
+**Why Hermes-side and not the build window:** the go/no-go belongs where David already is, before he commits to opening a build window at all. Auto-persistence (the one thing lost by not running it in Claude) is preserved for GO via the handoff, and handled manually for the rare KILL.
 
 ## Artifact contract — Hermes emits exactly two things
 

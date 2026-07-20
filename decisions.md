@@ -303,3 +303,14 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 **Consequence:** Two constraints are now explicit. (1) **Persistence contract** — Hermes cannot write to MC, so every handoff MUST instruct Claude Code to save the spec to `specs/`, capture to the vault, log decisions, and update MC; an unpersisted Hermes artifact does not exist. (2) **Specs for existing codebases are drafts until validated against the repo** — a blind spec proposes building what may already exist (the read-scope layer was already fully built and dormant). Twelve guardrails codified to protect MC as source of truth, chiefly: Hermes stores nothing durable, stays read-only, and uses existing skills rather than reinventing them.
 **Made by:** operator + agent
+
+---
+
+### 2026-07-19 — Advisory-board gate added to the workflow (new ventures & pivots, Hermes-side, before build)
+
+**Decision:** The `advisoryboard` four-persona panel becomes a formal **go/no-go gate** on the finished Hermes handoff, before anything crosses to a Claude Code build window. It is a SECOND, distinct gate from the technical cross-check: the cross-check asks "will it work?", the AB gate asks "should we build it at all?" (strategic/behavioral, verdict-first, names avoidance/shiny-object, doesn't rescue bad ideas). **Scope:** new ventures + significant pivots only (mirrors advisoryboard's own triggers) — routine features/fixes skip it. **Placement:** Hermes-side; Hermes runs the panel by pulling `advisoryboard` via `mc_get_skill`, David engages the four personas. **Verdicts:** GO → verdict rides inside the handoff, Claude persists it as an `ab_conversation` at finalize; KILL → David carries the verdict to a Claude/HQ session to log (Hermes can't write to the vault); MODIFY → back to develop.
+
+**Reasoning:** The handoff is the last cheap checkpoint before expensive Claude Code execution — scope, time-to-revenue, and kill criteria are concrete by then, so the panel reacts to specifics rather than a vague idea, and Hermes ideation was flat-rate so nothing costly is yet spent. Running it Hermes-side (David's original instinct, corrected from an initial Claude-side placement) puts the go/no-go where David already is, before he commits to opening a build window at all. Scoping to new ventures/pivots keeps the panel meaningful — a gate that fires on every routine feature becomes a rubber stamp and gets skipped.
+
+**Consequence:** One accepted tradeoff — because Hermes is read-only, a KILL verdict does not auto-persist and requires one manual logging step in a Claude session. This is deliberate: kills are rare and are the highest-value verdict to keep (prevents re-proposing dead ideas), so the small friction is worth the durability. Encoded in the canonical workflow spec, the `davids-rules` skill, and vault item fb27cf0d.
+**Made by:** operator + agent
