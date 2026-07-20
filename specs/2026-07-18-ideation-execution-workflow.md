@@ -139,6 +139,31 @@ Raw research from any external agent returns to Hermes for synthesis — it neve
 
 ---
 
+## Specialist model escalation & swappable execution
+
+The execution model is chosen **per task, not permanently assigned by platform** — the operational expression of the tool-agnostic thesis. Match the model to the job; the context stays the moat.
+
+**Default lanes (unchanged):**
+- Hermes planning + synthesis → Codex OAuth (ChatGPT subscription)
+- Claude Code → default implementation environment
+- Codex → independent QC where required
+
+**Specialist escalation:**
+- Hermes may recommend a different model when current evidence shows a meaningful task-specific advantage — capability, cost, speed, privacy, context window, tool use, or local fit.
+- **Metered API use requires an upfront route + cost assessment AND David's approval** before it runs (matches global model-routing cost discipline).
+- **MoA (Mixture-of-Agents) planning** may consult specialist models as *advisors only* — the Hermes aggregator stays responsible for canonical compliance. Never use an unpinned/default metered MoA preset (silent-spend hazard, same class as the compression auto-route).
+
+**Outside-model execution** (a non-default model implements):
+- Runs a **bounded** task in an **isolated branch/worktree**.
+- Gets **no MC write authority, no direct merge authority, no unnecessary production credentials** — and never touches a protected repo (VZT) outside the full protection gate (guardrail #7).
+- **Claude Code reviews, tests, integrates, and takes ownership** of the result.
+- **Codex independently reviews the actual diff + verification evidence.**
+- Claude agrees, rebuts, or remediates each material Codex finding.
+- **David makes the final approve / modify / reject call.**
+- **Claude Code alone performs final GitHub + Mission Control persistence.**
+
+**Ownership:** models perform work; they do not own project state. Git repos + Mission Control remain the only durable sources of truth.
+
 ## Guardrails — what must NOT be broken
 
 These protect what the last several months of Mission Control work bought. Violating any of them is a stop-and-flag event, not a judgment call.

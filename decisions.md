@@ -314,3 +314,14 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 **Consequence:** One accepted tradeoff — because Hermes is read-only, a KILL verdict does not auto-persist and requires one manual logging step in a Claude session. This is deliberate: kills are rare and are the highest-value verdict to keep (prevents re-proposing dead ideas), so the small friction is worth the durability. Encoded in the canonical workflow spec, the `davids-rules` skill, and vault item fb27cf0d.
 **Made by:** operator + agent
+
+---
+
+### 2026-07-19 — Specialist model escalation & swappable execution added to the workflow
+
+**Decision:** The execution model is chosen **per task, not permanently assigned by platform** — the operational expression of the tool-agnostic thesis. Defaults hold (Hermes plans on Codex OAuth, Claude Code is the default implementation environment, Codex QCs). Hermes may recommend a different model when current evidence shows a real task-specific advantage (capability, cost, speed, privacy, context window, tool use, local fit). **Metered API use requires an upfront route + cost assessment AND David's approval.** MoA (Mixture-of-Agents) planning may consult specialists as advisors only — the Hermes aggregator owns canonical compliance; no unpinned/default metered MoA preset. An approved outside model may implement a **bounded** task in an **isolated branch/worktree** with **no MC write, no merge authority, no unnecessary prod creds**, and never in a protected repo outside the full gate. Claude Code reviews/tests/integrates/**owns** the result; Codex independently reviews the actual diff + verification evidence; Claude rebuts or remediates each material finding; David makes the final call; **Claude Code alone persists to GitHub + MC.**
+
+**Reasoning:** Locks in "match the model to the task" without letting a swappable executor erode the invariants the last several months bought — source-of-truth, the persistence contract, least-privilege, cost discipline, and the Codex cross-check all survive intact. It codifies a *safe* path for outside-model execution (isolated worktree, no durable authority, Claude Code as integrator/owner) so specialist capability can be used without handing an unproven or external model any state ownership.
+
+**Consequence:** New guardrail #13 — models perform work but never own project state; only Claude Code persists to Git + MC. Encoded in the canonical workflow spec, the `davids-rules` skill (re-synced to vault), and vault item fb27cf0d. Metered/outside-model use folds into the existing model-tier + approval discipline (guardrail #6). Came via Hermes draft → Claude validation → persistence, i.e. the workflow exercising itself.
+**Made by:** operator + agent (Hermes draft, Claude validation)
