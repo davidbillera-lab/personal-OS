@@ -347,3 +347,14 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 **What is NOT recoverable from here:** the spec doc and the handoff doc themselves — they exist only on the unpushed branch. **Recovery is David's action from the authoring window:** `git push origin spec/multitenant-saas-handoff`. When that branch is pushed and merged, reconcile this entry with the branch's own decisions.md entries (expect an append-conflict; keep one).
 **Made by:** agent (cleanup — David's decision reconstructed from vault; branch push pending)
+
+---
+
+### 2026-07-23 — SOUL.md adopted as the portfolio intake gate
+
+**Decision:** `SOUL.md` (JSG Holdco Charter) is the canonical **intake gate** — the test an idea must pass to become a JSG asset, upstream of the advisory board and kill-criteria. Gate order: **SOUL (does it belong?) → advisory board (should we build it now?) → kill-criteria (is it still viable in flight?).** Locked with David's inputs: Mars = an empire holding multiple flagship "Mars-driven" assets *plus* a factory producing assets sold at significant multiples (origin: estate-sale/reselling → VZT → operator confidence); JSG is a **permanent cash-flowing parent that spins out and sells assets, not itself for sale**; "won't build" adds **single-client service businesses** and **regulated verticals without a partner** to the existing exclusions.
+
+**Reasoning:** The advisory board and kill-criteria both evaluate a project *already in flight*; nothing governed whether an idea belonged in the portfolio in the first place — that lived only in the operator's gut. The charter makes it explicit, portable to every agent, and durable across tool/model/project swaps (the "context is the moat" thesis applied to the company). Scoped deliberately as a decision filter, not a mission-vibes page — every line is a filter or a fact.
+
+**Consequence:** `SOUL.md` committed to the repo, written to the vault (`0a82b249`, agent-readable at intake), and wired into the `davids-rules` skill as the first gate. The permanent-cash-parent exit thesis makes clean per-asset separability non-negotiable (each asset sellable without unwinding JSG).
+**Made by:** operator + agent
