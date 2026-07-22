@@ -339,17 +339,6 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 ---
 
-### 2026-07-23 — FlipRadar multitenant SaaS artifacts stranded on an unpushed branch (reconciliation needed)
-
-**Context/cleanup entry — not a new decision.** The FlipRadar multitenant SaaS work approved 2026-07-22 produced a finalized spec and a Claude/MC handoff doc on branch `spec/multitenant-saas-handoff` (commit `49155a7`). Verified 2026-07-23 (`git fetch` + `git ls-remote`): **that branch is not on origin and the commit is unknown to this clone** — the work was done in another window and never pushed. Vault items `817559fd` and `2076073e` wrongly state it was "pushed to origin" (corrected via vault note `cfc9e379`).
-
-**The decision itself is durable** and captured here for completeness (source: vault `817559fd`): FlipRadar multi-tenant SaaS plan approved, sequencing **Option A (hardening-first)** — **S1** executes now as proving-period security hardening (auth on the public paid/mutating routes `POST /api/route/optimize` and `POST /api/scheduled/deals.processDeals`); **S2–S7** (tenant identity/RLS, canonical shared collection, durable jobs/atomic budgets/ledger, analytics, Stripe test-mode, security review) **deferred** until a 2–4 week proving period yields unit-economics + $99 willingness-to-pay evidence, each S-stage gated on a separate David approval. Not authorized: paid scraper/provider activation, production migrations, deployments, Stripe live mode.
-
-**What is NOT recoverable from here:** the spec doc and the handoff doc themselves — they exist only on the unpushed branch. **Recovery is David's action from the authoring window:** `git push origin spec/multitenant-saas-handoff`. When that branch is pushed and merged, reconcile this entry with the branch's own decisions.md entries (expect an append-conflict; keep one).
-**Made by:** agent (cleanup — David's decision reconstructed from vault; branch push pending)
-
----
-
 ### 2026-07-23 — SOUL.md adopted as the portfolio intake gate
 
 **Decision:** `SOUL.md` (JSG Holdco Charter) is the canonical **intake gate** — the test an idea must pass to become a JSG asset, upstream of the advisory board and kill-criteria. Gate order: **SOUL (does it belong?) → advisory board (should we build it now?) → kill-criteria (is it still viable in flight?).** Locked with David's inputs: Mars = an empire holding multiple flagship "Mars-driven" assets *plus* a factory producing assets sold at significant multiples (origin: estate-sale/reselling → VZT → operator confidence); JSG is a **permanent cash-flowing parent that spins out and sells assets, not itself for sale**; "won't build" adds **single-client service businesses** and **regulated verticals without a partner** to the existing exclusions.
