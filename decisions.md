@@ -325,3 +325,14 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 **Consequence:** New guardrail #13 — models perform work but never own project state; only Claude Code persists to Git + MC. Encoded in the canonical workflow spec, the `davids-rules` skill (re-synced to vault), and vault item fb27cf0d. Metered/outside-model use folds into the existing model-tier + approval discipline (guardrail #6). Came via Hermes draft → Claude validation → persistence, i.e. the workflow exercising itself.
 **Made by:** operator + agent (Hermes draft, Claude validation)
+
+---
+
+### 2026-07-22 — Brain-dump capture: manual bridge now, Hermes write tool deferred
+
+**Decision:** Hermes brain dumps reach Mission Control via a **manual bridge**, not a Hermes write privilege — for now. Hermes captures each dump verbatim into a local rolling buffer (survives compaction), emits a `BRAIN DUMP HANDOFF` block on request, David pastes it into Claude Code, and Claude runs a Haiku classification pass → routes each dump to the right project → writes to the MC brain-dump inbox → surfaces decisions/kill-candidates/new-project candidates for David. Hermes stays fully read-only; it archives + clears its buffer on David's confirmation. The scoped-write approach (a `capture` token + `mc_write_brain_dump` tool) is designed and **deferred to step 2**.
+
+**Reasoning:** The bridge is the persistence contract applied to capture (Hermes drafts → David transports → Claude persists). It does capture AND triage in one pass — a raw auto-write would only drop unclassified text into the inbox, leaving routing for later. It keeps Hermes read-only while it keeps earning track record, and it teaches us the real classification/routing rules before we automate them. Building the write tool first would mean automating a flow we've never run. Bridge-first IS the trust ladder.
+
+**Consequence:** Hermes gets a local capture buffer (`AppData/Local/hermes/brain-dumps/buffer.md`) — transient, not durable portfolio state, so it doesn't cross the source-of-truth boundary. Classification runs on Haiku (Tier 1), routing on Opus with live project context. No MCP brain-dump tool exists yet, so Claude persists via the brain_dumps inbox directly until step 2 builds `mc_write_brain_dump` + a `capture` token scope (read tools + that one write tool; credentials/project-writes/vault-writes stay 403). Encoded in the workflow spec.
+**Made by:** operator + agent

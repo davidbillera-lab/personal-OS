@@ -65,6 +65,18 @@ Neither agent would have produced that result alone. The reviewer's advantage is
 
 ---
 
+## Brain-dump capture (interim bridge — no Hermes write)
+
+David brain-dumps into Hermes; those dumps are ephemeral (die on `/new`/compaction). Until Hermes earns a scoped write path, the bridge is:
+
+1. **Hermes captures** each dump verbatim into a **local rolling buffer** (`AppData/Local/hermes/brain-dumps/buffer.md`) — a transient buffer, not durable state, so a dump survives compaction between capture and handoff. Hermes does not develop, classify, or route — capture only.
+2. On request, Hermes emits a **BRAIN DUMP HANDOFF** — one paste-ready block, verbatim, indexed, with timestamps, source, and any explicit project hint David gave.
+3. **David pastes it into Claude Code (personal-os).**
+4. **Claude runs a Haiku classification pass** (Tier 1) → tags each dump (idea/task/bug/decision/kill-candidate/new-project) → routes to the right project using live project context → writes to the MC brain-dump inbox → reports what went where, surfacing decisions / kill-candidates / new-project candidates for David's eyes (never silent-filed).
+5. On David's confirmation, Hermes archives + clears the buffer.
+
+**Why the bridge before the write tool:** it does capture *and* triage in one pass (a raw auto-write wouldn't), it keeps Hermes read-only, and it teaches us the classification/routing rules to encode later. **Deferred step 2:** a scoped `capture` token + `mc_write_brain_dump` tool once the pattern is proven and Hermes has more track record (the trust ladder).
+
 ## The advisory-board gate (new ventures & pivots)
 
 A **second, distinct gate** from the cross-check. They answer different questions:
