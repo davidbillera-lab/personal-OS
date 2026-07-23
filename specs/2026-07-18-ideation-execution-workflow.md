@@ -176,6 +176,21 @@ The execution model is chosen **per task, not permanently assigned by platform**
 
 **Ownership:** models perform work; they do not own project state. Git repos + Mission Control remain the only durable sources of truth.
 
+### Persistence resilience — branch-push always, canonical review never bends
+
+"Push to GitHub" and "make it canonical" are **two different actions**, and only one is gated.
+
+- **Branch push is never gated.** Every build, major change, or spec gets its working **branch** pushed to GitHub by *whoever holds the task* — Claude Code, Hermes, an outside model, or David. It touches no protected branch, needs no model reasoning, and never waits on anything. Work is never left stranded on a local disk. (An unpushed branch is a *delay*, not a data-loss event — but push it anyway, immediately, the moment it's built.)
+- **Merge to main + canonical persistence is the reviewed step.** The merge to `main`, the `decisions.md` entry, the vault write, and `mc_update_project_status` happen only after the cross-check + Codex QC (where required). This gate does **not** bend for rate limits or a busy reviewer.
+
+**Break-glass persistence failover (Claude sub maxed / unavailable):**
+Persisting to GitHub + MC is a *mechanical* task, not an intelligence task — it needs the write authority and a *completed* review, not a specific model. So the **executor swaps while the authority holds**:
+
+1. **The work is already safe** — it's on a branch on GitHub (branch-push-always, above). A maxed sub delays canonical persistence; it never risks the work.
+2. **Canonical persistence can simply wait** for the sub window to reset (hours). A reviewed branch parked on GitHub overnight is correct, not a problem.
+3. **If it genuinely can't wait:** **Codex takes the persistence lane** (different vendor, different rate limit, unaffected by the Claude cap) — or **David** runs it with the full-scope token — executing the *already-reviewed* result. **Never skip the review because the reviewer is rate-limited.** The one thing that must not happen is Hermes/an outside model pushing straight to `main` + canonical MC to dodge the wait.
+4. **When Claude is restored, the lane reverts to normal.** Codex is *failover, not a new default* — the write authority goes home to the primary lane the moment it's back up. Tool-agnostic all the way down: if the Claude subscription ever ended permanently, the write token is re-homed to another trusted lane; the moat (one authority, reviewed before canonical) never scatters.
+
 ## Guardrails — what must NOT be broken
 
 These protect what the last several months of Mission Control work bought. Violating any of them is a stop-and-flag event, not a judgment call.
