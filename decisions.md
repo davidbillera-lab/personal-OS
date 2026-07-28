@@ -358,3 +358,15 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 **Consequence:** Folded into the canonical workflow spec (`specs/2026-07-18-ideation-execution-workflow.md` → "Persistence resilience") and the `davids-rules` skill (re-synced to the vault). Two related tightenings — explicit build-size tiers (greenfield end-to-end vs existing-repo bounded vs protected-repo gated) and a metered-model cost gate — were deliberately **parked** until the local rig is live, to be revisited together with the hosting economics.
 **Made by:** operator + agent
+
+---
+
+### 2026-07-28 — ChatGPT voice adopted as Chief-of-Staff relay; MC is the mailbox
+
+**Decision:** ChatGPT voice becomes the mobile **front door / relay** for the portfolio — David's proxy when he's away from the keyboard. It reads MC for briefings, captures voice brain dumps and build intents into MC, and relays agent pushback/status back to David. It does **not** build, merge, or hold broad write authority — David explicitly withdrew the "access anything I can" ask in favor of the relay model. Roles stay separated: Hermes keeps spec drafting + the Telegram digest lane; Claude Code keeps build + persistence authority; Codex keeps QC. **All coordination flows through MC as the mailbox** — no direct ChatGPT→Hermes or ChatGPT→Claude channels. Access ladder: per-agent read token first (M1), then the narrow `capture` write scope (brain-dump + task-queue tools only) designed in the 2026-07-22 brain-dump decision — the full token never.
+
+**Reasoning:** The goal is a bridge between the portfolio and David's geographical location, not a fourth builder. The relay model delivers the full Chief-of-Staff UX (talk → capture → spec → build → hear pushback → approve) while every durable action still crosses the existing gates. MC-as-mailbox keeps one auditable channel, avoids exposing Hermes's local gateway to the internet, and reuses the live task queue instead of inventing agent-to-agent plumbing.
+
+**Consequence:** Resolves amendments #1 and #4 of `specs/2026-07-28-mc-ai-orchestration-layer.md`. The deferred `mc_write_brain_dump` + `capture` token scope becomes the Phase 2 build, issued to ChatGPT (and later Hermes) on separate per-agent keys. The planned "inbound Telegram→brain-dump capture" ambient sub-project is absorbed: ChatGPT voice is the capture path; Hermes's Telegram lane stays digest/alerts. Phase 0 (ChatGPT voice can invoke MCP connector tools + static Bearer auth compatibility) still gates all build work. Unattended headless builds (Phase 4) remain a separate future trust decision.
+**Made by:** operator + agent
+

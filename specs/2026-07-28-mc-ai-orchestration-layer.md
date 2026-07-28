@@ -2,10 +2,10 @@
 > Authored by ChatGPT (liaison candidate). Original: `~/Downloads/Mission_Control_AI_Orchestration_Architecture_v1.{md,pdf,docx}`.
 >
 > **Binding amendments from the cross-check (David to overrule explicitly if he disagrees):**
-> 1. **No blanket access.** "GPT can access anything I can" is rejected — it contradicts this spec's own trust-boundary rule (§4) and the standing rule that new harnesses earn credential access case-by-case (Hermes precedent). ChatGPT starts at M1 read-only on its **own** per-agent read token, and climbs the R-tier ladder milestone by milestone with evidence.
+> 1. **No blanket access — RESOLVED 2026-07-28.** David withdrew the "access anything I can" ask in favor of a **Chief-of-Staff relay model**: ChatGPT reads MC, captures intents/brain dumps, and relays agent pushback — it never builds, merges, or holds broad write. Ladder: per-agent read token (M1) → narrow `capture` write scope (M2). See `decisions.md` 2026-07-28.
 > 2. **Extend the existing `/api/mcp` server; do not greenfield `mc-orchestrator`.** Existing `mc_*` underscore naming is preserved (spec §10 permits this). Current surface: 16 `mc_*` tools, two flat scopes (full/read) — no audit events, approvals, risk tiers, agent dispatch, repo tools, or deploy tools yet.
 > 3. **Phase 0 validation gate before any build:** confirm (a) ChatGPT voice mode can actually invoke custom-connector MCP tools, and (b) ChatGPT's connector auth can send our static Bearer token (or we need an OAuth shim). If (a) fails, the voice-cockpit premise reshapes and this spec gets re-scoped.
-> 4. **Hermes role overlap is an open decision.** Spec keeps Hermes as planner, but ChatGPT-as-front-door overlaps Hermes's ambient lane (Telegram digest replies, brain-dump capture next-action already queued in MC). David rules on this before M2.
+> 4. **Hermes role overlap — RESOLVED 2026-07-28.** ChatGPT voice is the mobile front door / capture path; Hermes keeps spec drafting + the Telegram digest lane; Claude Code keeps build + persistence; **MC is the mailbox between all agents** (no direct agent-to-agent channels). The planned Telegram→brain-dump capture sub-project is absorbed by ChatGPT capture. See `decisions.md` 2026-07-28.
 
 # Mission Control AI Orchestration Layer
 
