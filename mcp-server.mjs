@@ -115,6 +115,7 @@ const MCP_TOOLS = [
   {
     name: 'mc_get_pending_tasks',
     description: 'Returns tasks that have a generated spec and are not yet completed. Optionally filter by project_id.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -150,6 +151,7 @@ const MCP_TOOLS = [
   {
     name: 'mc_get_project_context',
     description: 'Returns the current context for a project: status, next_action, blockers, lead_model, and current_agent.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -187,6 +189,7 @@ const MCP_TOOLS = [
   {
     name: 'mc_get_vault_context',
     description: 'Semantic search over vault items. Pass the current task description to get relevant skills, agent roles, and knowledge items back as 200-char previews with ids. Call mc_get_vault_item with an id to fetch full content — do NOT re-search with broader queries to see more text. Never returns encrypted or personal items.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -199,6 +202,7 @@ const MCP_TOOLS = [
   {
     name: 'mc_get_vault_item',
     description: "Fetch ONE vault item's full content by id. Token-lean pattern: search with mc_get_vault_context or list with mc_browse_vault (cheap previews), then call this for the single item you actually need. Never returns encrypted or personal items.",
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -210,11 +214,13 @@ const MCP_TOOLS = [
   {
     name: 'mc_list_skills',
     description: 'List all operator workflow skills stored in the vault. Returns title, description, and tags for each skill. Call this at session start to discover which skills apply to your task, then call mc_get_skill to fetch full content.',
+    annotations: { readOnlyHint: true },
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'mc_get_skill',
     description: 'Fetch the full content of a skill by name. Use mc_list_skills first to discover available skill names.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -226,11 +232,13 @@ const MCP_TOOLS = [
   {
     name: 'mc_list_agents',
     description: 'List all reusable subagent definitions stored in the vault. Returns name, description, crew, and tags for each agent. Call this to discover which agents are available for delegation, then call mc_get_agent to fetch the full definition.',
+    annotations: { readOnlyHint: true },
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'mc_get_agent',
     description: 'Fetch the full definition (frontmatter + system prompt) of a subagent by name. Use mc_list_agents first to discover available agent names.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -242,6 +250,7 @@ const MCP_TOOLS = [
   {
     name: 'mc_browse_vault',
     description: 'Enumerate vault items in reverse-chronological order (most recent first). Unlike mc_get_vault_context (semantic search), this is a plain listing for browsing what exists. Optionally filter by type. Never returns encrypted or personal items.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
