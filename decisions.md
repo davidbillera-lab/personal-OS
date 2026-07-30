@@ -370,3 +370,25 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 **Consequence:** Resolves amendments #1 and #4 of `specs/2026-07-28-mc-ai-orchestration-layer.md`. The deferred `mc_write_brain_dump` + `capture` token scope becomes the Phase 2 build, issued to ChatGPT (and later Hermes) on separate per-agent keys. The planned "inbound Telegram→brain-dump capture" ambient sub-project is absorbed: ChatGPT voice is the capture path; Hermes's Telegram lane stays digest/alerts. Phase 0 (ChatGPT voice can invoke MCP connector tools + static Bearer auth compatibility) still gates all build work. Unattended headless builds (Phase 4) remain a separate future trust decision.
 **Made by:** operator + agent
 
+---
+
+### 2026-07-30 — Phase 0 CLOSED (voice proven); ChatGPT connector needs OAuth, not a static key
+
+**Decision:** Phase 0 is closed — **ChatGPT Work Voice provably invokes a custom MCP tool** on our server (throwaway `/api/mcp-probe`, No-Auth + Streamable HTTP; Vercel log confirms `mc_probe_echo` executed at `2026-07-30T21:26:37.357Z`, protocol `2025-11-25`). Two facts now govern the build: **(a) ChatGPT cannot present a static Bearer/API key** as a connector credential — the connector offers only OAuth / No-Auth / Mixed, so authenticated ChatGPT access **requires an OAuth 2.1 auth-code + PKCE facade**; a no-auth write endpoint is off the table. **(b)** the real `/api/mcp` must negotiate protocol version (echo the client's) — it hard-codes `2024-11-05` and would fail ChatGPT's handshake.
+
+**Reasoning:** The premise the whole cockpit rests on (voice → custom tool) was undocumented/rollout-dependent, so it was validated cheapest-first with a fake read-only probe before any OAuth investment — which the doc-check then proved would have been wasted if voice couldn't reach tools. The auth finding came from ChatGPT's own OpenAI-docs check (vault `d80be519`) + the live probe.
+
+**Consequence:** Product baseline + confirmed connector requirements persisted to the vault (`59bbf2b2`, `d80be519`, `0b6bb199`). OAuth facade moves onto the Phase 1 critical path; the static `chatgpt-liaison` key is demoted to curl/internal use only. Probe stays live until Phase 1 passes, then removed.
+**Made by:** operator + agent
+
+---
+
+### 2026-07-30 — Phase 1 ChatGPT-liaison relay: architecture + scope
+
+**Decision:** Build the ChatGPT liaison as a controlled Mission Control relay in four pieces. **(1)** `mc_requests` queue (state machine `submitted→queued→claimed→in_progress→{blocked,awaiting_approval,completed,failed,cancelled}`) + a narrow **`liaison` token scope** exposing exactly five tools — `mc_submit_request` (write) plus `mc_get_request_status` / `mc_list_recent_requests` / `mc_whats_stalled` / `mc_get_result` (read). No vault, no credentials, no worker mutations. **(2)** A **worker interface** (`mc_claim_request`, `mc_reassign_request`, `mc_post_progress`, `mc_mark_blocked`, `mc_request_approval`, `mc_complete_request`, `mc_mark_failed`), full-key-gated, state-machine-validated, never exposed to the liaison. **(3)** The OAuth 2.1 PKCE facade mapping a ChatGPT token → the `chatgpt-liaison` identity + `liaison` scope. **(4)** Publish + acceptance tests. **Phase 1 = the plumbing, operated by real Claude/Codex sessions manually** — the autonomous auto-route/auto-claim engine is Phase 2. **Hermes stays read-only** (drafts specs in its own env; ChatGPT relays the MC hand-off; Claude executes; Codex QCs; Claude final-checks; push to GitHub/MC). An end-to-end Hermes build (spec→push when several projects run concurrently) is a **future call reserved to David**, not a default.
+
+**Reasoning:** Cross-check against repo reality flagged three conflicts with the raw handoff: Hermes-write reverses a locked decision (guardrail #2); the handoff's Definition-of-Done implied an autonomous engine we deferred; and the rich request model doesn't fit `brain_dumps`/`tasks`. Splitting liaison (submit+read) from workers (mutations) with a dedicated scope keeps ChatGPT least-privileged and auditable while the trusted builders retain full access. Building the pipes before the automation lets Test 3 (relay) pass with manual worker steps, deferring the unattended runner's real trust cost.
+
+**Consequence:** Pieces 1+2 shipped + curl-verified (`fd04608` and this commit): liaison sees only its 5 tools; full sees 28; end-to-end submit→claim→progress→complete→read-back works; blocked/approval surface via `mc_whats_stalled`/status; invalid transitions rejected; liaison walled from worker tools + vault + credentials (403). Every call stamped in `mcp_audit_log`. Worker tools are HTTP-only for now (stdio `mcp-server.mjs` parity deferred — not the active path); per-worker-key isolation (vs the current full-key + `worker` param) is a Phase 2 hardening. OAuth facade (piece 3) is next and gates any ChatGPT write exposure — if it can't be completed cleanly, stop before exposing write.
+**Made by:** operator + agent
+

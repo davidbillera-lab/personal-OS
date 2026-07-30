@@ -313,6 +313,101 @@ export const MCP_TOOLS: McpTool[] = [
       required: ['request_id'],
     },
   },
+  // --- Worker interface (Phase 1) ---------------------------------------------
+  // Full-key only (scope 'write'); NEVER exposed to the liaison. Operated by real
+  // Claude/Codex sessions. Every call is state-machine-validated + audited.
+  {
+    name: 'mc_claim_request',
+    description: 'Worker claims a queued request. Sets assignee and moves it to claimed. Only valid from status queued.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'string', description: 'Request to claim.' },
+        worker:     { type: 'string', description: 'Claiming worker identity (e.g. claude, codex-qc).' },
+      },
+      required: ['request_id', 'worker'],
+    },
+  },
+  {
+    name: 'mc_reassign_request',
+    description: 'Reassign a non-terminal request to a different worker. Does not change its status.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'string', description: 'Request to reassign.' },
+        worker:     { type: 'string', description: 'New assignee (hermes, claude, codex-qc).' },
+      },
+      required: ['request_id', 'worker'],
+    },
+  },
+  {
+    name: 'mc_post_progress',
+    description: 'Post a progress update on a claimed/in-progress request. Moves it to in_progress.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'string', description: 'Request to update.' },
+        progress:   { type: 'string', description: 'Short progress note.' },
+      },
+      required: ['request_id', 'progress'],
+    },
+  },
+  {
+    name: 'mc_mark_blocked',
+    description: 'Mark a request blocked with a reason. Valid from claimed or in_progress.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'string', description: 'Request to block.' },
+        blocker:    { type: 'string', description: 'What is blocking it.' },
+      },
+      required: ['request_id', 'blocker'],
+    },
+  },
+  {
+    name: 'mc_request_approval',
+    description: "Move a request to awaiting_approval and set approval_required. Use before any materially risky action (deploy, protected push, external send, spend, credential change). Does NOT execute the action.",
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'string', description: 'Request needing approval.' },
+        reason:     { type: 'string', description: 'What is being requested and why it needs David.' },
+      },
+      required: ['request_id', 'reason'],
+    },
+  },
+  {
+    name: 'mc_complete_request',
+    description: 'Complete a request with a result summary and optional artifact references. Sets completed_at.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id:     { type: 'string', description: 'Request to complete.' },
+        result_summary: { type: 'string', description: 'Human-readable summary of what was done / the result.' },
+        artifact_refs:  { type: 'string', description: 'Optional JSON array of links/references (commits, PRs, files).' },
+      },
+      required: ['request_id', 'result_summary'],
+    },
+  },
+  {
+    name: 'mc_mark_failed',
+    description: 'Mark a request failed with a reason.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'string', description: 'Request that failed.' },
+        reason:     { type: 'string', description: 'Why it failed.' },
+      },
+      required: ['request_id', 'reason'],
+    },
+  },
 ]
 
 // A 'full' token sees every tool; 'liaison' sees only the request-queue tools;
@@ -332,6 +427,30 @@ export function isToolAllowed(name: string, tokenScope: McpTokenScope): boolean 
 }
 
 type ToolArgs = Record<string, string | undefined>
+
+// Worker state-machine transition: fetch current status, enforce the allowed
+// source states, apply updates + bump updated_at. Rejects invalid transitions so
+// a worker can't (e.g.) complete a request that was never claimed.
+async function transitionRequest(
+  supabase: ReturnType<typeof createAdminSupabaseClient>,
+  requestId: string,
+  allowedFrom: string[],
+  updates: Record<string, unknown>,
+) {
+  const { data: cur, error } = await supabase.from('mc_requests').select('status').eq('id', requestId).single()
+  if (error || !cur) throw new Error(`Request not found: ${requestId}`)
+  if (!allowedFrom.includes(cur.status)) {
+    throw new Error(`Not allowed from status '${cur.status}' (allowed: ${allowedFrom.join(', ')})`)
+  }
+  const { data, error: uerr } = await supabase
+    .from('mc_requests')
+    .update({ ...updates, updated_at: new Date().toISOString() })
+    .eq('id', requestId)
+    .select('id, status, assigned_to')
+    .single()
+  if (uerr || !data) throw new Error(uerr?.message ?? 'Update failed')
+  return data
+}
 
 export async function callTool(name: string, args: ToolArgs): Promise<string> {
   const supabase = createAdminSupabaseClient()
@@ -891,6 +1010,76 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
       result_summary: data.result_summary, artifact_refs: data.artifact_refs,
       latest_progress: data.latest_progress, completed_at: data.completed_at,
     })
+  }
+
+  if (name === 'mc_claim_request') {
+    const { request_id, worker } = args
+    if (!request_id || !worker) throw new Error('request_id and worker are required')
+    const data = await transitionRequest(supabase, request_id, ['queued'], { status: 'claimed', assigned_to: worker })
+    return JSON.stringify({ request_id: data.id, status: data.status, assigned_to: data.assigned_to })
+  }
+
+  if (name === 'mc_reassign_request') {
+    const { request_id, worker } = args
+    if (!request_id || !worker) throw new Error('request_id and worker are required')
+    const data = await transitionRequest(
+      supabase, request_id,
+      ['submitted', 'queued', 'claimed', 'in_progress', 'blocked', 'awaiting_approval'],
+      { assigned_to: worker },
+    )
+    return JSON.stringify({ request_id: data.id, status: data.status, assigned_to: data.assigned_to })
+  }
+
+  if (name === 'mc_post_progress') {
+    const { request_id, progress } = args
+    if (!request_id || !progress) throw new Error('request_id and progress are required')
+    const data = await transitionRequest(
+      supabase, request_id, ['claimed', 'in_progress', 'blocked'],
+      { status: 'in_progress', latest_progress: progress },
+    )
+    return JSON.stringify({ request_id: data.id, status: data.status })
+  }
+
+  if (name === 'mc_mark_blocked') {
+    const { request_id, blocker } = args
+    if (!request_id || !blocker) throw new Error('request_id and blocker are required')
+    const data = await transitionRequest(supabase, request_id, ['claimed', 'in_progress'], { status: 'blocked', blocker })
+    return JSON.stringify({ request_id: data.id, status: data.status })
+  }
+
+  if (name === 'mc_request_approval') {
+    const { request_id, reason } = args
+    if (!request_id || !reason) throw new Error('request_id and reason are required')
+    // Reason stored in `blocker` (what's holding it) — surfaces via mc_whats_stalled.
+    const data = await transitionRequest(
+      supabase, request_id, ['claimed', 'in_progress'],
+      { status: 'awaiting_approval', approval_required: true, blocker: reason },
+    )
+    return JSON.stringify({ request_id: data.id, status: data.status, approval_required: true })
+  }
+
+  if (name === 'mc_complete_request') {
+    const { request_id, result_summary } = args
+    if (!request_id || !result_summary) throw new Error('request_id and result_summary are required')
+    let artifacts: unknown = []
+    if (args.artifact_refs) {
+      try { artifacts = JSON.parse(args.artifact_refs) } catch { throw new Error('artifact_refs must be a JSON array') }
+    }
+    const data = await transitionRequest(
+      supabase, request_id, ['claimed', 'in_progress', 'awaiting_approval'],
+      { status: 'completed', result_summary, artifact_refs: artifacts, completed_at: new Date().toISOString() },
+    )
+    return JSON.stringify({ request_id: data.id, status: data.status })
+  }
+
+  if (name === 'mc_mark_failed') {
+    const { request_id, reason } = args
+    if (!request_id || !reason) throw new Error('request_id and reason are required')
+    const data = await transitionRequest(
+      supabase, request_id, ['claimed', 'in_progress', 'blocked', 'awaiting_approval'],
+      { status: 'failed', blocker: reason },
+    )
+    return JSON.stringify({ request_id: data.id, status: data.status })
   }
 
   throw new Error(`Unknown tool: ${name}`)
