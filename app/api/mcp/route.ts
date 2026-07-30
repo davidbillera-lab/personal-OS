@@ -26,26 +26,27 @@ const MCP_READONLY_API_KEY = process.env.MCP_READONLY_API_KEY
 // {"hermes":"...","chatgpt-liaison":"..."}. Each key grants the read scope; the
 // matched actor name is stamped into the audit log so we can tell callers apart.
 const MCP_READONLY_KEYS = process.env.MCP_READONLY_KEYS
+// Per-agent liaison keys as a JSON object of { actor: key }. A liaison key grants
+// the narrow 'liaison' scope (request-queue tools only) — the ChatGPT chief-of-
+// staff surface. Same shape as MCP_READONLY_KEYS.
+const MCP_LIAISON_KEYS = process.env.MCP_LIAISON_KEYS
 
-// Parse MCP_READONLY_KEYS into a { actor: key } map once at module load. The
-// legacy MCP_READONLY_API_KEY is deliberately NOT merged in here — it is checked
-// independently in resolveAuth so a map entry can never shadow or disable it.
-function loadReadonlyKeys(): Record<string, string> {
+// Parse a JSON { actor: key } env var into a map, once at module load. Must be a
+// plain object: a bare string or array would make Object.entries() emit
+// per-character/per-index entries — turning a paste mistake into a set of
+// one-character keys. Reject anything else, loudly. Fails closed (empty map).
+function parseKeyMap(raw: string | undefined, envName: string): Record<string, string> {
   const map: Record<string, string> = {}
-  if (!MCP_READONLY_KEYS) return map
+  if (!raw) return map
   let parsed: unknown
   try {
-    parsed = JSON.parse(MCP_READONLY_KEYS)
+    parsed = JSON.parse(raw)
   } catch {
-    // Fail closed on the read scope only — never affects the full token.
-    console.error('[mcp] MCP_READONLY_KEYS is not valid JSON — ignoring')
+    console.error(`[mcp] ${envName} is not valid JSON — ignoring`)
     return map
   }
-  // Must be a plain object of { actor: key }. A bare string or array would make
-  // Object.entries() emit per-character/per-index entries — i.e. turn a paste
-  // mistake into a set of one-character read keys. Reject anything else, loudly.
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    console.error('[mcp] MCP_READONLY_KEYS must be a JSON object of {actor: key} — ignoring')
+    console.error(`[mcp] ${envName} must be a JSON object of {actor: key} — ignoring`)
     return map
   }
   for (const [actor, key] of Object.entries(parsed as Record<string, unknown>)) {
@@ -53,7 +54,10 @@ function loadReadonlyKeys(): Record<string, string> {
   }
   return map
 }
-const READONLY_KEYS = loadReadonlyKeys()
+// Legacy MCP_READONLY_API_KEY is deliberately NOT merged into READONLY_KEYS — it
+// is checked independently in resolveAuth so a map entry can never shadow it.
+const READONLY_KEYS = parseKeyMap(MCP_READONLY_KEYS, 'MCP_READONLY_KEYS')
+const LIAISON_KEYS = parseKeyMap(MCP_LIAISON_KEYS, 'MCP_LIAISON_KEYS')
 
 // What a resolved token grants: a scope plus the actor name for the audit trail.
 // Full-token callers (Claude Code, the dashboard) share one identity: "full".
@@ -100,6 +104,11 @@ function bearerMatches(req: NextRequest, key: string): boolean {
 // Every comparison runs (no early break) so timing doesn't reveal which token matched.
 function resolveAuth(req: NextRequest): ResolvedAuth | null {
   const isFull = MCP_API_KEY ? bearerMatches(req, MCP_API_KEY) : false
+  // Liaison keys — narrow 'liaison' scope (request-queue tools only).
+  let liaisonActor: string | null = null
+  for (const [actor, key] of Object.entries(LIAISON_KEYS)) {
+    if (bearerMatches(req, key)) liaisonActor = actor
+  }
   let readActor: string | null = null
   // Legacy single read key — checked independently so the per-agent map can never
   // shadow or disable it. Maps to the "hermes" actor (its original consumer).
@@ -110,6 +119,7 @@ function resolveAuth(req: NextRequest): ResolvedAuth | null {
     if (bearerMatches(req, key)) readActor = actor
   }
   if (isFull) return { scope: 'full', actor: 'full' }
+  if (liaisonActor) return { scope: 'liaison', actor: liaisonActor }
   if (readActor) return { scope: 'read', actor: readActor }
   return null
 }

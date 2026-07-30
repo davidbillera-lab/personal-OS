@@ -9,8 +9,21 @@ import { captureToVault } from '@/lib/vault'
 export type McpScope = 'read' | 'write'
 
 // The privilege a presented token grants. 'full' can call everything;
-// 'read' is restricted to read-scoped tools.
-export type McpTokenScope = 'full' | 'read'
+// 'read' is restricted to read-scoped tools; 'liaison' is the narrow ChatGPT
+// chief-of-staff surface — exactly the request-queue tools below, nothing else
+// (no vault, no credentials, no worker mutations).
+export type McpTokenScope = 'full' | 'read' | 'liaison'
+
+// The exact tool set a 'liaison' token may see and call. Deliberately tiny:
+// submit a request + read its status/list/stalled/result. Widen only by adding
+// a name here, never by loosening the scope check.
+export const LIAISON_TOOLS = new Set<string>([
+  'mc_submit_request',
+  'mc_get_request_status',
+  'mc_list_recent_requests',
+  'mc_whats_stalled',
+  'mc_get_result',
+])
 
 export interface McpTool {
   name: string
@@ -241,17 +254,79 @@ export const MCP_TOOLS: McpTool[] = [
       required: ['name', 'value'],
     },
   },
+  {
+    name: 'mc_submit_request',
+    description: 'Submit a request into the Mission Control queue for a worker (Hermes/Claude) to pick up. Creates a queue record only — it never runs code, deploys, sends messages, or spends money. Returns a request_id to track it.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_text:      { type: 'string', description: 'What Mission Control should do, in plain language.' },
+        title:             { type: 'string', description: 'Optional short title for the request.' },
+        priority:          { type: 'string', description: 'low | normal | high | urgent (default normal).' },
+        preferred_worker:  { type: 'string', description: 'auto | hermes | claude (default auto).' },
+        source:            { type: 'string', description: 'Origin, e.g. chatgpt_voice or chatgpt_text (default chatgpt_liaison).' },
+        client_request_id: { type: 'string', description: 'Optional idempotency key — resubmitting the same id returns the existing request instead of a duplicate.' },
+      },
+      required: ['request_text'],
+    },
+  },
+  {
+    name: 'mc_get_request_status',
+    description: 'Get the current status of one Mission Control request: state, assignee, latest progress, blocker, whether approval is required, and last-updated time.',
+    scope: 'read',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: { request_id: { type: 'string', description: 'The request_id returned by mc_submit_request.' } },
+      required: ['request_id'],
+    },
+  },
+  {
+    name: 'mc_list_recent_requests',
+    description: 'List recent Mission Control requests (most recent first). Optionally filter by status. Concise fields only.',
+    scope: 'read',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', description: 'Optional status filter (e.g. queued, in_progress, completed).' },
+        limit:  { type: 'string', description: 'Max rows to return (default 20, max 50).' },
+      },
+    },
+  },
+  {
+    name: 'mc_whats_stalled',
+    description: 'List Mission Control requests that need attention: blocked, awaiting approval, failed, or with no progress in 30 minutes. Returns a reason for each.',
+    scope: 'read',
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'mc_get_result',
+    description: 'Get the completed result of a Mission Control request: whether it is done, the result summary, artifact references, and completion time.',
+    scope: 'read',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: { request_id: { type: 'string', description: 'The request_id to fetch the result for.' } },
+      required: ['request_id'],
+    },
+  },
 ]
 
-// A 'full' token sees every tool; a 'read' token only sees read-scoped tools.
+// A 'full' token sees every tool; 'liaison' sees only the request-queue tools;
+// 'read' sees read-scoped tools.
 export function toolsForScope(tokenScope: McpTokenScope): McpTool[] {
   if (tokenScope === 'full') return MCP_TOOLS
+  if (tokenScope === 'liaison') return MCP_TOOLS.filter(t => LIAISON_TOOLS.has(t.name))
   return MCP_TOOLS.filter(t => t.scope === 'read')
 }
 
 // Whether a token of the given scope is permitted to call the named tool.
 export function isToolAllowed(name: string, tokenScope: McpTokenScope): boolean {
   if (tokenScope === 'full') return true
+  if (tokenScope === 'liaison') return LIAISON_TOOLS.has(name)
   const tool = MCP_TOOLS.find(t => t.name === name)
   return tool?.scope === 'read'
 }
@@ -708,6 +783,114 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
 
     if (error || !data) throw new Error(error?.message ?? 'Insert failed')
     return JSON.stringify({ id: data.id, name: data.name })
+  }
+
+  if (name === 'mc_submit_request') {
+    const request_text = args.request_text
+    if (!request_text || !request_text.trim()) throw new Error('request_text is required')
+    if (request_text.length > 8000) throw new Error('request_text too long (max 8000 chars)')
+
+    const title = args.title?.slice(0, 200) ?? null
+    const priority = ['low', 'normal', 'high', 'urgent'].includes(args.priority ?? '') ? args.priority : 'normal'
+    const preferred_worker = ['auto', 'hermes', 'claude'].includes(args.preferred_worker ?? '') ? args.preferred_worker : 'auto'
+    const source = args.source?.slice(0, 40) ?? 'chatgpt_liaison'
+    const client_request_id = args.client_request_id ?? null
+
+    // Idempotency / duplicate-Voice protection. Explicit client_request_id is
+    // authoritative; otherwise suppress an identical request_text within 2 min.
+    const dupCols = 'id, status, created_at, assigned_to'
+    if (client_request_id) {
+      const { data: existing } = await supabase
+        .from('mc_requests').select(dupCols).eq('client_request_id', client_request_id).maybeSingle()
+      if (existing) {
+        return JSON.stringify({ request_id: existing.id, status: existing.status, created_at: existing.created_at, assigned_to: existing.assigned_to, duplicate: true, confirmation: 'Existing request returned (idempotent).' })
+      }
+    } else {
+      const twoMinAgo = new Date(Date.now() - 120_000).toISOString()
+      const { data: recent } = await supabase
+        .from('mc_requests').select(dupCols).eq('request_text', request_text).gte('created_at', twoMinAgo)
+        .order('created_at', { ascending: false }).limit(1)
+      if (recent && recent.length) {
+        const e = recent[0]
+        return JSON.stringify({ request_id: e.id, status: e.status, created_at: e.created_at, assigned_to: e.assigned_to, duplicate: true, confirmation: 'Duplicate suppressed (identical request within 2 minutes).' })
+      }
+    }
+
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .insert({
+        request_text, title, priority, preferred_worker, source,
+        created_by: 'chatgpt-liaison',
+        client_request_id,
+        status: 'queued',
+        assigned_to: preferred_worker !== 'auto' ? preferred_worker : null,
+      })
+      .select('id, status, created_at, assigned_to')
+      .single()
+    if (error || !data) throw new Error(error?.message ?? 'Insert failed')
+    return JSON.stringify({ request_id: data.id, status: data.status, created_at: data.created_at, assigned_to: data.assigned_to, confirmation: `Request queued as ${data.id}.` })
+  }
+
+  if (name === 'mc_get_request_status') {
+    const { request_id } = args
+    if (!request_id) throw new Error('request_id is required')
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .select('id, status, assigned_to, latest_progress, blocker, approval_required, updated_at')
+      .eq('id', request_id).single()
+    if (error || !data) throw new Error(`Request not found: ${request_id}`)
+    return JSON.stringify({
+      request_id: data.id, status: data.status, assigned_to: data.assigned_to,
+      latest_progress: data.latest_progress, blocker: data.blocker,
+      approval_required: data.approval_required, updated_at: data.updated_at,
+    })
+  }
+
+  if (name === 'mc_list_recent_requests') {
+    const parsedLimit = args.limit ? Math.min(Math.max(parseInt(args.limit, 10) || 20, 1), 50) : 20
+    let q = supabase
+      .from('mc_requests')
+      .select('id, title, status, priority, assigned_to, created_at, updated_at')
+      .order('created_at', { ascending: false }).limit(parsedLimit)
+    if (args.status) q = q.eq('status', args.status)
+    const { data, error } = await q
+    if (error) throw new Error(error.message)
+    return JSON.stringify((data ?? []).map(r => ({
+      request_id: r.id, title: r.title, status: r.status, priority: r.priority,
+      assigned_to: r.assigned_to, created_at: r.created_at, updated_at: r.updated_at,
+    })))
+  }
+
+  if (name === 'mc_whats_stalled') {
+    // Attention-needed: terminal-ish stuck states, or in-flight with no update in 30 min.
+    const staleCutoff = new Date(Date.now() - 30 * 60_000).toISOString()
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .select('id, title, status, assigned_to, blocker, approval_required, updated_at')
+      .or(`status.in.(blocked,awaiting_approval,failed),and(status.in.(claimed,in_progress),updated_at.lt.${staleCutoff})`)
+      .order('updated_at', { ascending: true })
+    if (error) throw new Error(error.message)
+    const reasonFor = (s: string) =>
+      s === 'blocked' ? 'blocked' : s === 'awaiting_approval' ? 'awaiting approval' : s === 'failed' ? 'failed' : 'no progress in 30 min'
+    return JSON.stringify((data ?? []).map(r => ({
+      request_id: r.id, title: r.title, status: r.status, assigned_to: r.assigned_to,
+      blocker: r.blocker, approval_required: r.approval_required, updated_at: r.updated_at, reason: reasonFor(r.status),
+    })))
+  }
+
+  if (name === 'mc_get_result') {
+    const { request_id } = args
+    if (!request_id) throw new Error('request_id is required')
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .select('id, status, result_summary, artifact_refs, latest_progress, completed_at')
+      .eq('id', request_id).single()
+    if (error || !data) throw new Error(`Request not found: ${request_id}`)
+    return JSON.stringify({
+      request_id: data.id, status: data.status, completed: data.status === 'completed',
+      result_summary: data.result_summary, artifact_refs: data.artifact_refs,
+      latest_progress: data.latest_progress, completed_at: data.completed_at,
+    })
   }
 
   throw new Error(`Unknown tool: ${name}`)
