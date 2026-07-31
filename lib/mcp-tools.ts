@@ -11,8 +11,18 @@ export type McpScope = 'read' | 'write'
 // The privilege a presented token grants. 'full' can call everything;
 // 'read' is restricted to read-scoped tools; 'liaison' is the narrow ChatGPT
 // chief-of-staff surface — exactly the request-queue tools below, nothing else
-// (no vault, no credentials, no worker mutations).
-export type McpTokenScope = 'full' | 'read' | 'liaison'
+// (no vault, no credentials, no worker mutations). 'orchestrator' is Hermes's
+// dispatcher role: every read tool PLUS exactly two routing writes (claim +
+// reassign) — it can pick up and route a request, but never execute, complete,
+// fail, submit, or touch the vault/credentials. Execution stays with real workers.
+export type McpTokenScope = 'full' | 'read' | 'liaison' | 'orchestrator'
+
+// The only write tools an 'orchestrator' token adds on top of the read set.
+// Widen ONLY by adding a name here — never by loosening the checks below.
+export const ORCHESTRATOR_EXTRA_TOOLS = new Set<string>([
+  'mc_claim_request',
+  'mc_reassign_request',
+])
 
 // The exact tool set a 'liaison' token may see and call. Deliberately tiny:
 // submit a request + read its status/list/stalled/result. Widen only by adding
@@ -411,10 +421,11 @@ export const MCP_TOOLS: McpTool[] = [
 ]
 
 // A 'full' token sees every tool; 'liaison' sees only the request-queue tools;
-// 'read' sees read-scoped tools.
+// 'orchestrator' sees read tools + the two routing writes; 'read' sees read-scoped tools.
 export function toolsForScope(tokenScope: McpTokenScope): McpTool[] {
   if (tokenScope === 'full') return MCP_TOOLS
   if (tokenScope === 'liaison') return MCP_TOOLS.filter(t => LIAISON_TOOLS.has(t.name))
+  if (tokenScope === 'orchestrator') return MCP_TOOLS.filter(t => t.scope === 'read' || ORCHESTRATOR_EXTRA_TOOLS.has(t.name))
   return MCP_TOOLS.filter(t => t.scope === 'read')
 }
 
@@ -423,6 +434,7 @@ export function isToolAllowed(name: string, tokenScope: McpTokenScope): boolean 
   if (tokenScope === 'full') return true
   if (tokenScope === 'liaison') return LIAISON_TOOLS.has(name)
   const tool = MCP_TOOLS.find(t => t.name === name)
+  if (tokenScope === 'orchestrator') return tool?.scope === 'read' || ORCHESTRATOR_EXTRA_TOOLS.has(name)
   return tool?.scope === 'read'
 }
 

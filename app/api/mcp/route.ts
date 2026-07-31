@@ -30,6 +30,10 @@ const MCP_READONLY_KEYS = process.env.MCP_READONLY_KEYS
 // the narrow 'liaison' scope (request-queue tools only) — the ChatGPT chief-of-
 // staff surface. Same shape as MCP_READONLY_KEYS.
 const MCP_LIAISON_KEYS = process.env.MCP_LIAISON_KEYS
+// Per-agent orchestrator keys as a JSON object of { actor: key }. An orchestrator
+// key grants the 'orchestrator' scope — every read tool plus exactly the two
+// routing writes (claim + reassign). Hermes's dispatcher role. Same shape.
+const MCP_ORCHESTRATOR_KEYS = process.env.MCP_ORCHESTRATOR_KEYS
 
 // Parse a JSON { actor: key } env var into a map, once at module load. Must be a
 // plain object: a bare string or array would make Object.entries() emit
@@ -58,6 +62,7 @@ function parseKeyMap(raw: string | undefined, envName: string): Record<string, s
 // is checked independently in resolveAuth so a map entry can never shadow it.
 const READONLY_KEYS = parseKeyMap(MCP_READONLY_KEYS, 'MCP_READONLY_KEYS')
 const LIAISON_KEYS = parseKeyMap(MCP_LIAISON_KEYS, 'MCP_LIAISON_KEYS')
+const ORCHESTRATOR_KEYS = parseKeyMap(MCP_ORCHESTRATOR_KEYS, 'MCP_ORCHESTRATOR_KEYS')
 
 // What a resolved token grants: a scope plus the actor name for the audit trail.
 // Full-token callers (Claude Code, the dashboard) share one identity: "full".
@@ -104,6 +109,11 @@ function bearerMatches(req: NextRequest, key: string): boolean {
 // Every comparison runs (no early break) so timing doesn't reveal which token matched.
 function resolveAuth(req: NextRequest): ResolvedAuth | null {
   const isFull = MCP_API_KEY ? bearerMatches(req, MCP_API_KEY) : false
+  // Orchestrator keys — 'orchestrator' scope (read tools + claim/reassign only).
+  let orchestratorActor: string | null = null
+  for (const [actor, key] of Object.entries(ORCHESTRATOR_KEYS)) {
+    if (bearerMatches(req, key)) orchestratorActor = actor
+  }
   // Liaison keys — narrow 'liaison' scope (request-queue tools only).
   let liaisonActor: string | null = null
   for (const [actor, key] of Object.entries(LIAISON_KEYS)) {
@@ -119,6 +129,7 @@ function resolveAuth(req: NextRequest): ResolvedAuth | null {
     if (bearerMatches(req, key)) readActor = actor
   }
   if (isFull) return { scope: 'full', actor: 'full' }
+  if (orchestratorActor) return { scope: 'orchestrator', actor: orchestratorActor }
   if (liaisonActor) return { scope: 'liaison', actor: liaisonActor }
   if (readActor) return { scope: 'read', actor: readActor }
   return null
