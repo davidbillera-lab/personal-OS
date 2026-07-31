@@ -39,11 +39,18 @@ function jsonrpcError(id: unknown, code: number, message: string) {
 
 // 401 that points ChatGPT at the protected-resource metadata (RFC 9728), so a
 // client with no/invalid token can discover the authorization server.
+// Strip anything that could break out of an HTTP header quoted-string. Reasons
+// are internal literals today; this keeps the header well-formed if that changes.
+function headerSafe(s: string): string {
+  return s.replace(/[^\x20-\x7E]/g, '').replace(/["\\]/g, '')
+}
+
 function unauthorized(reason: string) {
   const meta = isOAuthConfigured() ? `${getOAuthConfig().issuer}/.well-known/oauth-protected-resource` : ''
+  const desc = headerSafe(reason)
   const challenge = meta
-    ? `Bearer error="invalid_token", error_description="${reason}", resource_metadata="${meta}"`
-    : `Bearer error="invalid_token", error_description="${reason}"`
+    ? `Bearer error="invalid_token", error_description="${desc}", resource_metadata="${meta}"`
+    : `Bearer error="invalid_token", error_description="${desc}"`
   return NextResponse.json(
     { jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Unauthorized' } },
     { status: 401, headers: { 'WWW-Authenticate': challenge } }

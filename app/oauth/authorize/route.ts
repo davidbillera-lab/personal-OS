@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getOAuthConfig, getOAuthClient, insertAuthCode, safeEqual, type OAuthConfig } from '@/lib/oauth'
+import { createAdminSupabaseClient } from '@/lib/supabase'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -157,8 +158,15 @@ export async function POST(req: NextRequest) {
   if (paramErr) return paramErr
 
   // Operator gate — the resource-owner proof. Wrong/missing passcode re-renders
-  // the consent screen with an error and mints nothing.
+  // the consent screen with an error and mints nothing. Failed attempts are
+  // audited so brute-force pressure on the approval endpoint is visible.
   if (!passcode || !safeEqual(passcode, cfg.consentPasscode)) {
+    try {
+      await createAdminSupabaseClient().from('mcp_audit_log').insert({
+        actor: 'oauth-authorize', tool: 'consent_passcode', ok: false,
+        error: `failed passcode attempt (client ${p.client_id})`,
+      })
+    } catch { /* audit is best-effort */ }
     return renderConsent(p, cfg, 401, 'Incorrect passcode.')
   }
 

@@ -20,9 +20,18 @@ export interface OAuthConfig {
   // Operator approval secret. The /authorize consent screen requires it before
   // minting a code, so only David (who knows it) can approve the connection —
   // not any ChatGPT user who discovers the endpoint. Fail-closed: no passcode
-  // configured → no approval possible.
+  // (or one under the entropy floor) → no approval possible.
   consentPasscode: string | null
+  // Whether DCR may register callbacks under the ChatGPT connector prefix while
+  // CHATGPT_REDIRECT_URI is unset. Off by default → prod fails closed (only the
+  // exact configured redirect registers). Turn on ONLY for the first-connect
+  // bootstrap, then set CHATGPT_REDIRECT_URI and turn it back off.
+  allowDcrBootstrap: boolean
 }
+
+// Minimum operator-passcode length. A high-entropy secret makes the /authorize
+// approval infeasible to brute-force even without a rate limiter.
+const MIN_PASSCODE_LEN = 16
 
 // ChatGPT connector callbacks always live under this host+path. Until the exact
 // callback URL is known (set via CHATGPT_REDIRECT_URI), DCR accepts only
@@ -51,9 +60,22 @@ export function getOAuthConfig(): OAuthConfig {
     // so keep the window tight for a token that fronts a write-capable queue.
     accessTokenTtl: Number.isFinite(ttlRaw) && ttlRaw > 0 ? ttlRaw : 900,
     chatgptRedirectUri: process.env.CHATGPT_REDIRECT_URI || null,
-    consentPasscode: process.env.OAUTH_CONSENT_PASSCODE || null,
+    consentPasscode: passcodeOrNull(process.env.OAUTH_CONSENT_PASSCODE),
+    allowDcrBootstrap: process.env.OAUTH_ALLOW_DCR_BOOTSTRAP === 'true',
   }
   return cachedConfig
+}
+
+// Accept the passcode only if it clears the entropy floor. A too-short value is
+// treated as unset (fail-closed) with a loud log, so a weak passcode can never
+// silently guard the approval endpoint.
+function passcodeOrNull(raw: string | undefined): string | null {
+  if (!raw) return null
+  if (raw.length < MIN_PASSCODE_LEN) {
+    console.error(`[oauth] OAUTH_CONSENT_PASSCODE is under ${MIN_PASSCODE_LEN} chars — treating as unset (approval disabled)`)
+    return null
+  }
+  return raw
 }
 
 // True only when the core secrets exist — lets metadata endpoints answer while
@@ -155,8 +177,9 @@ export function verifyAccessToken(token: string, cfg: OAuthConfig): VerifyResult
 // RFC 7636 S256: challenge == base64url(SHA256(verifier)). No plain method.
 export function verifyPkceS256(verifier: string, challenge: string): boolean {
   if (!verifier || !challenge) return false
-  // RFC 7636 length bounds on the verifier.
+  // RFC 7636 length bounds + unreserved character set on the verifier.
   if (verifier.length < 43 || verifier.length > 128) return false
+  if (!/^[A-Za-z0-9\-._~]+$/.test(verifier)) return false
   const computed = b64url(createHash('sha256').update(verifier).digest())
   const a = Buffer.from(computed)
   const b = Buffer.from(challenge)
@@ -166,11 +189,13 @@ export function verifyPkceS256(verifier: string, challenge: string): boolean {
 // ---- Redirect URI validation ----------------------------------------------
 
 // Whether a redirect_uri may be REGISTERED via DCR. Once David sets the exact
-// CHATGPT_REDIRECT_URI it must match that exactly; before that, any callback
-// under the ChatGPT connector prefix is allowed so registration can bootstrap.
+// CHATGPT_REDIRECT_URI it must match that exactly. If it isn't set, registration
+// is refused UNLESS bootstrap mode is explicitly enabled — in which case any
+// callback under the ChatGPT connector prefix is allowed, purely for first-connect.
 export function isRegistrableRedirectUri(uri: string, cfg: OAuthConfig): boolean {
   if (cfg.chatgptRedirectUri) return uri === cfg.chatgptRedirectUri
-  return uri.startsWith(CHATGPT_REDIRECT_PREFIX) && isHttpsUrl(uri)
+  if (cfg.allowDcrBootstrap) return uri.startsWith(CHATGPT_REDIRECT_PREFIX) && isHttpsUrl(uri)
+  return false // fail closed: no exact redirect configured and no bootstrap
 }
 
 function isHttpsUrl(uri: string): boolean {
@@ -191,20 +216,6 @@ export async function createOAuthClient(params: {
   client_name?: string
 }): Promise<OAuthClient> {
   const supabase = createAdminSupabaseClient()
-
-  // Dedupe: a client already registered with the identical redirect_uris is
-  // returned instead of inserting a new row. Bounds oauth_clients growth from
-  // repeated DCR calls for the same connector (esp. once redirects are exact-locked).
-  const { data: existing } = await supabase
-    .from('oauth_clients')
-    .select('client_id, redirect_uris, client_name, scope')
-    .contains('redirect_uris', params.redirect_uris)
-    .limit(20)
-  const match = (existing ?? []).find(
-    c => JSON.stringify((c.redirect_uris as string[]).slice().sort()) === JSON.stringify(params.redirect_uris.slice().sort())
-  )
-  if (match) return { ...match, redirect_uris: match.redirect_uris as string[] }
-
   const client_id = randomToken(16)
   const { data, error } = await supabase
     .from('oauth_clients')
