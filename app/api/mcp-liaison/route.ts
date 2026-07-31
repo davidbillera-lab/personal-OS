@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { callTool, toolsForScope, isToolAllowed } from '@/lib/mcp-tools'
 import { createAdminSupabaseClient } from '@/lib/supabase'
-import { getOAuthConfig, verifyAccessToken, isOAuthConfigured } from '@/lib/oauth'
+import { getOAuthConfig, verifyAccessToken, isOAuthConfigured, isTokenRevoked, checkRateLimit, rateKey } from '@/lib/oauth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -75,7 +75,19 @@ export async function POST(req: NextRequest) {
   const token = extractBearer(req)
   if (!token) return unauthorized('missing bearer token')
   const verdict = verifyAccessToken(token, cfg)
-  if (!verdict.valid) return unauthorized(verdict.reason ?? 'invalid token')
+  if (!verdict.valid || !verdict.claims) return unauthorized(verdict.reason ?? 'invalid token')
+
+  // Global revocation kill-switch — reject tokens issued before oauth_config.revoked_before.
+  if (await isTokenRevoked(verdict.claims.iat)) return unauthorized('token revoked')
+
+  // Per-token throttle: 60 calls / min / jti. Caps a leaked token's blast radius
+  // within its short TTL.
+  if (!(await checkRateLimit(rateKey('mcp', verdict.claims.jti), 60, 60))) {
+    return NextResponse.json(
+      { jsonrpc: '2.0', id: null, error: { code: -32029, message: 'Rate limit exceeded' } },
+      { status: 429 }
+    )
+  }
 
   let body: { jsonrpc?: string; id?: unknown; method?: string; params?: Record<string, unknown> }
   try {

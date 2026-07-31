@@ -273,6 +273,51 @@ export async function insertAuthCode(params: {
   return code
 }
 
+// ---- Rate limiting + revocation (migration 019) ----------------------------
+
+// Fixed-window rate limit via the atomic oauth_rate_check() function. Returns
+// true if the call is within budget. Fails OPEN on a DB error — a limiter
+// outage must not lock out the real connector; the other gates still hold.
+export async function checkRateLimit(key: string, max: number, windowSec: number): Promise<boolean> {
+  try {
+    const supabase = createAdminSupabaseClient()
+    const { data, error } = await supabase.rpc('oauth_rate_check', { p_key: key, p_max: max, p_window_sec: windowSec })
+    if (error) { console.error('[oauth] rate check failed (allowing):', error.message); return true }
+    return data !== false
+  } catch (e) {
+    console.error('[oauth] rate check threw (allowing):', e)
+    return true
+  }
+}
+
+// Build a rate-limit key from a caller identity (IP or token jti) + a label.
+export function rateKey(label: string, id: string | null | undefined): string {
+  return `${label}:${id || 'unknown'}`
+}
+
+// Cached revocation cutoff. Access tokens are stateless JWTs; setting
+// oauth_config.revoked_before = now() invalidates every token issued before it.
+// Cached ~60s so the check adds ~no latency to steady-state MCP calls.
+let revokedCache = { value: 0, fetchedAt: 0 }
+async function getRevokedBefore(): Promise<number> {
+  const now = Date.now()
+  if (now - revokedCache.fetchedAt < 60_000) return revokedCache.value
+  try {
+    const supabase = createAdminSupabaseClient()
+    const { data } = await supabase.from('oauth_config').select('value').eq('key', 'revoked_before').maybeSingle()
+    const ts = data?.value ? Math.floor(new Date(data.value).getTime() / 1000) : 0
+    revokedCache = { value: Number.isFinite(ts) ? ts : 0, fetchedAt: now }
+    return revokedCache.value
+  } catch {
+    return revokedCache.value // serve the last-known value on a read error
+  }
+}
+
+// True if a token issued at `iat` (unix seconds) has been globally revoked.
+export async function isTokenRevoked(iat: number): Promise<boolean> {
+  return iat < (await getRevokedBefore())
+}
+
 export interface ConsumedCode {
   client_id: string
   redirect_uri: string

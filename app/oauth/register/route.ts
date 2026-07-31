@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getOAuthConfig, isRegistrableRedirectUri, createOAuthClient } from '@/lib/oauth'
+import { getOAuthConfig, isRegistrableRedirectUri, createOAuthClient, checkRateLimit, rateKey } from '@/lib/oauth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+
+function clientIp(req: NextRequest): string {
+  return req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
+}
 
 // Dynamic Client Registration (RFC 7591). ChatGPT posts its client metadata
 // (chiefly redirect_uris) and gets back a client_id. We are a public PKCE
@@ -11,6 +15,11 @@ export const dynamic = 'force-dynamic'
 // CHATGPT_REDIRECT_URI) can register — nothing else can obtain a client_id.
 export async function POST(req: NextRequest) {
   const cfg = getOAuthConfig()
+
+  // Bound DB-write abuse on this public insert endpoint: 20 registrations / hour / IP.
+  if (!(await checkRateLimit(rateKey('register', clientIp(req)), 20, 3600))) {
+    return NextResponse.json({ error: 'rate_limited', error_description: 'too many registrations' }, { status: 429 })
+  }
 
   let body: { redirect_uris?: unknown; client_name?: unknown; token_endpoint_auth_method?: unknown }
   try {

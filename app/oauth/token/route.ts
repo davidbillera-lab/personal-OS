@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getOAuthConfig, consumeAuthCode, verifyPkceS256, signAccessToken } from '@/lib/oauth'
+import { getOAuthConfig, consumeAuthCode, verifyPkceS256, signAccessToken, checkRateLimit, rateKey } from '@/lib/oauth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+
+function clientIp(req: NextRequest): string {
+  return req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
+}
 
 // Token endpoint. Exchanges a single-use authorization code + PKCE verifier for
 // a short-lived liaison access token (JWT, aud = MCP resource). Rejects: wrong
@@ -18,6 +22,11 @@ function tokenError(error: string, description: string, status = 400): NextRespo
 
 export async function POST(req: NextRequest) {
   const cfg = getOAuthConfig()
+
+  // 30 token requests / min / IP — generous for a real client, caps grinding.
+  if (!(await checkRateLimit(rateKey('token', clientIp(req)), 30, 60))) {
+    return tokenError('rate_limited', 'too many token requests', 429)
+  }
 
   // OAuth token requests are application/x-www-form-urlencoded.
   let form: URLSearchParams

@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getOAuthConfig, getOAuthClient, insertAuthCode, safeEqual, type OAuthConfig } from '@/lib/oauth'
+import { getOAuthConfig, getOAuthClient, insertAuthCode, safeEqual, checkRateLimit, rateKey, type OAuthConfig } from '@/lib/oauth'
 import { createAdminSupabaseClient } from '@/lib/supabase'
+
+function clientIp(req: NextRequest): string {
+  return req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
+}
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -145,6 +149,13 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const cfg = getOAuthConfig()
   if (!cfg.consentPasscode) return fatalPage('Operator approval is not configured (OAUTH_CONSENT_PASSCODE unset).')
+
+  // Throttle the approval endpoint — defense in depth on top of the passcode
+  // entropy floor (which is what actually makes guessing infeasible). 20/min/IP
+  // stops runaway grinding while never impeding a real operator.
+  if (!(await checkRateLimit(rateKey('authorize', clientIp(req)), 20, 60))) {
+    return fatalPage('Too many attempts. Wait a minute and try again.')
+  }
 
   const form = await req.formData()
   const sp = new URLSearchParams()
