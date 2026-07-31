@@ -17,12 +17,15 @@ export const dynamic = 'force-dynamic'
 // off the redirect). PKCE S256 is mandatory; the RFC 8707 `resource` (if sent) must
 // match our MCP resource; redirect_uri is validated EXACTLY against the registered client.
 
-// Deny framing — an approval page must not be clickjackable.
+// Deny framing — an approval page must not be clickjackable. form-action allows
+// 'self' (the POST) AND chatgpt.com, because approval 302-redirects the auth code
+// back to ChatGPT's callback; a bare 'self' silently blocks that cross-origin
+// redirect (the browser spins and the flow dies).
 const SECURITY_HEADERS = {
   'Content-Type': 'text/html; charset=utf-8',
   'Cache-Control': 'no-store',
   'X-Frame-Options': 'DENY',
-  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://chatgpt.com; frame-ancestors 'none'",
 }
 
 interface AuthParams {
