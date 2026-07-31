@@ -9,6 +9,7 @@ const BASE = (process.env.BASE || 'http://localhost:3000').replace(/\/$/, '')
 const JWT_SECRET = process.env.JWT_SECRET || ''
 const RESOURCE = process.env.RESOURCE || `${BASE}/api/mcp-liaison`
 const ISSUER = process.env.ISSUER || BASE
+const PASSCODE = process.env.PASSCODE || ''
 const REDIRECT = 'https://chatgpt.com/connector/oauth/test-local'
 
 let pass = 0, fail = 0
@@ -36,11 +37,11 @@ function forgeJwt(claims, { secret = JWT_SECRET, badSig = false } = {}) {
 const now = () => Math.floor(Date.now() / 1000)
 const baseClaims = () => ({ iss: ISSUER, sub: 'chatgpt-liaison', aud: RESOURCE, scope: 'liaison', iat: now(), exp: now() + 600, jti: b64url(randomBytes(8)) })
 
-async function authorizeAndGetCode(clientId, { verifier, challenge }, overrides = {}) {
+async function authorizeAndGetCode(clientId, { verifier, challenge }, overrides = {}, passcode = PASSCODE) {
   const qs = new URLSearchParams({
     response_type: 'code', client_id: clientId, redirect_uri: REDIRECT,
     scope: 'liaison', state: 'xyz', code_challenge: challenge,
-    code_challenge_method: 'S256', resource: RESOURCE, ...overrides,
+    code_challenge_method: 'S256', resource: RESOURCE, passcode, ...overrides,
   })
   // POST the consent approval (skips rendering the GET page; server re-validates).
   const res = await fetch(`${BASE}/oauth/authorize`, {
@@ -102,10 +103,16 @@ async function main() {
   const consentHtml = await consent.text()
   ok('consent screen renders with an Authorize button', consent.status === 200 && /Authorize/i.test(consentHtml) && /cannot/i.test(consentHtml))
 
+  // 3b. Operator gate: wrong / missing passcode mints no code
+  const badPass = await authorizeAndGetCode(clientId, pkcePair(), {}, 'wrong-passcode')
+  ok('authorize with wrong passcode → no code (401)', !badPass.code && badPass.status === 401)
+  const noPass = await authorizeAndGetCode(clientId, pkcePair(), { passcode: '' })
+  ok('authorize with missing passcode → no code', !noPass.code)
+
   // 4. Happy path: authorize → code → token
   const pk = pkcePair()
   const auth = await authorizeAndGetCode(clientId, pk)
-  ok('authorize issues a code + redirects to registered URI', auth.status === 302 && !!auth.code && auth.loc.startsWith(REDIRECT))
+  ok('authorize (correct passcode) issues a code + redirects to registered URI', auth.status === 302 && !!auth.code && auth.loc.startsWith(REDIRECT))
   const tok = await tokenExchange({ grant_type: 'authorization_code', code: auth.code, redirect_uri: REDIRECT, client_id: clientId, code_verifier: pk.verifier })
   ok('token exchange returns a liaison access token', tok.status === 200 && tok.json.token_type === 'Bearer' && tok.json.scope === 'liaison' && !!tok.json.access_token)
   const accessToken = tok.json.access_token

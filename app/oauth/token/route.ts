@@ -38,8 +38,12 @@ export async function POST(req: NextRequest) {
   const codeVerifier = form.get('code_verifier') ?? ''
   const resource = form.get('resource') ?? ''
 
+  // Validate cheap required params BEFORE consuming, so a malformed request
+  // never burns a valid single-use code.
   if (!code) return tokenError('invalid_request', 'code is required')
   if (!codeVerifier) return tokenError('invalid_request', 'code_verifier is required (PKCE)')
+  if (!clientId) return tokenError('invalid_request', 'client_id is required')
+  if (!redirectUri) return tokenError('invalid_request', 'redirect_uri is required')
 
   // Single-use redemption. Any replay / expiry / unknown code fails here.
   const consumed = await consumeAuthCode(code)
@@ -49,7 +53,7 @@ export async function POST(req: NextRequest) {
   }
 
   // Bind the exchange to the same client + redirect the code was issued to.
-  if (clientId && clientId !== consumed.client_id) {
+  if (clientId !== consumed.client_id) {
     return tokenError('invalid_grant', 'client_id does not match the authorization code')
   }
   if (redirectUri !== consumed.redirect_uri) {

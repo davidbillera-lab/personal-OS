@@ -17,6 +17,11 @@ export interface OAuthConfig {
   // Exact ChatGPT callback, once David supplies it from the draft-app screen.
   // Until set, DCR falls back to the connector-domain prefix guard below.
   chatgptRedirectUri: string | null
+  // Operator approval secret. The /authorize consent screen requires it before
+  // minting a code, so only David (who knows it) can approve the connection —
+  // not any ChatGPT user who discovers the endpoint. Fail-closed: no passcode
+  // configured → no approval possible.
+  consentPasscode: string | null
 }
 
 // ChatGPT connector callbacks always live under this host+path. Until the exact
@@ -42,8 +47,11 @@ export function getOAuthConfig(): OAuthConfig {
     issuer: issuer.replace(/\/$/, ''),
     resource,
     jwtSecret,
-    accessTokenTtl: Number.isFinite(ttlRaw) && ttlRaw > 0 ? ttlRaw : 3600,
+    // Short-lived by default (15 min). Stateless JWTs have no revocation path,
+    // so keep the window tight for a token that fronts a write-capable queue.
+    accessTokenTtl: Number.isFinite(ttlRaw) && ttlRaw > 0 ? ttlRaw : 900,
     chatgptRedirectUri: process.env.CHATGPT_REDIRECT_URI || null,
+    consentPasscode: process.env.OAUTH_CONSENT_PASSCODE || null,
   }
   return cachedConfig
 }
@@ -67,6 +75,20 @@ function b64urlDecode(input: string): Buffer {
 
 export function randomToken(bytes = 32): string {
   return b64url(randomBytes(bytes))
+}
+
+// Auth codes are bearer credentials — store only their SHA-256 so a DB/log leak
+// never yields a usable code. The plaintext lives only in the redirect to
+// ChatGPT and the client's token request.
+function hashCode(code: string): string {
+  return createHash('sha256').update(code).digest('hex')
+}
+
+// Constant-time string equality for the operator consent passcode.
+export function safeEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a)
+  const bb = Buffer.from(b)
+  return ba.length === bb.length && timingSafeEqual(ba, bb)
 }
 
 // ---- JWT (HS256) -----------------------------------------------------------
@@ -169,6 +191,20 @@ export async function createOAuthClient(params: {
   client_name?: string
 }): Promise<OAuthClient> {
   const supabase = createAdminSupabaseClient()
+
+  // Dedupe: a client already registered with the identical redirect_uris is
+  // returned instead of inserting a new row. Bounds oauth_clients growth from
+  // repeated DCR calls for the same connector (esp. once redirects are exact-locked).
+  const { data: existing } = await supabase
+    .from('oauth_clients')
+    .select('client_id, redirect_uris, client_name, scope')
+    .contains('redirect_uris', params.redirect_uris)
+    .limit(20)
+  const match = (existing ?? []).find(
+    c => JSON.stringify((c.redirect_uris as string[]).slice().sort()) === JSON.stringify(params.redirect_uris.slice().sort())
+  )
+  if (match) return { ...match, redirect_uris: match.redirect_uris as string[] }
+
   const client_id = randomToken(16)
   const { data, error } = await supabase
     .from('oauth_clients')
@@ -210,7 +246,7 @@ export async function insertAuthCode(params: {
   const code = randomToken(32)
   const expires_at = new Date(Date.now() + (params.ttlSeconds ?? 300) * 1000).toISOString()
   const { error } = await supabase.from('oauth_auth_codes').insert({
-    code,
+    code: hashCode(code), // store only the hash; return the plaintext to the caller
     client_id: params.client_id,
     redirect_uri: params.redirect_uri,
     code_challenge: params.code_challenge,
@@ -220,6 +256,9 @@ export async function insertAuthCode(params: {
     expires_at,
   })
   if (error) throw new Error(error.message)
+  // Opportunistic cleanup of expired codes so the table doesn't accumulate junk.
+  void supabase.from('oauth_auth_codes').delete().lt('expires_at', new Date().toISOString())
+    .then(({ error: e }) => { if (e) console.error('[oauth] expired-code cleanup failed (non-fatal):', e.message) })
   return code
 }
 
@@ -235,28 +274,26 @@ export interface ConsumedCode {
 // guard — a replayed code updates zero rows and is rejected.
 export async function consumeAuthCode(code: string): Promise<ConsumedCode | { error: string }> {
   const supabase = createAdminSupabaseClient()
-  const { data: row } = await supabase
-    .from('oauth_auth_codes')
-    .select('client_id, redirect_uri, code_challenge, resource, expires_at, consumed_at')
-    .eq('code', code)
-    .maybeSingle()
-  if (!row) return { error: 'invalid_grant: unknown code' }
-  if (row.consumed_at) return { error: 'invalid_grant: code already used' }
-  if (new Date(row.expires_at).getTime() < Date.now()) return { error: 'invalid_grant: code expired' }
+  const hashed = hashCode(code)
+  const nowIso = new Date().toISOString()
 
+  // Single-use AND unexpired are both enforced in the conditional UPDATE, so
+  // redemption is fully atomic — no check-then-act window. A replayed, expired,
+  // or unknown code updates zero rows and is rejected.
   const { data: updated, error } = await supabase
     .from('oauth_auth_codes')
-    .update({ consumed_at: new Date().toISOString() })
-    .eq('code', code)
+    .update({ consumed_at: nowIso })
+    .eq('code', hashed)
     .is('consumed_at', null)
-    .select('code')
+    .gt('expires_at', nowIso)
+    .select('client_id, redirect_uri, code_challenge, resource')
     .maybeSingle()
   if (error) return { error: `invalid_grant: ${error.message}` }
-  if (!updated) return { error: 'invalid_grant: code already used' } // lost the single-use race
+  if (!updated) return { error: 'invalid_grant: code is invalid, expired, or already used' }
   return {
-    client_id: row.client_id,
-    redirect_uri: row.redirect_uri,
-    code_challenge: row.code_challenge,
-    resource: row.resource,
+    client_id: updated.client_id,
+    redirect_uri: updated.redirect_uri,
+    code_challenge: updated.code_challenge,
+    resource: updated.resource,
   }
 }

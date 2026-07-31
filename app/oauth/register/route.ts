@@ -19,12 +19,31 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'invalid_client_metadata', error_description: 'body must be JSON' }, { status: 400 })
   }
 
+  // Reject unsupported auth methods loudly rather than silently downgrading to
+  // 'none' — a client asking for client_secret_* would otherwise be mis-registered.
+  if (body.token_endpoint_auth_method !== undefined && body.token_endpoint_auth_method !== 'none') {
+    return NextResponse.json(
+      { error: 'invalid_client_metadata', error_description: "only token_endpoint_auth_method 'none' (public PKCE client) is supported" },
+      { status: 400 }
+    )
+  }
+
   const redirectUris = body.redirect_uris
   if (!Array.isArray(redirectUris) || redirectUris.length === 0 || !redirectUris.every(u => typeof u === 'string')) {
     return NextResponse.json(
       { error: 'invalid_redirect_uri', error_description: 'redirect_uris (non-empty array of strings) is required' },
       { status: 400 }
     )
+  }
+  // Hard caps — a public insert endpoint must bound what it will store.
+  if (redirectUris.length > 5) {
+    return NextResponse.json({ error: 'invalid_redirect_uri', error_description: 'too many redirect_uris (max 5)' }, { status: 400 })
+  }
+  if ((redirectUris as string[]).some(u => u.length > 512)) {
+    return NextResponse.json({ error: 'invalid_redirect_uri', error_description: 'redirect_uri too long (max 512 chars)' }, { status: 400 })
+  }
+  if (typeof body.client_name === 'string' && body.client_name.length > 256) {
+    return NextResponse.json({ error: 'invalid_client_metadata', error_description: 'client_name too long (max 256 chars)' }, { status: 400 })
   }
 
   // Every requested redirect_uri must be registrable — reject the whole request

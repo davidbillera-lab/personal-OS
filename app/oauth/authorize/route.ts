@@ -1,14 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getOAuthConfig, getOAuthClient, insertAuthCode, type OAuthConfig } from '@/lib/oauth'
+import { getOAuthConfig, getOAuthClient, insertAuthCode, safeEqual, type OAuthConfig } from '@/lib/oauth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 // Authorization endpoint (OAuth 2.1 auth-code + PKCE).
-//   GET  → validate params, render the consent screen.
-//   POST → David approves; mint a single-use code and redirect to ChatGPT.
-// PKCE S256 is mandatory; the RFC 8707 `resource` (if sent) must match our MCP
-// resource. redirect_uri is validated EXACTLY against what the client registered.
+//   GET  → validate params, render the consent screen (with operator passcode field).
+//   POST → verify the operator passcode, then mint a single-use code and redirect.
+// The passcode is the resource-owner gate: without it, ANY caller who reaches this
+// public endpoint could mint a liaison token (the auth code is otherwise scrapeable
+// off the redirect). PKCE S256 is mandatory; the RFC 8707 `resource` (if sent) must
+// match our MCP resource; redirect_uri is validated EXACTLY against the registered client.
+
+// Deny framing — an approval page must not be clickjackable.
+const SECURITY_HEADERS = {
+  'Content-Type': 'text/html; charset=utf-8',
+  'Cache-Control': 'no-store',
+  'X-Frame-Options': 'DENY',
+  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+}
 
 interface AuthParams {
   response_type: string
@@ -43,7 +53,7 @@ function fatalPage(message: string): NextResponse {
   return new NextResponse(
     `<!doctype html><html><body style="font-family:system-ui;max-width:32rem;margin:4rem auto;padding:0 1rem">
      <h1 style="font-size:1.1rem">Authorization error</h1><p>${esc(message)}</p></body></html>`,
-    { status: 400, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+    { status: 400, headers: SECURITY_HEADERS }
   )
 }
 
@@ -56,8 +66,43 @@ function redirectError(redirectUri: string, state: string, error: string, descri
   return NextResponse.redirect(u.toString(), { status: 302 })
 }
 
+// Render the consent screen. All OAuth params ride through as hidden fields so
+// the POST approval carries exactly what was validated. `errorMsg` shows a failed
+// passcode attempt inline.
+function renderConsent(p: AuthParams, cfg: OAuthConfig, status = 200, errorMsg = ''): NextResponse {
+  const hidden = (['response_type', 'client_id', 'redirect_uri', 'scope', 'state', 'code_challenge', 'code_challenge_method', 'resource'] as const)
+    .map(k => `<input type="hidden" name="${k}" value="${esc(p[k])}">`)
+    .join('\n')
+  const errorBlock = errorMsg
+    ? `<p style="color:#b00020;margin:.5rem 0">${esc(errorMsg)}</p>`
+    : ''
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Authorize ChatGPT liaison</title></head>
+<body style="font-family:system-ui;max-width:34rem;margin:3rem auto;padding:0 1.25rem;color:#1a1a1a">
+  <h1 style="font-size:1.25rem;margin-bottom:.25rem">Authorize ChatGPT liaison</h1>
+  <p style="color:#555;margin-top:0">Mission Control · ${esc(cfg.issuer)}</p>
+  <div style="border:1px solid #e2e2e2;border-radius:10px;padding:1rem 1.25rem;margin:1.25rem 0;background:#fafafa">
+    <p style="margin:.25rem 0"><strong>This connection can:</strong></p>
+    <ul style="margin:.5rem 0 .25rem;padding-left:1.1rem;line-height:1.6">
+      <li>Read Mission Control status (recent requests, what's stalled, results)</li>
+      <li>Submit requests into the queue for a worker to pick up</li>
+    </ul>
+    <p style="margin:.75rem 0 .25rem;color:#777"><strong>It cannot:</strong> run code, deploy, read credentials, or spend money.</p>
+  </div>
+  <form method="POST" action="/oauth/authorize">
+    ${hidden}
+    <label style="display:block;margin:.25rem 0 .5rem;color:#333">Operator passcode
+      <input type="password" name="passcode" autocomplete="off" required
+        style="display:block;width:100%;max-width:20rem;margin-top:.35rem;padding:.55rem .6rem;border:1px solid #ccc;border-radius:8px;font-size:1rem">
+    </label>
+    ${errorBlock}
+    <button type="submit" style="background:#111;color:#fff;border:0;border-radius:8px;padding:.7rem 1.4rem;font-size:1rem;cursor:pointer;margin-top:.5rem">Authorize</button>
+  </form>
+</body></html>`
+  return new NextResponse(html, { status, headers: SECURITY_HEADERS })
+}
+
 // Validate hard preconditions (client + redirect) that gate everything else.
-// Returns the matched client's registered redirect (== requested) or an error.
 async function validateClientAndRedirect(
   p: AuthParams
 ): Promise<{ ok: true } | { ok: false; page: NextResponse }> {
@@ -84,55 +129,41 @@ function validateRequest(p: AuthParams, cfg: OAuthConfig): NextResponse | null {
 
 export async function GET(req: NextRequest) {
   const cfg = getOAuthConfig()
-  const p = readParams(req.nextUrl.searchParams)
+  // Fail closed: no operator passcode configured → approval is impossible.
+  if (!cfg.consentPasscode) return fatalPage('Operator approval is not configured (OAUTH_CONSENT_PASSCODE unset).')
 
+  const p = readParams(req.nextUrl.searchParams)
   const gate = await validateClientAndRedirect(p)
   if (!gate.ok) return gate.page
   const paramErr = validateRequest(p, cfg)
   if (paramErr) return paramErr
 
-  // Consent screen. All OAuth params ride through as hidden fields so the POST
-  // approval carries exactly what was validated here.
-  const hidden = (['response_type', 'client_id', 'redirect_uri', 'scope', 'state', 'code_challenge', 'code_challenge_method', 'resource'] as const)
-    .map(k => `<input type="hidden" name="${k}" value="${esc(p[k])}">`)
-    .join('\n')
-
-  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Authorize ChatGPT liaison</title></head>
-<body style="font-family:system-ui;max-width:34rem;margin:3rem auto;padding:0 1.25rem;color:#1a1a1a">
-  <h1 style="font-size:1.25rem;margin-bottom:.25rem">Authorize ChatGPT liaison</h1>
-  <p style="color:#555;margin-top:0">Mission Control · ${esc(cfg.issuer)}</p>
-  <div style="border:1px solid #e2e2e2;border-radius:10px;padding:1rem 1.25rem;margin:1.25rem 0;background:#fafafa">
-    <p style="margin:.25rem 0"><strong>This connection can:</strong></p>
-    <ul style="margin:.5rem 0 .25rem;padding-left:1.1rem;line-height:1.6">
-      <li>Read Mission Control status (recent requests, what's stalled, results)</li>
-      <li>Submit requests into the queue for a worker to pick up</li>
-    </ul>
-    <p style="margin:.75rem 0 .25rem;color:#777"><strong>It cannot:</strong> run code, deploy, read credentials, or spend money.</p>
-  </div>
-  <form method="POST" action="/oauth/authorize">
-    ${hidden}
-    <button type="submit" style="background:#111;color:#fff;border:0;border-radius:8px;padding:.7rem 1.4rem;font-size:1rem;cursor:pointer">Authorize</button>
-  </form>
-</body></html>`
-
-  return new NextResponse(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } })
+  return renderConsent(p, cfg)
 }
 
 export async function POST(req: NextRequest) {
   const cfg = getOAuthConfig()
+  if (!cfg.consentPasscode) return fatalPage('Operator approval is not configured (OAUTH_CONSENT_PASSCODE unset).')
+
   const form = await req.formData()
   const sp = new URLSearchParams()
   for (const [k, v] of form.entries()) sp.set(k, typeof v === 'string' ? v : '')
   const p = readParams(sp)
+  const passcode = sp.get('passcode') ?? ''
 
   const gate = await validateClientAndRedirect(p)
   if (!gate.ok) return gate.page
   const paramErr = validateRequest(p, cfg)
   if (paramErr) return paramErr
 
+  // Operator gate — the resource-owner proof. Wrong/missing passcode re-renders
+  // the consent screen with an error and mints nothing.
+  if (!passcode || !safeEqual(passcode, cfg.consentPasscode)) {
+    return renderConsent(p, cfg, 401, 'Incorrect passcode.')
+  }
+
   // Approved: mint a short-lived, single-use code bound to this client, redirect,
-  // PKCE challenge, and resource. /token will re-check all of it.
+  // PKCE challenge, and resource. /token re-checks all of it.
   const code = await insertAuthCode({
     client_id: p.client_id,
     redirect_uri: p.redirect_uri,
