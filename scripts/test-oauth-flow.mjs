@@ -74,8 +74,11 @@ async function rpc(token, method, params) {
 }
 
 async function main() {
-  if (!JWT_SECRET) { console.error('JWT_SECRET env required (the OAUTH_JWT_SECRET value)'); process.exit(2) }
-  console.log(`\nOAuth liaison test matrix → ${BASE}\n`)
+  // JWT_SECRET only powers the forged-token cases (expired/wrong-aud/tampered/
+  // wrong-secret). Without it, those are skipped so the real flow can be smoke-
+  // tested against prod without pulling the server secret.
+  const canForge = !!JWT_SECRET
+  console.log(`\nOAuth liaison test matrix → ${BASE}${canForge ? '' : '  (forged-token cases skipped: no JWT_SECRET)'}\n`)
 
   // 1. Discovery metadata
   const prm = await fetch(`${BASE}/.well-known/oauth-protected-resource`).then(r => r.json())
@@ -149,21 +152,23 @@ async function main() {
   const noTok = await rpc(null, 'initialize', { protocolVersion: '2025-11-25' })
   ok('MCP no token → 401 with resource_metadata hint', noTok.status === 401 && /resource_metadata=/.test(noTok.www || ''))
 
-  // 12. Expired token → 401
-  const expired = forgeJwt({ ...baseClaims(), exp: now() - 10 })
-  ok('expired token → 401', (await rpc(expired, 'initialize', {})).status === 401)
+  if (canForge) {
+    // 12. Expired token → 401
+    const expired = forgeJwt({ ...baseClaims(), exp: now() - 10 })
+    ok('expired token → 401', (await rpc(expired, 'initialize', {})).status === 401)
 
-  // 13. Wrong audience → 401
-  const wrongAud = forgeJwt({ ...baseClaims(), aud: 'https://evil.example.com/mcp' })
-  ok('wrong audience → 401', (await rpc(wrongAud, 'initialize', {})).status === 401)
+    // 13. Wrong audience → 401
+    const wrongAud = forgeJwt({ ...baseClaims(), aud: 'https://evil.example.com/mcp' })
+    ok('wrong audience → 401', (await rpc(wrongAud, 'initialize', {})).status === 401)
 
-  // 14. Tampered signature → 401
-  const tampered = forgeJwt(baseClaims(), { badSig: true })
-  ok('tampered signature → 401', (await rpc(tampered, 'initialize', {})).status === 401)
+    // 14. Tampered signature → 401
+    const tampered = forgeJwt(baseClaims(), { badSig: true })
+    ok('tampered signature → 401', (await rpc(tampered, 'initialize', {})).status === 401)
 
-  // 15. Wrong-secret token → 401
-  const wrongSecret = forgeJwt(baseClaims(), { secret: 'x'.repeat(48) })
-  ok('token signed with wrong secret → 401', (await rpc(wrongSecret, 'initialize', {})).status === 401)
+    // 15. Wrong-secret token → 401
+    const wrongSecret = forgeJwt(baseClaims(), { secret: 'x'.repeat(48) })
+    ok('token signed with wrong secret → 401', (await rpc(wrongSecret, 'initialize', {})).status === 401)
+  }
 
   // 16. Real token: initialize echoes protocol version
   const init = await rpc(accessToken, 'initialize', { protocolVersion: '2025-11-25' })
