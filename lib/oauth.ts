@@ -304,11 +304,15 @@ async function getRevokedBefore(): Promise<number> {
   if (now - revokedCache.fetchedAt < 60_000) return revokedCache.value
   try {
     const supabase = createAdminSupabaseClient()
-    const { data } = await supabase.from('oauth_config').select('value').eq('key', 'revoked_before').maybeSingle()
+    const { data, error } = await supabase.from('oauth_config').select('value').eq('key', 'revoked_before').maybeSingle()
+    // Kill-switch read errors must be loud — a silent failure would let revoked
+    // tokens through. Serve the last-known cutoff rather than resetting to 0.
+    if (error) { console.error('[oauth] revoked_before read failed (serving cached cutoff):', error.message); return revokedCache.value }
     const ts = data?.value ? Math.floor(new Date(data.value).getTime() / 1000) : 0
     revokedCache = { value: Number.isFinite(ts) ? ts : 0, fetchedAt: now }
     return revokedCache.value
-  } catch {
+  } catch (e) {
+    console.error('[oauth] revoked_before read threw (serving cached cutoff):', e)
     return revokedCache.value // serve the last-known value on a read error
   }
 }
