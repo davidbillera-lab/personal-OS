@@ -33,6 +33,7 @@ export const LIAISON_TOOLS = new Set<string>([
   'mc_list_recent_requests',
   'mc_whats_stalled',
   'mc_get_result',
+  'mc_respond_approval',
 ])
 
 export interface McpTool {
@@ -392,6 +393,21 @@ export const MCP_TOOLS: McpTool[] = [
     },
   },
   {
+    name: 'mc_respond_approval',
+    description: "MC-only approval relay: record the operator's approve/reject decision on an awaiting_approval request and flip its state. NEVER executes the push — the dispatcher's separate gated step does that. Call mc_get_request_status first to obtain attempt_id.",
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'string', description: 'Request awaiting approval.' },
+        decision:   { type: 'string', description: 'approve or reject' },
+        attempt_id: { type: 'string', description: 'The attempt_id from mc_get_request_status; binds this approval to the reviewed attempt.' },
+        note:       { type: 'string', description: 'Optional note (e.g. reason for rejection).' },
+      },
+      required: ['request_id', 'decision', 'attempt_id'],
+    },
+  },
+  {
     name: 'mc_complete_request',
     description: 'Complete a request with a result summary and optional artifact references. Sets completed_at.',
     scope: 'write',
@@ -464,7 +480,7 @@ async function transitionRequest(
   return data
 }
 
-export async function callTool(name: string, args: ToolArgs): Promise<string> {
+export async function callTool(name: string, args: ToolArgs, actor = 'system'): Promise<string> {
   const supabase = createAdminSupabaseClient()
 
   if (name === 'mc_get_pending_tasks') {
@@ -967,13 +983,14 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
     if (!request_id) throw new Error('request_id is required')
     const { data, error } = await supabase
       .from('mc_requests')
-      .select('id, status, assigned_to, latest_progress, blocker, approval_required, updated_at')
+      .select('id, status, assigned_to, latest_progress, blocker, approval_required, attempt_id, phase, updated_at')
       .eq('id', request_id).single()
     if (error || !data) throw new Error(`Request not found: ${request_id}`)
     return JSON.stringify({
       request_id: data.id, status: data.status, assigned_to: data.assigned_to,
       latest_progress: data.latest_progress, blocker: data.blocker,
-      approval_required: data.approval_required, updated_at: data.updated_at,
+      approval_required: data.approval_required, attempt_id: data.attempt_id, phase: data.phase,
+      updated_at: data.updated_at,
     })
   }
 
@@ -1068,6 +1085,51 @@ export async function callTool(name: string, args: ToolArgs): Promise<string> {
       { status: 'awaiting_approval', approval_required: true, blocker: reason },
     )
     return JSON.stringify({ request_id: data.id, status: data.status, approval_required: true })
+  }
+
+  if (name === 'mc_respond_approval') {
+    const { request_id, decision, attempt_id, note } = args
+    if (!request_id || !decision) throw new Error('request_id and decision are required')
+    if (decision !== 'approve' && decision !== 'reject') throw new Error("decision must be 'approve' or 'reject'")
+    if (!attempt_id) throw new Error('attempt_id is required (binds approval to the reviewed attempt)')
+
+    const { data: cur, error: curErr } = await supabase
+      .from('mc_requests')
+      .select('status, attempt_id, approved_at, approval_required')
+      .eq('id', request_id).single()
+    if (curErr || !cur) throw new Error(`Request not found: ${request_id}`)
+
+    // Attempt binding: a stale approval must never land on a superseded attempt.
+    if (cur.attempt_id && cur.attempt_id !== attempt_id) {
+      throw new Error(`Attempt superseded: approval targets ${attempt_id} but current attempt is ${cur.attempt_id}`)
+    }
+
+    // Idempotency / conflict: request already resolved.
+    if (cur.status !== 'awaiting_approval') {
+      const priorApproved = cur.approved_at != null && (cur.status === 'in_progress' || cur.status === 'completed')
+      const priorRejected = (cur.status === 'blocked' || cur.status === 'cancelled') && cur.approval_required === false
+      if (decision === 'approve' && priorApproved) {
+        return JSON.stringify({ request_id, status: cur.status, decision, attempt_id, note: 'no-op: already approved' })
+      }
+      if (decision === 'reject' && priorRejected) {
+        return JSON.stringify({ request_id, status: cur.status, decision, attempt_id, note: 'no-op: already rejected' })
+      }
+      throw new Error(`Request already resolved (status '${cur.status}'); conflicting '${decision}' refused`)
+    }
+
+    // Fresh awaiting_approval → apply the decision.
+    if (decision === 'approve') {
+      const data = await transitionRequest(
+        supabase, request_id, ['awaiting_approval'],
+        { status: 'in_progress', phase: 'pushing', approval_required: false, approved_by: actor, approved_at: new Date().toISOString(), blocker: null },
+      )
+      return JSON.stringify({ request_id: data.id, status: data.status, decision, attempt_id })
+    }
+    const data = await transitionRequest(
+      supabase, request_id, ['awaiting_approval'],
+      { status: 'blocked', approval_required: false, blocker: note ?? 'rejected by operator' },
+    )
+    return JSON.stringify({ request_id: data.id, status: data.status, decision, attempt_id })
   }
 
   if (name === 'mc_complete_request') {

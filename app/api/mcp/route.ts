@@ -202,7 +202,7 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-      const text = await callTool(toolName, toolArgs)
+      const text = await callTool(toolName, toolArgs, actor)
       await logAudit(actor, toolName, true)
       return jsonrpcResult(id, {
         content: [{ type: 'text', text }],
