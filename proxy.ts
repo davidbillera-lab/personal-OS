@@ -57,7 +57,10 @@ export async function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    // Run on everything EXCEPT: /api/* (own auth), Next internals, and static assets.
-    '/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)',
+    // Run on everything EXCEPT routes that carry their own auth or are public by
+    // design — /api/* (own auth), the OAuth facade (/oauth/* + /.well-known/*,
+    // which enforce OAuth 2.1/PKCE themselves and must be reachable without a
+    // dashboard login) — plus Next internals and static assets.
+    '/((?!api|oauth|\\.well-known|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)',
   ],
 }

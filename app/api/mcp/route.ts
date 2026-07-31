@@ -148,10 +148,16 @@ export async function POST(req: NextRequest) {
 
   const { id, method, params } = body
 
-  // MCP initialize handshake
+  // MCP initialize handshake. Echo the client's requested protocol version
+  // (falling back to a current one) rather than hard-coding a legacy version —
+  // a hard-coded '2024-11-05' fails newer clients' handshakes.
   if (method === 'initialize') {
+    const version =
+      (params?.protocolVersion as string | undefined) ||
+      req.headers.get('mcp-protocol-version') ||
+      '2025-06-18'
     return jsonrpcResult(id, {
-      protocolVersion: '2024-11-05',
+      protocolVersion: version,
       capabilities: { tools: {} },
       serverInfo: { name: 'mission-control', version: '1.0.0' },
     })
