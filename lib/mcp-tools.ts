@@ -1088,26 +1088,32 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
   }
 
   if (name === 'mc_respond_approval') {
-    const { request_id, decision, attempt_id, note } = args
-    if (!request_id || !decision) throw new Error('request_id and decision are required')
+    const { request_id, attempt_id, note } = args
+    const decision = (args.decision ?? '').trim().toLowerCase()
+    if (!request_id) throw new Error('request_id is required')
     if (decision !== 'approve' && decision !== 'reject') throw new Error("decision must be 'approve' or 'reject'")
     if (!attempt_id) throw new Error('attempt_id is required (binds approval to the reviewed attempt)')
 
     const { data: cur, error: curErr } = await supabase
       .from('mc_requests')
-      .select('status, attempt_id, approved_at, approval_required')
+      .select('status, attempt_id, approved_at')
       .eq('id', request_id).single()
     if (curErr || !cur) throw new Error(`Request not found: ${request_id}`)
 
-    // Attempt binding: a stale approval must never land on a superseded attempt.
+    // Attempt binding: a stale approval must never land on a superseded attempt —
+    // enforced here for a clear error, and again atomically in the UPDATE below.
     if (cur.attempt_id && cur.attempt_id !== attempt_id) {
       throw new Error(`Attempt superseded: approval targets ${attempt_id} but current attempt is ${cur.attempt_id}`)
     }
 
-    // Idempotency / conflict: request already resolved.
+    // Idempotency / conflict: request already resolved through the approval flow.
+    // approved_at is the resolver-stamp — set on BOTH approve and reject below — so a
+    // request blocked by mc_mark_blocked for unrelated reasons (approved_at null) is
+    // never misread as "already rejected".
     if (cur.status !== 'awaiting_approval') {
-      const priorApproved = cur.approved_at != null && (cur.status === 'in_progress' || cur.status === 'completed')
-      const priorRejected = (cur.status === 'blocked' || cur.status === 'cancelled') && cur.approval_required === false
+      const resolved = cur.approved_at != null
+      const priorApproved = resolved && (cur.status === 'in_progress' || cur.status === 'completed')
+      const priorRejected = resolved && (cur.status === 'blocked' || cur.status === 'cancelled')
       if (decision === 'approve' && priorApproved) {
         return JSON.stringify({ request_id, status: cur.status, decision, attempt_id, note: 'no-op: already approved' })
       }
@@ -1117,18 +1123,25 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       throw new Error(`Request already resolved (status '${cur.status}'); conflicting '${decision}' refused`)
     }
 
-    // Fresh awaiting_approval → apply the decision.
-    if (decision === 'approve') {
-      const data = await transitionRequest(
-        supabase, request_id, ['awaiting_approval'],
-        { status: 'in_progress', phase: 'pushing', approval_required: false, approved_by: actor, approved_at: new Date().toISOString(), blocker: null },
-      )
-      return JSON.stringify({ request_id: data.id, status: data.status, decision, attempt_id })
+    // Fresh awaiting_approval → ATOMIC check-and-set. The UPDATE only lands if the row
+    // is still awaiting_approval AND still on the exact reviewed attempt. 0 rows ⇒ a
+    // superseded attempt, a stale/absent attempt_id (null never matches → fails safe),
+    // or a concurrent decision won the race → refuse.
+    const now = new Date().toISOString()
+    const updates = decision === 'approve'
+      ? { status: 'in_progress', phase: 'pushing', approval_required: false, approved_by: actor, approved_at: now, blocker: null, updated_at: now }
+      : { status: 'blocked', phase: null, approval_required: false, approved_by: actor, approved_at: now, blocker: note ?? 'rejected by operator', updated_at: now }
+    const { data, error: uerr } = await supabase
+      .from('mc_requests')
+      .update(updates)
+      .eq('id', request_id)
+      .eq('status', 'awaiting_approval')
+      .eq('attempt_id', attempt_id)
+      .select('id, status')
+      .single()
+    if (uerr || !data) {
+      throw new Error(`Approval did not apply: request superseded, attempt_id mismatch, or already resolved (attempt ${attempt_id})`)
     }
-    const data = await transitionRequest(
-      supabase, request_id, ['awaiting_approval'],
-      { status: 'blocked', approval_required: false, blocker: note ?? 'rejected by operator' },
-    )
     return JSON.stringify({ request_id: data.id, status: data.status, decision, attempt_id })
   }
 
