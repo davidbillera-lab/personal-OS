@@ -414,3 +414,18 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 **Consequence:** Six commits on branch **`voice-slice-v0`** (NOT merged to main — merge deploys the MCP tool + drops the cron, and the end-to-end DoD hasn't run). **Two rig-gated items before the first real autonomous push:** (1) verify headless `claude -p` runs trust-only (deny-list enforced without skip-permissions); if it hangs, `DISPATCHER_SKIP_PERMISSIONS=1` is the documented-risk fallback. (2) add `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` to the rig `.env.local` (only in Vercel today) or the ping no-ops. **Debt ledger (v0-acceptable for a single trusted-operator rig, disqualifying once `request_text` is untrusted):** OS/filesystem sandbox for the executor (it can still `Read` rig files / network via `node`) · immutable `approved_sha` capture · push/claim leases + heartbeat · async spawn · Windows process-tree kill · `stampTrust` unbounded `~/.claude.json` growth · dispatcher identity scope-split. DoD test = David speaks a build request to ChatGPT, approves by voice, confirms the sandbox push.
 **Made by:** operator + agent
 
+---
+
+### 2026-08-01 — Voice slice v0 DEPLOYED + rig-proven end-to-end; OAuth refresh tokens now the #1 gap
+
+**Decision/Result:** Merged `voice-slice-v0` → `main` (`46647be`, Vercel prod deploy READY) and ran the real rig DoD. The full loop works: **ChatGPT `mc_submit_request` → queued → rig dispatcher atomic-claim → real headless Claude build → CodexQC SHIP → commit (no executor push) → awaiting_approval → Telegram ping (received) → approval → SHA-bound gated push (all 4 gates) → `mc-spike-test@mc-build-0cd0ad9d`, commit `273c7505` → completed.**
+
+**Rig findings (now settled):**
+1. **Headless `claude -p` does NOT use tools with the trust-stamp alone** — it requires `--dangerously-skip-permissions` (`DISPATCHER_SKIP_PERMISSIONS=1`), which **nullifies the workspace deny-list**. The "executor structurally cannot push" guarantee held anyway in practice (fresh `git init` workspace has no remote + the prompt instruction held — verified GitHub stayed clean pre-approval), but restoring the *strong* guarantee needs headless allow-list enforcement (`--permission-mode`) — top code-hardening item.
+2. **Windows:** `spawnSync('claude', …)` can't launch the npm `.cmd` shim (instant null exit); fixed by resolving the real `claude.exe` binary (`46647be`).
+3. **The auto-mode classifier correctly blocks the agent session from BOTH running the executor AND self-approving a push** — confirming the design premise: the executor + the approval must be a human / plain service, never a classifier-gated agent session.
+4. **The one hop not done by pure ChatGPT-voice:** the final `mc_respond_approval` — ChatGPT's **15-min OAuth access token expired mid-approval** and the reconnect stalled. ChatGPT DID make real `mc_submit_request` + `mc_get_request_status` calls (integration proven); David approved via the `rig-test` helper (human authority — correct).
+
+**Consequence:** v0 voice slice is LIVE and proven. **Top priority: OAuth refresh tokens (`offline_access`)** — the 15-min expiry is the primary UX blocker for hands-free voice (forces mid-flow re-consent). Other follow-ups: headless allow-list enforcement to drop skip-permissions and restore the deny-list; dispatcher as an always-on background service (currently foreground — dies on terminal close); `TELEGRAM_*` now on the rig `.env.local` + stored in the MC vault (encrypted). Tooling added: `scripts/rig-test.mjs` (seed/status/approve/reject/list/cleanup). Test artifacts live on the private `mc-spike-test` sandbox (throwaway `mc-build-*` branches).
+**Made by:** operator + agent
+
