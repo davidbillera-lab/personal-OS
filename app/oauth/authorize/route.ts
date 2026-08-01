@@ -130,7 +130,13 @@ function validateRequest(p: AuthParams, cfg: OAuthConfig): NextResponse | null {
   if (p.response_type !== 'code') return redirectError(p.redirect_uri, p.state, 'unsupported_response_type', 'only response_type=code is supported')
   if (!p.code_challenge) return redirectError(p.redirect_uri, p.state, 'invalid_request', 'code_challenge is required (PKCE)')
   if (p.code_challenge_method !== 'S256') return redirectError(p.redirect_uri, p.state, 'invalid_request', 'code_challenge_method must be S256')
-  if (p.scope && p.scope !== 'liaison') return redirectError(p.redirect_uri, p.state, 'invalid_scope', 'only the liaison scope is available')
+  // Always validate scope — an empty/omitted scope defaults to 'liaison' rather
+  // than skipping the subset check (H4: a falsy scope must not bypass validation).
+  const requestedScopes = new Set((p.scope || 'liaison').trim().split(/\s+/).filter(Boolean))
+  const hasUnsupportedScope = [...requestedScopes].some(scope => scope !== 'liaison' && scope !== 'offline_access')
+  if (!requestedScopes.has('liaison') || hasUnsupportedScope) {
+    return redirectError(p.redirect_uri, p.state, 'invalid_scope', 'available scopes are liaison and offline_access')
+  }
   if (p.resource && p.resource !== cfg.resource) return redirectError(p.redirect_uri, p.state, 'invalid_target', 'resource does not match this MCP server')
   return null
 }

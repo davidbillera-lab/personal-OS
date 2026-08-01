@@ -75,10 +75,10 @@ export async function POST(req: NextRequest) {
     {
       client_id: client.client_id,
       redirect_uris: client.redirect_uris,
-      grant_types: ['authorization_code'],
+      grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       token_endpoint_auth_method: 'none',
-      scope: 'liaison',
+      scope: 'liaison offline_access',
     },
     { status: 201, headers: { 'Cache-Control': 'no-store' } }
   )

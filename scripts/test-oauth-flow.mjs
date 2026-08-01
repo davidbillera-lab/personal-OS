@@ -4,13 +4,46 @@
 // running server. Exits non-zero if any case fails. Does not deploy or touch prod.
 
 import { createHash, createHmac, randomBytes } from 'crypto'
+import { createClient } from '@supabase/supabase-js'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+
+// ---- .env.local bootstrap (mirror dispatcher.mjs; repo root is one level up) ----
+// Lets the DB-backed rotation cases (reuse/expired/cross-client) age rows via a
+// service-role client without the operator exporting anything by hand.
+try {
+  const raw = readFileSync(join(__dirname, '..', '.env.local'), 'utf8')
+  for (const line of raw.split('\n')) {
+    const t = line.trim()
+    if (!t || t.startsWith('#')) continue
+    const eq = t.indexOf('=')
+    if (eq < 1) continue
+    const k = t.slice(0, eq).trim()
+    let v = t.slice(eq + 1)
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1)
+    if (!(k in process.env)) process.env[k] = v
+  }
+} catch { /* .env.local absent — rely on already-set env */ }
 
 const BASE = (process.env.BASE || 'http://localhost:3000').replace(/\/$/, '')
-const JWT_SECRET = process.env.JWT_SECRET || ''
-const RESOURCE = process.env.RESOURCE || `${BASE}/api/mcp-liaison`
-const ISSUER = process.env.ISSUER || BASE
-const PASSCODE = process.env.PASSCODE || ''
+// Fall back to the server's own OAUTH_*/MCP_* config (loaded from .env.local
+// above) so the full matrix runs with just BASE set — no hand-copying secrets.
+const JWT_SECRET = process.env.JWT_SECRET || process.env.OAUTH_JWT_SECRET || ''
+const RESOURCE = process.env.RESOURCE || process.env.MCP_RESOURCE_URL || `${BASE}/api/mcp-liaison`
+const ISSUER = process.env.ISSUER || process.env.OAUTH_ISSUER?.replace(/\/$/, '') || BASE
+const PASSCODE = process.env.PASSCODE || process.env.OAUTH_CONSENT_PASSCODE || ''
 const REDIRECT = 'https://chatgpt.com/connector/oauth/test-local'
+
+// Service-role client for the DB-backed rotation cases (aging revoked_at/expires_at
+// to escape the grace window without sleeping). Null → those cases are skipped.
+const SB_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || ''
+const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+const db = (SB_URL && SB_KEY) ? createClient(SB_URL, SB_KEY, { auth: { persistSession: false } }) : null
+const sha256 = (t) => createHash('sha256').update(t).digest('hex')
+const createdClients = []  // every client_id we register — torn down at the end
 
 let pass = 0, fail = 0
 function ok(name, cond, detail = '') {
@@ -73,6 +106,21 @@ async function rpc(token, method, params) {
   return { status: res.status, json, www: res.headers.get('www-authenticate') }
 }
 
+// Register a fresh client and walk the full auth-code flow to get one live
+// refresh token. Used to seed independent clients/chains for the reuse cases.
+async function newClientWithRefresh(name = 'test-connector-seed') {
+  const reg = await fetch(`${BASE}/oauth/register`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ redirect_uris: [REDIRECT], client_name: name }),
+  })
+  const client_id = (await reg.json()).client_id
+  createdClients.push(client_id)
+  const pk = pkcePair()
+  const auth = await authorizeAndGetCode(client_id, pk, { scope: 'liaison offline_access' })
+  const tok = await tokenExchange({ grant_type: 'authorization_code', code: auth.code, redirect_uri: REDIRECT, client_id, code_verifier: pk.verifier })
+  return { client_id, refresh: tok.json.refresh_token }
+}
+
 async function main() {
   // JWT_SECRET only powers the forged-token cases (expired/wrong-aud/tampered/
   // wrong-secret). Without it, those are skipped so the real flow can be smoke-
@@ -84,7 +132,7 @@ async function main() {
   const prm = await fetch(`${BASE}/.well-known/oauth-protected-resource`).then(r => r.json())
   ok('protected-resource metadata: resource + auth server', prm.resource === RESOURCE && Array.isArray(prm.authorization_servers) && prm.authorization_servers.includes(ISSUER), JSON.stringify(prm))
   const asm = await fetch(`${BASE}/.well-known/oauth-authorization-server`).then(r => r.json())
-  ok('auth-server metadata: S256 + endpoints', asm.code_challenge_methods_supported?.includes('S256') && asm.token_endpoint === `${ISSUER}/oauth/token` && asm.registration_endpoint === `${ISSUER}/oauth/register`, JSON.stringify(asm))
+  ok('auth-server metadata: S256 + refresh-token support', asm.code_challenge_methods_supported?.includes('S256') && asm.token_endpoint === `${ISSUER}/oauth/token` && asm.registration_endpoint === `${ISSUER}/oauth/register` && asm.grant_types_supported?.includes('refresh_token') && asm.scopes_supported?.includes('offline_access'), JSON.stringify(asm))
 
   // 2. DCR — good vs bad redirect
   const reg = await fetch(`${BASE}/oauth/register`, {
@@ -93,7 +141,8 @@ async function main() {
   })
   const regJson = await reg.json()
   const clientId = regJson.client_id
-  ok('DCR registers a chatgpt.com redirect', reg.status === 201 && !!clientId && regJson.token_endpoint_auth_method === 'none', JSON.stringify(regJson))
+  if (clientId) createdClients.push(clientId)
+  ok('DCR registers a chatgpt.com redirect with refresh-token support', reg.status === 201 && !!clientId && regJson.token_endpoint_auth_method === 'none' && regJson.grant_types?.includes('refresh_token') && /offline_access/.test(regJson.scope || ''), JSON.stringify(regJson))
   const badReg = await fetch(`${BASE}/oauth/register`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ redirect_uris: ['https://evil.example.com/cb'] }),
@@ -101,7 +150,7 @@ async function main() {
   ok('DCR rejects a non-ChatGPT redirect', badReg.status === 400)
 
   // 3. Consent page renders (GET)
-  const consentQs = new URLSearchParams({ response_type: 'code', client_id: clientId, redirect_uri: REDIRECT, scope: 'liaison', state: 'xyz', code_challenge: pkcePair().challenge, code_challenge_method: 'S256', resource: RESOURCE })
+  const consentQs = new URLSearchParams({ response_type: 'code', client_id: clientId, redirect_uri: REDIRECT, scope: 'liaison offline_access', state: 'xyz', code_challenge: pkcePair().challenge, code_challenge_method: 'S256', resource: RESOURCE })
   const consent = await fetch(`${BASE}/oauth/authorize?${consentQs}`)
   const consentHtml = await consent.text()
   ok('consent screen renders with an Authorize button', consent.status === 200 && /Authorize/i.test(consentHtml) && /cannot/i.test(consentHtml))
@@ -114,7 +163,7 @@ async function main() {
 
   // 4. Happy path: authorize → code → token
   const pk = pkcePair()
-  const auth = await authorizeAndGetCode(clientId, pk)
+  const auth = await authorizeAndGetCode(clientId, pk, { scope: 'liaison offline_access' })
   ok('authorize (correct passcode) issues a code + redirects to registered URI', auth.status === 302 && !!auth.code && auth.loc.startsWith(REDIRECT))
   const tok = await tokenExchange({ grant_type: 'authorization_code', code: auth.code, redirect_uri: REDIRECT, client_id: clientId, code_verifier: pk.verifier })
   ok('token exchange returns a liaison access token', tok.status === 200 && tok.json.token_type === 'Bearer' && tok.json.scope === 'liaison' && !!tok.json.access_token)
@@ -186,11 +235,11 @@ async function main() {
   const init = await rpc(accessToken, 'initialize', { protocolVersion: '2025-11-25' })
   ok('initialize echoes protocolVersion 2025-11-25', init.status === 200 && init.json?.result?.protocolVersion === '2025-11-25')
 
-  // 17. tools/list = exactly the 5 liaison tools
+  // 17. tools/list = exactly the 6 liaison tools (now includes mc_respond_approval)
   const list = await rpc(accessToken, 'tools/list', {})
   const names = (list.json?.result?.tools || []).map(t => t.name).sort()
-  const expected = ['mc_get_request_status', 'mc_get_result', 'mc_list_recent_requests', 'mc_submit_request', 'mc_whats_stalled'].sort()
-  ok('tools/list returns exactly the 5 liaison tools', JSON.stringify(names) === JSON.stringify(expected), names.join(','))
+  const expected = ['mc_get_request_status', 'mc_get_result', 'mc_list_recent_requests', 'mc_respond_approval', 'mc_submit_request', 'mc_whats_stalled'].sort()
+  ok('tools/list returns exactly the 6 liaison tools', JSON.stringify(names) === JSON.stringify(expected), names.join(','))
 
   // 18. Worker tool via liaison → 403
   const worker = await rpc(accessToken, 'tools/call', { name: 'mc_claim_request', arguments: { request_id: 'x', worker: 'claude' } })
@@ -217,24 +266,79 @@ async function main() {
   ok('refresh_token grant → rotated (different) refresh token', !!refreshed.json.refresh_token && refreshed.json.refresh_token !== firstRefreshToken)
   const secondRefreshToken = refreshed.json.refresh_token
 
-  // 23. Old (rotated-away) refresh token is now dead
-  const staleRefresh = await tokenExchange({ grant_type: 'refresh_token', refresh_token: firstRefreshToken, client_id: clientId })
-  ok('rotated-away refresh token → rejected', staleRefresh.status === 400 && staleRefresh.json.error === 'invalid_grant')
+  // 23. Grace retry: replaying the JUST-rotated token inside the grace window is a
+  // benign retry (client never got the first response) — it reissues a fresh valid
+  // pair rather than tripping reuse, and does NOT revoke the chain.
+  const graceRetry = await tokenExchange({ grant_type: 'refresh_token', refresh_token: firstRefreshToken, client_id: clientId })
+  ok('grace retry: replaying a just-rotated token → fresh valid pair', graceRetry.status === 200 && !!graceRetry.json.access_token && !!graceRetry.json.refresh_token, JSON.stringify(graceRetry.json))
+  const thirdRefreshToken = graceRetry.json.refresh_token
+  // The reissued successor must itself be a working, rotatable token (chain intact).
+  const afterGrace = await tokenExchange({ grant_type: 'refresh_token', refresh_token: thirdRefreshToken, client_id: clientId })
+  ok('grace retry: the reissued successor is usable', afterGrace.status === 200 && !!afterGrace.json.refresh_token, `second=${!!secondRefreshToken}`)
 
-  // 24. Reuse detection: replaying the already-rotated token should also revoke
-  // the live successor (chain revoke), so the current valid token stops working.
-  const chainRevoked = await tokenExchange({ grant_type: 'refresh_token', refresh_token: secondRefreshToken, client_id: clientId })
-  ok('reuse of a rotated refresh token revokes the active successor too', chainRevoked.status === 400 && chainRevoked.json.error === 'invalid_grant')
-
-  // 25. Wrong client_id on an otherwise-valid refresh token → rejected
+  // 24. Wrong client_id on an otherwise-valid refresh token → rejected, and inert.
   const pk4 = pkcePair()
   const auth4 = await authorizeAndGetCode(clientId, pk4)
   const tok4 = await tokenExchange({ grant_type: 'authorization_code', code: auth4.code, redirect_uri: REDIRECT, client_id: clientId, code_verifier: pk4.verifier })
   const wrongClientRefresh = await tokenExchange({ grant_type: 'refresh_token', refresh_token: tok4.json.refresh_token, client_id: 'some-other-client-id' })
   ok('refresh token redeemed with wrong client_id → rejected', wrongClientRefresh.status === 400 && wrongClientRefresh.json.error === 'invalid_grant')
+  const validAfterWrongClient = await tokenExchange({ grant_type: 'refresh_token', refresh_token: tok4.json.refresh_token, client_id: clientId })
+  ok('wrong client_id attempt is inert (real client token still rotates)', validAfterWrongClient.status === 200 && !!validAfterWrongClient.json.refresh_token)
+
+  // 25-28. DB-backed rotation cases — need a service-role client to age rows past
+  // the grace window / expiry without sleeping. Skipped if creds are unavailable.
+  if (db) {
+    // Seed two independent clients, each with an active refresh token.
+    const A = await newClientWithRefresh('reuse-client-A')
+    const B = await newClientWithRefresh('isolation-client-B')
+    // Rotate A once → A.refresh becomes a revoked-but-rotated token with a live successor.
+    const aRot = await tokenExchange({ grant_type: 'refresh_token', refresh_token: A.refresh, client_id: A.client_id })
+    const aActive = aRot.json.refresh_token
+    // Age A.refresh's revocation to 60s ago — now outside the 30s grace window.
+    await db.from('oauth_refresh_tokens').update({ revoked_at: new Date(Date.now() - 60000).toISOString() }).eq('token_hash', sha256(A.refresh))
+
+    // 25. Genuine reuse (outside grace) → invalid_grant.
+    const reuseHit = await tokenExchange({ grant_type: 'refresh_token', refresh_token: A.refresh, client_id: A.client_id })
+    ok('genuine reuse (aged past grace) → invalid_grant', reuseHit.status === 400 && reuseHit.json.error === 'invalid_grant', JSON.stringify(reuseHit.json))
+    // 26. Reuse chain-revokes the (client, sub) — A's live successor is now dead.
+    const aActiveDead = await tokenExchange({ grant_type: 'refresh_token', refresh_token: aActive, client_id: A.client_id })
+    ok('reuse chain-revokes client A active successor', aActiveDead.status === 400 && aActiveDead.json.error === 'invalid_grant', JSON.stringify(aActiveDead.json))
+    // 27. Cross-client isolation: client B untouched by client A's reuse.
+    const bStillWorks = await tokenExchange({ grant_type: 'refresh_token', refresh_token: B.refresh, client_id: B.client_id })
+    ok('cross-client isolation: client B survives client A reuse', bStillWorks.status === 200 && !!bStillWorks.json.refresh_token, JSON.stringify(bStillWorks.json))
+
+    // 28. Expired token → invalid_grant, and does NOT chain-revoke a sibling.
+    const E = await newClientWithRefresh('expiry-client-E')
+    // Mint a SECOND active token for the same client via a fresh auth-code flow.
+    const pkE = pkcePair()
+    const authE = await authorizeAndGetCode(E.client_id, pkE, { scope: 'liaison offline_access' })
+    const tokE = await tokenExchange({ grant_type: 'authorization_code', code: authE.code, redirect_uri: REDIRECT, client_id: E.client_id, code_verifier: pkE.verifier })
+    const eSibling = tokE.json.refresh_token
+    // Expire E.refresh (active but past expiry; revoked_at stays NULL).
+    await db.from('oauth_refresh_tokens').update({ expires_at: new Date(Date.now() - 10000).toISOString() }).eq('token_hash', sha256(E.refresh))
+    const expiredHit = await tokenExchange({ grant_type: 'refresh_token', refresh_token: E.refresh, client_id: E.client_id })
+    ok('expired refresh token → invalid_grant', expiredHit.status === 400 && expiredHit.json.error === 'invalid_grant', JSON.stringify(expiredHit.json))
+    const eSiblingWorks = await tokenExchange({ grant_type: 'refresh_token', refresh_token: eSibling, client_id: E.client_id })
+    ok('expired token does NOT chain-revoke a sibling (no false reuse)', eSiblingWorks.status === 200 && !!eSiblingWorks.json.refresh_token, JSON.stringify(eSiblingWorks.json))
+  } else {
+    console.log('  SKIP  DB-backed rotation cases (reuse / cross-client / expired) — no SUPABASE_SERVICE_ROLE_KEY')
+  }
+
+  // Cleanup: drop every seeded client (FK cascade removes their refresh tokens),
+  // their auth codes, and the test request row, then verify nothing lingers.
+  if (db && createdClients.length) {
+    await db.from('oauth_refresh_tokens').delete().in('client_id', createdClients)
+    await db.from('oauth_auth_codes').delete().in('client_id', createdClients)
+    await db.from('oauth_clients').delete().in('client_id', createdClients)
+    try { if (requestId) await db.from('mc_requests').delete().eq('id', requestId) } catch { /* best-effort */ }
+    const { count: leftTokens } = await db.from('oauth_refresh_tokens').select('token_hash', { count: 'exact', head: true }).in('client_id', createdClients)
+    const { count: leftClients } = await db.from('oauth_clients').select('client_id', { count: 'exact', head: true }).in('client_id', createdClients)
+    ok('cleanup: no seeded clients or refresh tokens remain', (leftTokens ?? 0) === 0 && (leftClients ?? 0) === 0, `tokens=${leftTokens} clients=${leftClients}`)
+  } else if (!db) {
+    console.log(`  NOTE  seeded clients not auto-cleaned (no DB creds). Request row id ${requestId ?? 'n/a'} also left in place.`)
+  }
 
   console.log(`\n${pass} passed, ${fail} failed\n`)
-  if (requestId) console.log(`(test request row id ${requestId} — created via the verified OAuth flow; delete if you want the queue clean)\n`)
   process.exit(fail ? 1 : 0)
 }
 

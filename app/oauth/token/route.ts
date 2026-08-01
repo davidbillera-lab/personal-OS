@@ -54,9 +54,10 @@ export async function POST(req: NextRequest) {
     if (!clientId) return tokenError('invalid_request', 'client_id is required')
 
     const result = await consumeRefreshToken(refreshToken, clientId)
-    if ('error' in result) {
-      const [err, ...rest] = result.error.split(': ')
-      return tokenError(err || 'invalid_grant', rest.join(': ') || 'refresh token is invalid')
+    if ('code' in result) {
+      // Structured error from the rotation RPC (M7) — server_error maps to 500,
+      // every invalid_grant variant to 400.
+      return tokenError(result.code, result.message, result.code === 'server_error' ? 500 : 400)
     }
 
     const { token, expiresIn } = signAccessToken(cfg)
@@ -110,7 +111,15 @@ export async function POST(req: NextRequest) {
   }
 
   const { token, expiresIn } = signAccessToken(cfg)
-  const refreshToken = await issueRefreshToken({ client_id: consumed.client_id, resource: boundResource })
+  let refreshToken: string
+  try {
+    // Single-purpose server: refresh always issued; offline_access is advertised
+    // for client compatibility but not gated (no scope-conditional issuance).
+    refreshToken = await issueRefreshToken({ client_id: consumed.client_id, resource: boundResource })
+  } catch (error) {
+    console.error('[oauth] refresh-token issuance failed:', error)
+    return tokenError('server_error', 'refresh token issuance failed', 500)
+  }
   return NextResponse.json(
     { access_token: token, token_type: 'Bearer', expires_in: expiresIn, refresh_token: refreshToken, scope: 'liaison' },
     { headers: { 'Cache-Control': 'no-store', Pragma: 'no-cache' } }
