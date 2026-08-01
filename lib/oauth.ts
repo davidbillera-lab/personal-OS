@@ -14,9 +14,7 @@ export interface OAuthConfig {
   resource: string      // MCP_RESOURCE_URL — canonical MCP resource id == token aud
   jwtSecret: string     // OAUTH_JWT_SECRET — HMAC signing key (>=32 chars)
   accessTokenTtl: number // seconds
-  refreshTokenTtl: number // seconds — OAUTH_REFRESH_TOKEN_TTL, default 30 days
-  refreshGraceSeconds: number // seconds — OAUTH_REFRESH_GRACE_SECONDS, default 30. Benign-retry window: a just-rotated token replayed inside it reissues instead of tripping reuse.
-  refreshAbsoluteCapSeconds: number // seconds — OAUTH_REFRESH_ABSOLUTE_CAP_SECONDS, default 90 days. Hard age cap on a rotation chain; past it, one clean re-consent is forced.
+  refreshTokenTtl: number // seconds — OAUTH_REFRESH_TOKEN_TTL, default 90 days. Non-rotating: this is the token's absolute lifetime.
   // Exact ChatGPT callback, once David supplies it from the draft-app screen.
   // Until set, DCR falls back to the connector-domain prefix guard below.
   chatgptRedirectUri: string | null
@@ -56,8 +54,6 @@ export function getOAuthConfig(): OAuthConfig {
   }
   const ttlRaw = parseInt(process.env.OAUTH_ACCESS_TOKEN_TTL ?? '', 10)
   const refreshTtlRaw = parseInt(process.env.OAUTH_REFRESH_TOKEN_TTL ?? '', 10)
-  const graceRaw = parseInt(process.env.OAUTH_REFRESH_GRACE_SECONDS ?? '', 10)
-  const absCapRaw = parseInt(process.env.OAUTH_REFRESH_ABSOLUTE_CAP_SECONDS ?? '', 10)
   cachedConfig = {
     issuer: issuer.replace(/\/$/, ''),
     resource,
@@ -65,15 +61,10 @@ export function getOAuthConfig(): OAuthConfig {
     // Short-lived by default (15 min). Stateless JWTs have no revocation path,
     // so keep the window tight for a token that fronts a write-capable queue.
     accessTokenTtl: Number.isFinite(ttlRaw) && ttlRaw > 0 ? ttlRaw : 900,
-    // Long-lived by default (30 days). Persisted + hashed + rotated, unlike the
-    // stateless access token, so a longer window is safe here.
-    refreshTokenTtl: Number.isFinite(refreshTtlRaw) && refreshTtlRaw > 0 ? refreshTtlRaw : 2592000,
-    // Grace window for benign refresh retries (network drop mid-rotation). Short
-    // by default — long enough to cover a client retry, too short to help a thief.
-    refreshGraceSeconds: Number.isFinite(graceRaw) && graceRaw > 0 ? graceRaw : 30,
-    // Absolute cap on a rotation chain's lifetime (90 days). Bounds how long a
-    // silently-rotating chain can live before one explicit re-consent is required.
-    refreshAbsoluteCapSeconds: Number.isFinite(absCapRaw) && absCapRaw > 0 ? absCapRaw : 7776000,
+    // Non-rotating, so this is the token's absolute lifetime (90 days default).
+    // Persisted + hashed, unlike the stateless access token, so a longer window
+    // is safe here; theft is bounded by this expiry + manual revocation.
+    refreshTokenTtl: Number.isFinite(refreshTtlRaw) && refreshTtlRaw > 0 ? refreshTtlRaw : 7776000,
     chatgptRedirectUri: process.env.CHATGPT_REDIRECT_URI || null,
     consentPasscode: passcodeOrNull(process.env.OAUTH_CONSENT_PASSCODE),
     allowDcrBootstrap: process.env.OAUTH_ALLOW_DCR_BOOTSTRAP === 'true',
@@ -373,13 +364,13 @@ export async function consumeAuthCode(code: string): Promise<ConsumedCode | { er
   }
 }
 
-// ---- Refresh tokens (migrations 021 + 022) ---------------------------------
-// Long-lived (30-day default), rotating, single-use refresh tokens so ChatGPT
-// can silently mint new short-lived access tokens without re-consent. Same
+// ---- Refresh tokens (migrations 021 + 023) ---------------------------------
+// Long-lived (90-day default), NON-ROTATING refresh tokens so ChatGPT can
+// silently mint new short-lived access tokens without re-consent. Same
 // narrow 'liaison' scope as the access token — no privilege escalation.
 // Note: access tokens already issued stay valid until their 15-min exp even
-// after a chain revoke — inherent to stateless JWTs; revocation gates issuance
-// of NEW access tokens, not the ~15-min tail on ones already minted.
+// after a revoke — inherent to stateless JWTs; revocation gates issuance of
+// NEW access tokens, not the ~15-min tail on ones already minted.
 
 // Issue a new refresh token bound to a client + resource. Only the SHA-256
 // hash is persisted; the plaintext is returned once to the caller (mirrors
@@ -406,63 +397,41 @@ export async function issueRefreshToken(params: {
   return token
 }
 
-export interface ConsumedRefreshToken { resource: string | null; newRefreshToken: string }
 export interface RefreshTokenError { code: string; message: string }
 
-// Atomically rotate a refresh token through migration 022's transaction-backed
-// RPC (oauth_rotate_refresh_token). Every branch — success, benign retry, reuse,
-// expiry, absolute-cap, wrong client — is decided inside one DB transaction with
-// DB-clock timestamps; this wrapper only maps the returned status to a structured
-// result. Success returns { resource, newRefreshToken }; every failure returns a
-// structured { code, message } (no string-splitting on the caller side — M7).
+// Validate a refresh token WITHOUT rotating it — non-rotating by design (single
+// personal connector): the refresh token is stable across refreshes —
+// retries/concurrency are naturally idempotent. Theft is mitigated by the
+// 15-min access-token window, the 90-day absolute expiry, and manual
+// revocation (UPDATE oauth_refresh_tokens SET revoked_at = now() WHERE ... —
+// bulk = the kill-switch).
 export async function consumeRefreshToken(
   token: string,
   client_id: string
-): Promise<ConsumedRefreshToken | RefreshTokenError> {
+): Promise<{ resource: string | null } | RefreshTokenError> {
   const supabase = createAdminSupabaseClient()
-  const cfg = getOAuthConfig()
   const hashed = hashCode(token)
-  // Generate the successor up front; plaintext is returned only after the RPC
-  // atomically inserts its hash and revokes the current token.
-  const newToken = randomToken(32)
-  const newHash = hashCode(newToken)
-  const { data, error } = await supabase.rpc('oauth_rotate_refresh_token', {
-    p_old_hash: hashed,
-    p_client_id: client_id,
-    p_new_hash: newHash,
-    p_ttl_seconds: cfg.refreshTokenTtl,
-    p_grace_seconds: cfg.refreshGraceSeconds,
-    p_abs_cap_seconds: cfg.refreshAbsoluteCapSeconds,
-  })
+  const { data: row, error } = await supabase
+    .from('oauth_refresh_tokens')
+    .select('client_id, resource, revoked_at, expires_at')
+    .eq('token_hash', hashed)
+    .maybeSingle()
+
   if (error) {
     // Log the real DB error server-side; never leak it to the client.
-    console.error('[oauth] refresh-token rotation failed:', error.message)
-    return { code: 'server_error', message: 'rotation failed' }
+    console.error('[oauth] refresh-token lookup failed:', error.message)
+    return { code: 'server_error', message: 'refresh lookup failed' }
   }
+  if (!row) return { code: 'invalid_grant', message: 'refresh token is invalid' }
+  // Wrong client is inert — no side effects, same error as unknown.
+  if (row.client_id !== client_id) return { code: 'invalid_grant', message: 'refresh token is invalid' }
+  if (row.revoked_at) return { code: 'invalid_grant', message: 'refresh token revoked' }
+  if (new Date(row.expires_at) <= new Date()) return { code: 'invalid_grant', message: 'refresh token expired' }
 
-  const result = Array.isArray(data) ? data[0] : data
-  const status = result?.status as string | undefined
+  // Best-effort touch; never blocks or fails the response.
+  const nowIso = new Date().toISOString()
+  void supabase.from('oauth_refresh_tokens').update({ last_used_at: nowIso }).eq('token_hash', hashed)
+    .then(({ error: e }) => { if (e) console.error('[oauth] last_used_at touch failed (non-fatal):', e.message) })
 
-  switch (status) {
-    case 'rotated':
-    case 'retry_reissue':
-      return { resource: result.resource ?? null, newRefreshToken: newToken }
-    case 'reused': {
-      // A rotated token replayed outside the grace window = theft signal. The RPC
-      // has already chain-revoked the (client, sub); record it for visibility.
-      void supabase.from('mcp_audit_log').insert({
-        actor: 'oauth-refresh', tool: 'reuse_detected', ok: false, error: `client=${client_id}`,
-      }).then(({ error: e }) => { if (e) console.error('[oauth] reuse audit insert failed (non-fatal):', e.message) })
-      return { code: 'invalid_grant', message: 'refresh token reuse detected' }
-    }
-    case 'cap_exceeded':
-      return { code: 'invalid_grant', message: 'refresh token chain expired, re-authorization required' }
-    case 'expired':
-      return { code: 'invalid_grant', message: 'refresh token expired' }
-    case 'invalid':
-      return { code: 'invalid_grant', message: 'refresh token is invalid' }
-    default:
-      console.error('[oauth] refresh-token rotation returned unexpected status:', status)
-      return { code: 'server_error', message: 'rotation failed' }
-  }
+  return { resource: row.resource ?? null }
 }

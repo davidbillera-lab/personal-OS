@@ -15,9 +15,9 @@ function clientIp(req: NextRequest): string {
 //   reused code, client mismatch, redirect mismatch, bad or missing PKCE
 //   verifier, wrong resource.
 // - refresh_token: exchanges a valid (unrevoked, unexpired) refresh token for
-//   a new access token + a rotated refresh token. Rejects: missing params,
-//   unknown/expired/revoked token, and detects+chain-revokes reuse of an
-//   already-rotated token.
+//   a new access token; the refresh token itself is returned unchanged
+//   (non-rotating — see lib/oauth.ts consumeRefreshToken). Rejects: missing
+//   params, unknown/expired/revoked token, client mismatch.
 
 function tokenError(error: string, description: string, status = 400): NextResponse {
   return NextResponse.json(
@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
 
     const result = await consumeRefreshToken(refreshToken, clientId)
     if ('code' in result) {
-      // Structured error from the rotation RPC (M7) — server_error maps to 500,
+      // Structured error from consumeRefreshToken — server_error maps to 500,
       // every invalid_grant variant to 400.
       return tokenError(result.code, result.message, result.code === 'server_error' ? 500 : 400)
     }
@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
         access_token: token,
         token_type: 'Bearer',
         expires_in: expiresIn,
-        refresh_token: result.newRefreshToken,
+        refresh_token: refreshToken, // non-rotating: unchanged
         scope: 'liaison',
       },
       { headers: { 'Cache-Control': 'no-store', Pragma: 'no-cache' } }

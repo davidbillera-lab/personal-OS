@@ -37,13 +37,35 @@ const ISSUER = process.env.ISSUER || process.env.OAUTH_ISSUER?.replace(/\/$/, ''
 const PASSCODE = process.env.PASSCODE || process.env.OAUTH_CONSENT_PASSCODE || ''
 const REDIRECT = 'https://chatgpt.com/connector/oauth/test-local'
 
-// Service-role client for the DB-backed rotation cases (aging revoked_at/expires_at
-// to escape the grace window without sleeping). Null → those cases are skipped.
+// Service-role client for the DB-backed cases (revoking/expiring rows directly).
+// Null → those cases are skipped.
 const SB_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 const db = (SB_URL && SB_KEY) ? createClient(SB_URL, SB_KEY, { auth: { persistSession: false } }) : null
 const sha256 = (t) => createHash('sha256').update(t).digest('hex')
 const createdClients = []  // every client_id we register — torn down at the end
+
+// DB-mutation safety guard: any path that writes to oauth_refresh_tokens
+// directly (revoke/expire seeded rows, cleanup) requires an explicit opt-in
+// AND a localhost target, so this script can never be pointed at prod and
+// silently mutate real rows. Fails loudly (throws) rather than skipping quietly
+// when a service-role key IS present but the guard isn't satisfied.
+function assertDbMutationAllowed() {
+  if (!db) return false
+  let host = ''
+  try { host = new URL(BASE).hostname } catch { /* leave empty → fails the check */ }
+  const isLocalhost = host === 'localhost' || host === '127.0.0.1'
+  const projectRef = (SB_URL.match(/^https:\/\/([^.]+)\.supabase\.co/) || [])[1] || SB_URL
+  if (process.env.ALLOW_OAUTH_DB_TEST_MUTATION !== 'true' || !isLocalhost) {
+    throw new Error(
+      `DB-mutation guard refused: ALLOW_OAUTH_DB_TEST_MUTATION=${process.env.ALLOW_OAUTH_DB_TEST_MUTATION || 'unset'} ` +
+      `BASE=${BASE} (host=${host || 'unparseable'}) supabase_project=${projectRef} — ` +
+      `requires ALLOW_OAUTH_DB_TEST_MUTATION=true AND a localhost target.`
+    )
+  }
+  console.log(`  DB-mutation guard OK — target=${BASE} supabase_project=${projectRef}`)
+  return true
+}
 
 let pass = 0, fail = 0
 function ok(name, cond, detail = '') {
@@ -260,68 +282,50 @@ async function main() {
   try { requestId = JSON.parse(submitText).request_id } catch { /* */ }
   ok('mc_submit_request via liaison token → success', submit.status === 200 && !!requestId, submitText.slice(0, 120))
 
-  // 22. Refresh grant: valid refresh token → new access + rotated refresh token
+  // 22. Refresh grant: valid refresh token → new access token, SAME refresh
+  // token returned unchanged (non-rotating by design — see lib/oauth.ts).
   const refreshed = await tokenExchange({ grant_type: 'refresh_token', refresh_token: firstRefreshToken, client_id: clientId })
   ok('refresh_token grant → new access token', refreshed.status === 200 && refreshed.json.token_type === 'Bearer' && refreshed.json.scope === 'liaison' && !!refreshed.json.access_token)
-  ok('refresh_token grant → rotated (different) refresh token', !!refreshed.json.refresh_token && refreshed.json.refresh_token !== firstRefreshToken)
-  const secondRefreshToken = refreshed.json.refresh_token
+  ok('refresh_token grant → same refresh token returned (non-rotating)', refreshed.json.refresh_token === firstRefreshToken)
 
-  // 23. Grace retry: replaying the JUST-rotated token inside the grace window is a
-  // benign retry (client never got the first response) — it reissues a fresh valid
-  // pair rather than tripping reuse, and does NOT revoke the chain.
-  const graceRetry = await tokenExchange({ grant_type: 'refresh_token', refresh_token: firstRefreshToken, client_id: clientId })
-  ok('grace retry: replaying a just-rotated token → fresh valid pair', graceRetry.status === 200 && !!graceRetry.json.access_token && !!graceRetry.json.refresh_token, JSON.stringify(graceRetry.json))
-  const thirdRefreshToken = graceRetry.json.refresh_token
-  // The reissued successor must itself be a working, rotatable token (chain intact).
-  const afterGrace = await tokenExchange({ grant_type: 'refresh_token', refresh_token: thirdRefreshToken, client_id: clientId })
-  ok('grace retry: the reissued successor is usable', afterGrace.status === 200 && !!afterGrace.json.refresh_token, `second=${!!secondRefreshToken}`)
+  // 23. Redeeming the SAME refresh token again (2nd and 3rd time) each succeed
+  // with a fresh access token and the unchanged refresh token — naturally
+  // idempotent under retries/concurrency, which is the whole point of dropping
+  // rotation for this single-connector use case.
+  const redeem2 = await tokenExchange({ grant_type: 'refresh_token', refresh_token: firstRefreshToken, client_id: clientId })
+  ok('same refresh token redeemed a 2nd time → succeeds', redeem2.status === 200 && !!redeem2.json.access_token && redeem2.json.refresh_token === firstRefreshToken, JSON.stringify(redeem2.json))
+  const redeem3 = await tokenExchange({ grant_type: 'refresh_token', refresh_token: firstRefreshToken, client_id: clientId })
+  ok('same refresh token redeemed a 3rd time → succeeds', redeem3.status === 200 && !!redeem3.json.access_token && redeem3.json.refresh_token === firstRefreshToken, JSON.stringify(redeem3.json))
+  ok('each redemption minted a distinct access token', new Set([tok.json.access_token, refreshed.json.access_token, redeem2.json.access_token, redeem3.json.access_token]).size === 4)
 
-  // 24. Wrong client_id on an otherwise-valid refresh token → rejected, and inert.
+  // 24. Wrong client_id on an otherwise-valid refresh token → rejected, and inert
+  // (the real client can still redeem it afterward).
   const pk4 = pkcePair()
   const auth4 = await authorizeAndGetCode(clientId, pk4)
   const tok4 = await tokenExchange({ grant_type: 'authorization_code', code: auth4.code, redirect_uri: REDIRECT, client_id: clientId, code_verifier: pk4.verifier })
   const wrongClientRefresh = await tokenExchange({ grant_type: 'refresh_token', refresh_token: tok4.json.refresh_token, client_id: 'some-other-client-id' })
   ok('refresh token redeemed with wrong client_id → rejected', wrongClientRefresh.status === 400 && wrongClientRefresh.json.error === 'invalid_grant')
   const validAfterWrongClient = await tokenExchange({ grant_type: 'refresh_token', refresh_token: tok4.json.refresh_token, client_id: clientId })
-  ok('wrong client_id attempt is inert (real client token still rotates)', validAfterWrongClient.status === 200 && !!validAfterWrongClient.json.refresh_token)
+  ok('wrong client_id attempt is inert (real client token still works)', validAfterWrongClient.status === 200 && validAfterWrongClient.json.refresh_token === tok4.json.refresh_token)
 
-  // 25-28. DB-backed rotation cases — need a service-role client to age rows past
-  // the grace window / expiry without sleeping. Skipped if creds are unavailable.
+  // 25-26. DB-backed cases — need a service-role client to revoke/age rows
+  // without sleeping. Skipped if creds are unavailable; guard throws if creds
+  // ARE present but the opt-in/localhost conditions aren't met (fail loudly).
   if (db) {
-    // Seed two independent clients, each with an active refresh token.
-    const A = await newClientWithRefresh('reuse-client-A')
-    const B = await newClientWithRefresh('isolation-client-B')
-    // Rotate A once → A.refresh becomes a revoked-but-rotated token with a live successor.
-    const aRot = await tokenExchange({ grant_type: 'refresh_token', refresh_token: A.refresh, client_id: A.client_id })
-    const aActive = aRot.json.refresh_token
-    // Age A.refresh's revocation to 60s ago — now outside the 30s grace window.
-    await db.from('oauth_refresh_tokens').update({ revoked_at: new Date(Date.now() - 60000).toISOString() }).eq('token_hash', sha256(A.refresh))
+    assertDbMutationAllowed()
+    // 25. Revoked token → invalid_grant.
+    const R = await newClientWithRefresh('revoked-client-R')
+    await db.from('oauth_refresh_tokens').update({ revoked_at: new Date().toISOString() }).eq('token_hash', sha256(R.refresh))
+    const revokedHit = await tokenExchange({ grant_type: 'refresh_token', refresh_token: R.refresh, client_id: R.client_id })
+    ok('revoked refresh token → invalid_grant', revokedHit.status === 400 && revokedHit.json.error === 'invalid_grant', JSON.stringify(revokedHit.json))
 
-    // 25. Genuine reuse (outside grace) → invalid_grant.
-    const reuseHit = await tokenExchange({ grant_type: 'refresh_token', refresh_token: A.refresh, client_id: A.client_id })
-    ok('genuine reuse (aged past grace) → invalid_grant', reuseHit.status === 400 && reuseHit.json.error === 'invalid_grant', JSON.stringify(reuseHit.json))
-    // 26. Reuse chain-revokes the (client, sub) — A's live successor is now dead.
-    const aActiveDead = await tokenExchange({ grant_type: 'refresh_token', refresh_token: aActive, client_id: A.client_id })
-    ok('reuse chain-revokes client A active successor', aActiveDead.status === 400 && aActiveDead.json.error === 'invalid_grant', JSON.stringify(aActiveDead.json))
-    // 27. Cross-client isolation: client B untouched by client A's reuse.
-    const bStillWorks = await tokenExchange({ grant_type: 'refresh_token', refresh_token: B.refresh, client_id: B.client_id })
-    ok('cross-client isolation: client B survives client A reuse', bStillWorks.status === 200 && !!bStillWorks.json.refresh_token, JSON.stringify(bStillWorks.json))
-
-    // 28. Expired token → invalid_grant, and does NOT chain-revoke a sibling.
+    // 26. Expired token → invalid_grant.
     const E = await newClientWithRefresh('expiry-client-E')
-    // Mint a SECOND active token for the same client via a fresh auth-code flow.
-    const pkE = pkcePair()
-    const authE = await authorizeAndGetCode(E.client_id, pkE, { scope: 'liaison offline_access' })
-    const tokE = await tokenExchange({ grant_type: 'authorization_code', code: authE.code, redirect_uri: REDIRECT, client_id: E.client_id, code_verifier: pkE.verifier })
-    const eSibling = tokE.json.refresh_token
-    // Expire E.refresh (active but past expiry; revoked_at stays NULL).
     await db.from('oauth_refresh_tokens').update({ expires_at: new Date(Date.now() - 10000).toISOString() }).eq('token_hash', sha256(E.refresh))
     const expiredHit = await tokenExchange({ grant_type: 'refresh_token', refresh_token: E.refresh, client_id: E.client_id })
     ok('expired refresh token → invalid_grant', expiredHit.status === 400 && expiredHit.json.error === 'invalid_grant', JSON.stringify(expiredHit.json))
-    const eSiblingWorks = await tokenExchange({ grant_type: 'refresh_token', refresh_token: eSibling, client_id: E.client_id })
-    ok('expired token does NOT chain-revoke a sibling (no false reuse)', eSiblingWorks.status === 200 && !!eSiblingWorks.json.refresh_token, JSON.stringify(eSiblingWorks.json))
   } else {
-    console.log('  SKIP  DB-backed rotation cases (reuse / cross-client / expired) — no SUPABASE_SERVICE_ROLE_KEY')
+    console.log('  SKIP  DB-backed cases (revoked / expired) — no SUPABASE_SERVICE_ROLE_KEY')
   }
 
   // Cleanup: drop every seeded client (FK cascade removes their refresh tokens),
