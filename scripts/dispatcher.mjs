@@ -60,8 +60,12 @@ const TIMEOUT_MS = Number(process.env.DISPATCHER_TIMEOUT_MS || 600000)
 const ALLOWED_REPOS = (process.env.DISPATCHER_ALLOWED_REPOS || 'davidbillera-lab/mc-spike-test')
   .split(',').map((s) => s.trim()).filter(Boolean)
 const BUILDS_DIR = process.env.DISPATCHER_BUILDS_DIR || 'builds'
-const SANDBOX_REMOTE = process.env.DISPATCHER_SANDBOX_REMOTE || null
+// mock-only — in production the push target is ALWAYS the fixed github sandbox; a stray
+// env var cannot redirect the push.
+const SANDBOX_REMOTE = (EXECUTOR === 'mock' && process.env.DISPATCHER_SANDBOX_REMOTE) ? process.env.DISPATCHER_SANDBOX_REMOTE : null
 const SANDBOX_REPO = 'davidbillera-lab/mc-spike-test' // fixed; NEVER a portfolio repo
+// Opt-in escape hatch — see claude-executor-adapter.mjs for why this defaults OFF.
+const SKIP_PERMISSIONS = process.env.DISPATCHER_SKIP_PERMISSIONS === '1' || process.env.DISPATCHER_SKIP_PERMISSIONS === 'true'
 // Test controls (deterministic runs): DISPATCHER_ONCE=1 → one tick then exit;
 // DISPATCHER_MAX_TICKS=N → loop N ticks then exit. Neither set → run forever.
 const RUN_ONCE = process.env.DISPATCHER_ONCE === '1' || process.env.DISPATCHER_ONCE === 'true'
@@ -78,6 +82,11 @@ function createAdminSupabaseClient() {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!url || !key) throw new Error('NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set')
   return createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } })
+}
+
+async function logAudit(sb, tool, ok, error) {
+  try { await sb.from('mcp_audit_log').insert({ actor: 'dispatcher', tool, ok, error: error ?? null }) }
+  catch (e) { console.error(`[audit] write failed (non-fatal): ${e.message}`) }
 }
 
 // git helper (throws on nonzero) — the dispatcher IS the only push-cred holder; it is
@@ -105,6 +114,7 @@ async function claimOne(sb) {
   if (updErr) throw new Error(`claim update failed: ${updErr.message}`)
   if (!claimed) { console.log(`[claim] lost race on ${candidateId} (already claimed) — backing off`); return null }
   console.log(`[claim] ${claimed.id} attempt=${attemptId}`)
+  await logAudit(sb, 'dispatcher.claim', true)
   return claimed
 }
 
@@ -118,12 +128,13 @@ async function runAttempt(sb, row) {
 
   let result
   try {
-    result = await adapter.launch({ workspace, request: row, env: process.env, timeoutMs: TIMEOUT_MS })
+    result = await adapter.launch({ workspace, request: row, env: process.env, timeoutMs: TIMEOUT_MS, skipPermissions: SKIP_PERMISSIONS })
   } catch (e) {
     console.log(`[build] FAILED ${row.id}: ${e.message}`)
     await sb.from('mc_requests')
       .update({ status: 'failed', phase: null, blocker: clip(`build failed: ${e.message}`), updated_at: nowISO() })
       .eq('id', row.id).in('status', ['claimed', 'in_progress'])
+    await logAudit(sb, 'dispatcher.build_failed', false, e.message)
     return
   }
 
@@ -147,6 +158,7 @@ async function runAttempt(sb, row) {
   if (aerr) throw new Error(`request-approval update failed: ${aerr.message}`)
   if (!awaiting) { console.log(`[approval] from-state guard failed for ${row.id} (no longer 'claimed') — not requesting`); return }
   console.log(`[approval] requested ${row.id} → awaiting_approval (attempt ${attemptId})`)
+  await logAudit(sb, 'dispatcher.request_approval', true)
 
   // Telegram ping — best-effort, never throws (no-ops if TELEGRAM_* absent).
   const ping = await notifyAwaitingApproval({
@@ -179,6 +191,7 @@ async function gatedPush(sb, row) {
     await sb.from('mc_requests')
       .update({ status: 'failed', phase: null, blocker: clip(`push gate: ${reason}`), updated_at: nowISO() })
       .eq('id', r.id).eq('status', 'in_progress') // don't clobber a newer state
+    await logAudit(sb, 'dispatcher.push', false, reason)
   }
 
   const branch = branchFor(r.id)
@@ -192,6 +205,8 @@ async function gatedPush(sb, row) {
   if (!r.workspace_ref) return fail('workspace_ref missing')
   if (!existsSync(r.workspace_ref)) return fail(`workspace dir missing: ${r.workspace_ref}`)
   console.log(`[push] gate: reviewed_sha + workspace present OK (${r.workspace_ref})`)
+  // SANDBOX_REMOTE is mock-only (see config above), so in production the push target is
+  // always SANDBOX_REPO — this allowlist check is a real gate, not redirectable via env var.
   if (!ALLOWED_REPOS.includes(SANDBOX_REPO)) return fail(`repo ${SANDBOX_REPO} not on allowlist [${ALLOWED_REPOS.join(', ')}]`)
   if (branch !== `mc-build-${r.id}`) return fail(`branch ${branch} not the request's build branch`)
   console.log(`[push] gate: allowlist OK (${SANDBOX_REPO} @ ${branch})`)
@@ -226,6 +241,7 @@ async function gatedPush(sb, row) {
   if (derr) { console.log(`[push] complete update error ${r.id}: ${derr.message}`); return }
   if (!done) { console.log(`[push] complete guard failed for ${r.id} (a newer state won)`); return }
   console.log(`[push] SUCCESS ${r.id} → completed (${head})`)
+  await logAudit(sb, 'dispatcher.push', true)
 }
 
 // ---- fault recovery (startup, before the loop) ----
@@ -234,6 +250,16 @@ async function faultRecovery(sb) {
     .eq('assigned_to', 'claude').in('status', ['claimed', 'in_progress'])
   if (error) { console.log(`[recovery] query failed: ${error.message}`); return }
   for (const r of rows || []) {
+    // Cron orphan: a stray /api/queue/dispatch cron run claimed the row but never set
+    // phase (only this dispatcher sets phase='building' at claim time). Reclaim it —
+    // distinct from a legit interrupted build, which always has phase='building'.
+    if (r.status === 'claimed' && !r.phase) {
+      await sb.from('mc_requests')
+        .update({ status: 'queued', assigned_to: null, attempt_id: null, updated_at: nowISO() })
+        .eq('id', r.id).eq('status', 'claimed')
+      console.log(`[recovery] ${r.id} cron-orphan (claimed/phase=null) → requeued`)
+      continue
+    }
     const midBuild = ['building', 'qc', 'fixing'].includes(r.phase)
     if (midBuild && !r.reviewed_sha) {
       await sb.from('mc_requests')
@@ -262,7 +288,7 @@ async function safeTick(sb) {
 
 async function main() {
   const sb = createAdminSupabaseClient()
-  console.log(`[dispatcher] start executor=${EXECUTOR} poll=${POLL_MS}ms timeout=${TIMEOUT_MS}ms allowed=[${ALLOWED_REPOS.join(', ')}] remote=${SANDBOX_REMOTE || '(github default)'} once=${RUN_ONCE} maxTicks=${MAX_TICKS ?? '∞'}`)
+  console.log(`[dispatcher] start executor=${EXECUTOR} poll=${POLL_MS}ms timeout=${TIMEOUT_MS}ms allowed=[${ALLOWED_REPOS.join(', ')}] remote=${SANDBOX_REMOTE || '(github default)'} skipPermissions=${SKIP_PERMISSIONS} once=${RUN_ONCE} maxTicks=${MAX_TICKS ?? '∞'}`)
   await faultRecovery(sb)
   if (RUN_ONCE) { await safeTick(sb); console.log('[dispatcher] ONCE complete — exiting'); return }
   let ticks = 0

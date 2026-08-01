@@ -80,13 +80,17 @@ function stampTrust(absWorkspace) {
 }
 
 function parseVerdict(output) {
-  const m = (output || '').match(/\b(SHIP|FIX-FIRST|RECONSIDER)\b/g)
-  return m && m.length ? m[m.length - 1] : 'UNKNOWN'
+  const lines = (output || '').split('\n').map((l) => l.trim()).filter(Boolean)
+  const lastLine = lines.length ? lines[lines.length - 1] : ''
+  const lastLineMatch = lastLine.match(/\b(SHIP|FIX-FIRST|RECONSIDER)\b/)
+  if (lastLineMatch) return lastLineMatch[1]
+  const anyMatch = (output || '').match(/\b(SHIP|FIX-FIRST|RECONSIDER)\b/g)
+  return anyMatch && anyMatch.length ? anyMatch[anyMatch.length - 1] : 'UNKNOWN'
 }
 
 export const claudeExecutorAdapter = {
   name: 'claude',
-  async launch({ workspace, request, env, timeoutMs }) {
+  async launch({ workspace, request, env, timeoutMs, skipPermissions }) {
     // 1. Provision isolated, push-denied workspace.
     gitInitRepo(workspace)
     mkdirSync(join(workspace, '.claude'), { recursive: true })
@@ -95,10 +99,15 @@ export const claudeExecutorAdapter = {
     // 2. Stamp trust so headless Claude doesn't block on the trust dialog.
     stampTrust(workspace)
 
-    // 3. Child env: inject OPENAI_API_KEY (CodexQC), drop the recursion guard.
-    const childEnv = { ...(env || process.env) }
+    // 3. Minimal env — the executor is treated as untrusted. Pass only what claude + CodexQC
+    // need; NEVER the dispatcher's secrets (service-role key, GitHub/Telegram/MCP keys).
+    // If the rig's `claude` auth needs an env var (it authed via subscription in Phase 0, so
+    // likely not), add it to ALLOWED_ENV.
+    const ALLOWED_ENV = ['PATH','Path','SystemRoot','windir','TEMP','TMP','HOME','USERPROFILE','APPDATA','LOCALAPPDATA','HOMEDRIVE','HOMEPATH','LANG','LC_ALL','NUMBER_OF_PROCESSORS','OS','PATHEXT','COMSPEC']
+    const childEnv = {}
+    for (const k of ALLOWED_ENV) if (process.env[k] !== undefined) childEnv[k] = process.env[k]
     if (process.env.OPENAI_API_KEY) childEnv.OPENAI_API_KEY = process.env.OPENAI_API_KEY
-    delete childEnv.CLAUDECODE
+    // CLAUDECODE deliberately omitted (recursion guard must stay unset).
 
     // 4. Launch headless Claude with a hard timeout. Deny-list blocks push regardless.
     const task = request?.request_text || request?.title || 'the requested build'
@@ -107,17 +116,25 @@ export const claudeExecutorAdapter = {
       'Build this in the current empty git repo, then self-review and commit.',
       `Task: ${task}.`,
       'Steps: (1) implement it as minimal working files;',
-      '(2) run `node ~/.claude/skills/CodexQC/codex-qc.mjs --staged` and read the verdict;',
-      '(3) apply any Blocking/Should-fix items it raises;',
-      '(4) if there are tests, run them;',
-      `(5) \`git add -A && git commit -m "${shortMsg}"\`.`,
+      '(2) `git add -A`;',
+      '(3) run `node ~/.claude/skills/CodexQC/codex-qc.mjs --staged` and read the verdict;',
+      '(4) apply any Blocking/Should-fix items it raises;',
+      '(5) `git add -A` again;',
+      `(6) \`git commit -m "${shortMsg}"\`;`,
+      '(7) print the final CodexQC verdict word (SHIP/FIX-FIRST/RECONSIDER) ALONE on the LAST line.',
       'DO NOT run git push or gh — you cannot, and must not try.',
-      'Output the final CodexQC verdict word (SHIP/FIX-FIRST/RECONSIDER) on the last line.',
     ].join(' ')
+
+    // Default relies on the trust-stamp so the workspace deny-list is ENFORCED.
+    // --dangerously-skip-permissions is an opt-in escape hatch that NULLIFIES the
+    // deny-list — enable only if headless trust-only doesn't run, and treat as a
+    // documented risk.
+    const cliArgs = ['-p', prompt, '--output-format', 'text']
+    if (skipPermissions) cliArgs.push('--dangerously-skip-permissions')
 
     const r = spawnSync(
       'claude',
-      ['-p', prompt, '--output-format', 'text', '--dangerously-skip-permissions'],
+      cliArgs,
       { cwd: workspace, env: childEnv, encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL' },
     )
     if (r.error && r.error.code === 'ETIMEDOUT') {
@@ -140,5 +157,7 @@ export const claudeExecutorAdapter = {
 }
 
 export function pickAdapter(name) {
-  return name === 'mock' ? mockExecutorAdapter : claudeExecutorAdapter
+  if (name === 'mock') return mockExecutorAdapter
+  if (name === 'claude') return claudeExecutorAdapter
+  throw new Error(`Unknown DISPATCHER_EXECUTOR '${name}' — must be 'claude' or 'mock'`)
 }
