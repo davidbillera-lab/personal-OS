@@ -13,8 +13,25 @@
 
 import { spawnSync } from 'child_process'
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { homedir } from 'os'
+
+// ---- resolve the real claude binary ----
+// On Windows, `claude` on PATH is an npm shim (claude.cmd/.ps1) that Node's spawnSync
+// cannot launch without shell:true. shell:true would mangle the -p prompt arg, so
+// instead we resolve the shim's location and spawn the real native binary directly.
+export function resolveClaudeBin() {
+  if (process.env.CLAUDE_BIN && existsSync(process.env.CLAUDE_BIN)) return process.env.CLAUDE_BIN
+  const whichCmd = process.platform === 'win32' ? 'where' : 'which'
+  const r = spawnSync(whichCmd, ['claude'], { encoding: 'utf8' })
+  const shimPath = (r.stdout || '').split(/\r?\n/).map((l) => l.trim()).find(Boolean)
+  if (shimPath) {
+    const shimDir = dirname(shimPath)
+    const candidate = join(shimDir, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude')
+    if (existsSync(candidate)) return candidate
+  }
+  return 'claude'
+}
 
 // ---- git helpers (throw on nonzero) ----
 function git(cwd, args) {
@@ -132,13 +149,17 @@ export const claudeExecutorAdapter = {
     const cliArgs = ['-p', prompt, '--output-format', 'text']
     if (skipPermissions) cliArgs.push('--dangerously-skip-permissions')
 
+    const claudeBin = resolveClaudeBin()
     const r = spawnSync(
-      'claude',
+      claudeBin,
       cliArgs,
       { cwd: workspace, env: childEnv, encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL' },
     )
     if (r.error && r.error.code === 'ETIMEDOUT') {
       throw new Error(`executor timed out after ${timeoutMs}ms`)
+    }
+    if (r.error) {
+      throw new Error(`executor spawn failed: ${r.error.code || r.error.message}`)
     }
     if (r.status !== 0) {
       throw new Error(`executor exited ${r.status}: ${(r.stderr || r.stdout || '').trim().slice(0, 400)}`)
