@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getOAuthConfig, consumeAuthCode, verifyPkceS256, signAccessToken, checkRateLimit, rateKey } from '@/lib/oauth'
+import { getOAuthConfig, consumeAuthCode, verifyPkceS256, signAccessToken, checkRateLimit, rateKey, issueRefreshToken, consumeRefreshToken } from '@/lib/oauth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -8,10 +8,16 @@ function clientIp(req: NextRequest): string {
   return req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
 }
 
-// Token endpoint. Exchanges a single-use authorization code + PKCE verifier for
-// a short-lived liaison access token (JWT, aud = MCP resource). Rejects: wrong
-// grant, unknown/expired/reused code, client mismatch, redirect mismatch, bad
-// or missing PKCE verifier, wrong resource. No refresh tokens in this pass.
+// Token endpoint. Two grants:
+// - authorization_code: exchanges a single-use code + PKCE verifier for a
+//   short-lived liaison access token (JWT, aud = MCP resource) plus a
+//   long-lived rotating refresh token. Rejects: wrong grant, unknown/expired/
+//   reused code, client mismatch, redirect mismatch, bad or missing PKCE
+//   verifier, wrong resource.
+// - refresh_token: exchanges a valid (unrevoked, unexpired) refresh token for
+//   a new access token + a rotated refresh token. Rejects: missing params,
+//   unknown/expired/revoked token, and detects+chain-revokes reuse of an
+//   already-rotated token.
 
 function tokenError(error: string, description: string, status = 400): NextResponse {
   return NextResponse.json(
@@ -37,8 +43,33 @@ export async function POST(req: NextRequest) {
   }
 
   const grantType = form.get('grant_type') ?? ''
-  if (grantType !== 'authorization_code') {
+  if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
     return tokenError('unsupported_grant_type', `grant_type '${grantType}' is not supported`)
+  }
+
+  if (grantType === 'refresh_token') {
+    const refreshToken = form.get('refresh_token') ?? ''
+    const clientId = form.get('client_id') ?? ''
+    if (!refreshToken) return tokenError('invalid_request', 'refresh_token is required')
+    if (!clientId) return tokenError('invalid_request', 'client_id is required')
+
+    const result = await consumeRefreshToken(refreshToken, clientId)
+    if ('error' in result) {
+      const [err, ...rest] = result.error.split(': ')
+      return tokenError(err || 'invalid_grant', rest.join(': ') || 'refresh token is invalid')
+    }
+
+    const { token, expiresIn } = signAccessToken(cfg)
+    return NextResponse.json(
+      {
+        access_token: token,
+        token_type: 'Bearer',
+        expires_in: expiresIn,
+        refresh_token: result.newRefreshToken,
+        scope: 'liaison',
+      },
+      { headers: { 'Cache-Control': 'no-store', Pragma: 'no-cache' } }
+    )
   }
 
   const code = form.get('code') ?? ''
@@ -79,8 +110,9 @@ export async function POST(req: NextRequest) {
   }
 
   const { token, expiresIn } = signAccessToken(cfg)
+  const refreshToken = await issueRefreshToken({ client_id: consumed.client_id, resource: boundResource })
   return NextResponse.json(
-    { access_token: token, token_type: 'Bearer', expires_in: expiresIn, scope: 'liaison' },
+    { access_token: token, token_type: 'Bearer', expires_in: expiresIn, refresh_token: refreshToken, scope: 'liaison' },
     { headers: { 'Cache-Control': 'no-store', Pragma: 'no-cache' } }
   )
 }

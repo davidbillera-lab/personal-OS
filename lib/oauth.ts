@@ -14,6 +14,7 @@ export interface OAuthConfig {
   resource: string      // MCP_RESOURCE_URL — canonical MCP resource id == token aud
   jwtSecret: string     // OAUTH_JWT_SECRET — HMAC signing key (>=32 chars)
   accessTokenTtl: number // seconds
+  refreshTokenTtl: number // seconds — OAUTH_REFRESH_TOKEN_TTL, default 30 days
   // Exact ChatGPT callback, once David supplies it from the draft-app screen.
   // Until set, DCR falls back to the connector-domain prefix guard below.
   chatgptRedirectUri: string | null
@@ -52,6 +53,7 @@ export function getOAuthConfig(): OAuthConfig {
     throw new Error('OAUTH_JWT_SECRET must be at least 32 characters')
   }
   const ttlRaw = parseInt(process.env.OAUTH_ACCESS_TOKEN_TTL ?? '', 10)
+  const refreshTtlRaw = parseInt(process.env.OAUTH_REFRESH_TOKEN_TTL ?? '', 10)
   cachedConfig = {
     issuer: issuer.replace(/\/$/, ''),
     resource,
@@ -59,6 +61,9 @@ export function getOAuthConfig(): OAuthConfig {
     // Short-lived by default (15 min). Stateless JWTs have no revocation path,
     // so keep the window tight for a token that fronts a write-capable queue.
     accessTokenTtl: Number.isFinite(ttlRaw) && ttlRaw > 0 ? ttlRaw : 900,
+    // Long-lived by default (30 days). Persisted + hashed + rotated, unlike the
+    // stateless access token, so a longer window is safe here.
+    refreshTokenTtl: Number.isFinite(refreshTtlRaw) && refreshTtlRaw > 0 ? refreshTtlRaw : 2592000,
     chatgptRedirectUri: process.env.CHATGPT_REDIRECT_URI || null,
     consentPasscode: passcodeOrNull(process.env.OAUTH_CONSENT_PASSCODE),
     allowDcrBootstrap: process.env.OAUTH_ALLOW_DCR_BOOTSTRAP === 'true',
@@ -102,7 +107,7 @@ export function randomToken(bytes = 32): string {
 // Auth codes are bearer credentials — store only their SHA-256 so a DB/log leak
 // never yields a usable code. The plaintext lives only in the redirect to
 // ChatGPT and the client's token request.
-function hashCode(code: string): string {
+export function hashCode(code: string): string {
   return createHash('sha256').update(code).digest('hex')
 }
 
@@ -224,7 +229,7 @@ export async function createOAuthClient(params: {
       client_secret: null, // public PKCE client
       client_name: params.client_name ?? null,
       redirect_uris: params.redirect_uris,
-      grant_types: ['authorization_code'],
+      grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       token_endpoint_auth_method: 'none',
       scope: 'liaison',
@@ -356,4 +361,104 @@ export async function consumeAuthCode(code: string): Promise<ConsumedCode | { er
     code_challenge: updated.code_challenge,
     resource: updated.resource,
   }
+}
+
+// ---- Refresh tokens (migration 021) ----------------------------------------
+// Long-lived (30-day default), rotating, single-use refresh tokens so ChatGPT
+// can silently mint new short-lived access tokens without re-consent. Same
+// narrow 'liaison' scope as the access token — no privilege escalation.
+
+// Issue a new refresh token bound to a client + resource. Only the SHA-256
+// hash is persisted; the plaintext is returned once to the caller (mirrors
+// insertAuthCode).
+export async function issueRefreshToken(params: {
+  client_id: string
+  resource: string | null
+}): Promise<string> {
+  const supabase = createAdminSupabaseClient()
+  const cfg = getOAuthConfig()
+  const token = randomToken(32)
+  const expires_at = new Date(Date.now() + cfg.refreshTokenTtl * 1000).toISOString()
+  const { error } = await supabase.from('oauth_refresh_tokens').insert({
+    token_hash: hashCode(token),
+    client_id: params.client_id,
+    scope: 'liaison',
+    resource: params.resource,
+    expires_at,
+  })
+  if (error) throw new Error(error.message)
+  // Opportunistic cleanup of expired/revoked rows so the table doesn't accumulate junk.
+  void supabase.from('oauth_refresh_tokens').delete().lt('expires_at', new Date().toISOString())
+    .then(({ error: e }) => { if (e) console.error('[oauth] expired-refresh-token cleanup failed (non-fatal):', e.message) })
+  return token
+}
+
+export interface ConsumedRefreshToken { resource: string | null; newRefreshToken: string }
+
+// Atomically rotate a refresh token: the old token is revoked and chained to a
+// freshly generated successor in the same conditional UPDATE (active tokens
+// only), so redemption has no check-then-act window. A replay of an
+// already-revoked (i.e. already-rotated) token trips reuse detection, which
+// revokes the entire chain for that client — the standard refresh-token
+// rotation defense against a stolen token being used after the legitimate
+// client has already rotated past it.
+export async function consumeRefreshToken(
+  token: string,
+  client_id: string
+): Promise<ConsumedRefreshToken | { error: string }> {
+  const supabase = createAdminSupabaseClient()
+  const cfg = getOAuthConfig()
+  const hashed = hashCode(token)
+  const nowIso = new Date().toISOString()
+
+  // Generate the successor up front so the rotate UPDATE can chain to it atomically.
+  const newToken = randomToken(32)
+  const newHash = hashCode(newToken)
+
+  const { data: rotated, error } = await supabase
+    .from('oauth_refresh_tokens')
+    .update({ revoked_at: nowIso, rotated_to: newHash, last_used_at: nowIso })
+    .eq('token_hash', hashed)
+    .eq('client_id', client_id)
+    .is('revoked_at', null)
+    .gt('expires_at', nowIso)
+    .select('scope, resource, expires_at')
+    .maybeSingle()
+  if (error) return { error: `invalid_grant: ${error.message}` }
+
+  if (!rotated) {
+    // Zero rows: either unknown/expired/wrong-client, or a reused
+    // already-revoked token. Distinguish by checking for a revoked row.
+    const { data: existing } = await supabase
+      .from('oauth_refresh_tokens')
+      .select('revoked_at')
+      .eq('token_hash', hashed)
+      .not('revoked_at', 'is', null)
+      .maybeSingle()
+    if (existing) {
+      // Real token, already rotated once — this is a replay of a stolen or
+      // leaked refresh token. Revoke the whole active chain for this client.
+      const { error: revokeErr } = await supabase
+        .from('oauth_refresh_tokens')
+        .update({ revoked_at: nowIso })
+        .eq('client_id', client_id)
+        .is('revoked_at', null)
+      if (revokeErr) console.error('[oauth] chain-revoke on reuse failed:', revokeErr.message)
+      return { error: 'invalid_grant: refresh token reuse detected' }
+    }
+    return { error: 'invalid_grant: refresh token is invalid, expired, or revoked' }
+  }
+
+  // Sliding window: each successful rotation gets a fresh 30-day expiry.
+  const expires_at = new Date(Date.now() + cfg.refreshTokenTtl * 1000).toISOString()
+  const { error: insertErr } = await supabase.from('oauth_refresh_tokens').insert({
+    token_hash: newHash,
+    client_id,
+    scope: 'liaison',
+    resource: rotated.resource,
+    expires_at,
+  })
+  if (insertErr) return { error: `server_error: ${insertErr.message}` }
+
+  return { resource: rotated.resource, newRefreshToken: newToken }
 }

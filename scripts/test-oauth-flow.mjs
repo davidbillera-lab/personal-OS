@@ -118,7 +118,9 @@ async function main() {
   ok('authorize (correct passcode) issues a code + redirects to registered URI', auth.status === 302 && !!auth.code && auth.loc.startsWith(REDIRECT))
   const tok = await tokenExchange({ grant_type: 'authorization_code', code: auth.code, redirect_uri: REDIRECT, client_id: clientId, code_verifier: pk.verifier })
   ok('token exchange returns a liaison access token', tok.status === 200 && tok.json.token_type === 'Bearer' && tok.json.scope === 'liaison' && !!tok.json.access_token)
+  ok('token exchange also returns a refresh token', !!tok.json.refresh_token)
   const accessToken = tok.json.access_token
+  const firstRefreshToken = tok.json.refresh_token
 
   // 5. Auth-code reuse rejected
   const reuse = await tokenExchange({ grant_type: 'authorization_code', code: auth.code, redirect_uri: REDIRECT, client_id: clientId, code_verifier: pk.verifier })
@@ -144,9 +146,19 @@ async function main() {
   const badClient = await authorizeAndGetCode('nonexistent-client', pkcePair())
   ok('unknown client_id → fatal page, no code', !badClient.code && badClient.status === 400)
 
-  // 10. refresh_token grant unsupported
-  const refresh = await tokenExchange({ grant_type: 'refresh_token', refresh_token: 'x' })
-  ok('unsupported grant_type → rejected', refresh.status === 400 && refresh.json.error === 'unsupported_grant_type')
+  // 10. Truly unsupported grant_type rejected
+  const badGrant = await tokenExchange({ grant_type: 'client_credentials' })
+  ok('unsupported grant_type → rejected', badGrant.status === 400 && badGrant.json.error === 'unsupported_grant_type')
+
+  // 10b. refresh_token: missing params
+  const noRefreshTok = await tokenExchange({ grant_type: 'refresh_token', client_id: clientId })
+  ok('refresh_token missing refresh_token param → invalid_request', noRefreshTok.status === 400 && noRefreshTok.json.error === 'invalid_request')
+  const noRefreshClient = await tokenExchange({ grant_type: 'refresh_token', refresh_token: 'x' })
+  ok('refresh_token missing client_id param → invalid_request', noRefreshClient.status === 400 && noRefreshClient.json.error === 'invalid_request')
+
+  // 10c. refresh_token: unknown token rejected
+  const unknownRefresh = await tokenExchange({ grant_type: 'refresh_token', refresh_token: 'not-a-real-token', client_id: clientId })
+  ok('unknown refresh token → invalid_grant', unknownRefresh.status === 400 && unknownRefresh.json.error === 'invalid_grant')
 
   // 11. MCP: no token → 401 + WWW-Authenticate → resource metadata
   const noTok = await rpc(null, 'initialize', { protocolVersion: '2025-11-25' })
@@ -198,6 +210,28 @@ async function main() {
   let requestId = null
   try { requestId = JSON.parse(submitText).request_id } catch { /* */ }
   ok('mc_submit_request via liaison token → success', submit.status === 200 && !!requestId, submitText.slice(0, 120))
+
+  // 22. Refresh grant: valid refresh token → new access + rotated refresh token
+  const refreshed = await tokenExchange({ grant_type: 'refresh_token', refresh_token: firstRefreshToken, client_id: clientId })
+  ok('refresh_token grant → new access token', refreshed.status === 200 && refreshed.json.token_type === 'Bearer' && refreshed.json.scope === 'liaison' && !!refreshed.json.access_token)
+  ok('refresh_token grant → rotated (different) refresh token', !!refreshed.json.refresh_token && refreshed.json.refresh_token !== firstRefreshToken)
+  const secondRefreshToken = refreshed.json.refresh_token
+
+  // 23. Old (rotated-away) refresh token is now dead
+  const staleRefresh = await tokenExchange({ grant_type: 'refresh_token', refresh_token: firstRefreshToken, client_id: clientId })
+  ok('rotated-away refresh token → rejected', staleRefresh.status === 400 && staleRefresh.json.error === 'invalid_grant')
+
+  // 24. Reuse detection: replaying the already-rotated token should also revoke
+  // the live successor (chain revoke), so the current valid token stops working.
+  const chainRevoked = await tokenExchange({ grant_type: 'refresh_token', refresh_token: secondRefreshToken, client_id: clientId })
+  ok('reuse of a rotated refresh token revokes the active successor too', chainRevoked.status === 400 && chainRevoked.json.error === 'invalid_grant')
+
+  // 25. Wrong client_id on an otherwise-valid refresh token → rejected
+  const pk4 = pkcePair()
+  const auth4 = await authorizeAndGetCode(clientId, pk4)
+  const tok4 = await tokenExchange({ grant_type: 'authorization_code', code: auth4.code, redirect_uri: REDIRECT, client_id: clientId, code_verifier: pk4.verifier })
+  const wrongClientRefresh = await tokenExchange({ grant_type: 'refresh_token', refresh_token: tok4.json.refresh_token, client_id: 'some-other-client-id' })
+  ok('refresh token redeemed with wrong client_id → rejected', wrongClientRefresh.status === 400 && wrongClientRefresh.json.error === 'invalid_grant')
 
   console.log(`\n${pass} passed, ${fail} failed\n`)
   if (requestId) console.log(`(test request row id ${requestId} — created via the verified OAuth flow; delete if you want the queue clean)\n`)
