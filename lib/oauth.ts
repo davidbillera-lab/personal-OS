@@ -3,28 +3,29 @@ import { createAdminSupabaseClient } from '@/lib/supabase'
 
 // OAuth 2.1 + PKCE facade core for the ChatGPT liaison.
 // A valid access token minted here grants ONLY the 'liaison' scope mapped to the
-// 'chatgpt-liaison' identity — the same narrow surface as the static liaison
+// 'chatgpt-liaison' identity â€” the same narrow surface as the static liaison
 // key. Access tokens are stateless signed JWTs (HS256); only DCR clients and
 // short-lived single-use auth codes persist (migration 018).
 
 // ---- Config (fail closed) --------------------------------------------------
 
 export interface OAuthConfig {
-  issuer: string        // OAUTH_ISSUER — base URL that hosts /oauth/* + /.well-known/*
-  resource: string      // MCP_RESOURCE_URL — canonical MCP resource id == token aud
-  jwtSecret: string     // OAUTH_JWT_SECRET — HMAC signing key (>=32 chars)
+  issuer: string        // OAUTH_ISSUER â€” base URL that hosts /oauth/* + /.well-known/*
+  resource: string      // MCP_RESOURCE_URL â€” canonical MCP resource id == token aud
+  jwtSecret: string     // OAUTH_JWT_SECRET â€” HMAC signing key (>=32 chars)
   accessTokenTtl: number // seconds
-  refreshTokenTtl: number // seconds — OAUTH_REFRESH_TOKEN_TTL, default 90 days. Non-rotating: this is the token's absolute lifetime.
+  refreshTokenTtl: number // seconds â€” OAUTH_REFRESH_TOKEN_TTL, default 90 days. Renewed on every successful use.
+  refreshTokenMaxTtl: number // seconds â€” absolute cap from issuance, default one year.
   // Exact ChatGPT callback, once David supplies it from the draft-app screen.
   // Until set, DCR falls back to the connector-domain prefix guard below.
   chatgptRedirectUri: string | null
   // Operator approval secret. The /authorize consent screen requires it before
-  // minting a code, so only David (who knows it) can approve the connection —
+  // minting a code, so only David (who knows it) can approve the connection â€”
   // not any ChatGPT user who discovers the endpoint. Fail-closed: no passcode
-  // (or one under the entropy floor) → no approval possible.
+  // (or one under the entropy floor) â†’ no approval possible.
   consentPasscode: string | null
   // Whether DCR may register callbacks under the ChatGPT connector prefix while
-  // CHATGPT_REDIRECT_URI is unset. Off by default → prod fails closed (only the
+  // CHATGPT_REDIRECT_URI is unset. Off by default â†’ prod fails closed (only the
   // exact configured redirect registers). Turn on ONLY for the first-connect
   // bootstrap, then set CHATGPT_REDIRECT_URI and turn it back off.
   allowDcrBootstrap: boolean
@@ -54,6 +55,7 @@ export function getOAuthConfig(): OAuthConfig {
   }
   const ttlRaw = parseInt(process.env.OAUTH_ACCESS_TOKEN_TTL ?? '', 10)
   const refreshTtlRaw = parseInt(process.env.OAUTH_REFRESH_TOKEN_TTL ?? '', 10)
+  const refreshMaxTtlRaw = parseInt(process.env.OAUTH_REFRESH_TOKEN_MAX_TTL ?? '', 10)
   cachedConfig = {
     issuer: issuer.replace(/\/$/, ''),
     resource,
@@ -61,10 +63,12 @@ export function getOAuthConfig(): OAuthConfig {
     // Short-lived by default (15 min). Stateless JWTs have no revocation path,
     // so keep the window tight for a token that fronts a write-capable queue.
     accessTokenTtl: Number.isFinite(ttlRaw) && ttlRaw > 0 ? ttlRaw : 900,
-    // Non-rotating, so this is the token's absolute lifetime (90 days default).
-    // Persisted + hashed, unlike the stateless access token, so a longer window
-    // is safe here; theft is bounded by this expiry + manual revocation.
+    // Stable 90-day inactivity window. Every successful refresh extends it, so
+    // an active connector stays connected while abandoned credentials age out.
     refreshTokenTtl: Number.isFinite(refreshTtlRaw) && refreshTtlRaw > 0 ? refreshTtlRaw : 7776000,
+    // A stolen stable credential must not be renewable forever. One annual
+    // reconnect is the hard safety ceiling for this personal connector.
+    refreshTokenMaxTtl: Number.isFinite(refreshMaxTtlRaw) && refreshMaxTtlRaw > 0 ? refreshMaxTtlRaw : 31536000,
     chatgptRedirectUri: process.env.CHATGPT_REDIRECT_URI || null,
     consentPasscode: passcodeOrNull(process.env.OAUTH_CONSENT_PASSCODE),
     allowDcrBootstrap: process.env.OAUTH_ALLOW_DCR_BOOTSTRAP === 'true',
@@ -78,13 +82,13 @@ export function getOAuthConfig(): OAuthConfig {
 function passcodeOrNull(raw: string | undefined): string | null {
   if (!raw) return null
   if (raw.length < MIN_PASSCODE_LEN) {
-    console.error(`[oauth] OAUTH_CONSENT_PASSCODE is under ${MIN_PASSCODE_LEN} chars — treating as unset (approval disabled)`)
+    console.error(`[oauth] OAUTH_CONSENT_PASSCODE is under ${MIN_PASSCODE_LEN} chars â€” treating as unset (approval disabled)`)
     return null
   }
   return raw
 }
 
-// True only when the core secrets exist — lets metadata endpoints answer while
+// True only when the core secrets exist â€” lets metadata endpoints answer while
 // still failing closed on token issuance if misconfigured.
 export function isOAuthConfigured(): boolean {
   try { getOAuthConfig(); return true } catch { return false }
@@ -105,7 +109,7 @@ export function randomToken(bytes = 32): string {
   return b64url(randomBytes(bytes))
 }
 
-// Auth codes are bearer credentials — store only their SHA-256 so a DB/log leak
+// Auth codes are bearer credentials â€” store only their SHA-256 so a DB/log leak
 // never yields a usable code. The plaintext lives only in the redirect to
 // ChatGPT and the client's token request.
 export function hashCode(code: string): string {
@@ -196,7 +200,7 @@ export function verifyPkceS256(verifier: string, challenge: string): boolean {
 
 // Whether a redirect_uri may be REGISTERED via DCR. Once David sets the exact
 // CHATGPT_REDIRECT_URI it must match that exactly. If it isn't set, registration
-// is refused UNLESS bootstrap mode is explicitly enabled — in which case any
+// is refused UNLESS bootstrap mode is explicitly enabled â€” in which case any
 // callback under the ChatGPT connector prefix is allowed, purely for first-connect.
 export function isRegistrableRedirectUri(uri: string, cfg: OAuthConfig): boolean {
   if (cfg.chatgptRedirectUri) return uri === cfg.chatgptRedirectUri
@@ -282,7 +286,7 @@ export async function insertAuthCode(params: {
 // ---- Rate limiting + revocation (migration 019) ----------------------------
 
 // Fixed-window rate limit via the atomic oauth_rate_check() function. Returns
-// true if the call is within budget. Fails OPEN on a DB error — a limiter
+// true if the call is within budget. Fails OPEN on a DB error â€” a limiter
 // outage must not lock out the real connector; the other gates still hold.
 export async function checkRateLimit(key: string, max: number, windowSec: number): Promise<boolean> {
   try {
@@ -311,7 +315,7 @@ async function getRevokedBefore(): Promise<number> {
   try {
     const supabase = createAdminSupabaseClient()
     const { data, error } = await supabase.from('oauth_config').select('value').eq('key', 'revoked_before').maybeSingle()
-    // Kill-switch read errors must be loud — a silent failure would let revoked
+    // Kill-switch read errors must be loud â€” a silent failure would let revoked
     // tokens through. Serve the last-known cutoff rather than resetting to 0.
     if (error) { console.error('[oauth] revoked_before read failed (serving cached cutoff):', error.message); return revokedCache.value }
     const ts = data?.value ? Math.floor(new Date(data.value).getTime() / 1000) : 0
@@ -337,14 +341,14 @@ export interface ConsumedCode {
 
 // Atomically redeem an auth code: mark consumed only if it is currently unconsumed
 // and unexpired. The conditional UPDATE (consumed_at IS NULL) is the single-use
-// guard — a replayed code updates zero rows and is rejected.
+// guard â€” a replayed code updates zero rows and is rejected.
 export async function consumeAuthCode(code: string): Promise<ConsumedCode | { error: string }> {
   const supabase = createAdminSupabaseClient()
   const hashed = hashCode(code)
   const nowIso = new Date().toISOString()
 
   // Single-use AND unexpired are both enforced in the conditional UPDATE, so
-  // redemption is fully atomic — no check-then-act window. A replayed, expired,
+  // redemption is fully atomic â€” no check-then-act window. A replayed, expired,
   // or unknown code updates zero rows and is rejected.
   const { data: updated, error } = await supabase
     .from('oauth_auth_codes')
@@ -365,11 +369,11 @@ export async function consumeAuthCode(code: string): Promise<ConsumedCode | { er
 }
 
 // ---- Refresh tokens (migrations 021 + 023) ---------------------------------
-// Long-lived (90-day default), NON-ROTATING refresh tokens so ChatGPT can
+// Long-lived (90-day sliding inactivity window), NON-ROTATING refresh tokens so ChatGPT can
 // silently mint new short-lived access tokens without re-consent. Same
-// narrow 'liaison' scope as the access token — no privilege escalation.
+// narrow 'liaison' scope as the access token â€” no privilege escalation.
 // Note: access tokens already issued stay valid until their 15-min exp even
-// after a revoke — inherent to stateless JWTs; revocation gates issuance of
+// after a revoke â€” inherent to stateless JWTs; revocation gates issuance of
 // NEW access tokens, not the ~15-min tail on ones already minted.
 
 // Issue a new refresh token bound to a client + resource. Only the SHA-256
@@ -399,21 +403,22 @@ export async function issueRefreshToken(params: {
 
 export interface RefreshTokenError { code: string; message: string }
 
-// Validate a refresh token WITHOUT rotating it — non-rotating by design (single
-// personal connector): the refresh token is stable across refreshes —
+// Validate a refresh token WITHOUT rotating it â€” non-rotating by design (single
+// personal connector): the refresh token is stable across refreshes â€”
 // retries/concurrency are naturally idempotent. Theft is mitigated by the
-// 15-min access-token window, the 90-day absolute expiry, and manual
-// revocation (UPDATE oauth_refresh_tokens SET revoked_at = now() WHERE ... —
+// 15-min access-token window, the 90-day inactivity expiry, and manual
+// revocation (UPDATE oauth_refresh_tokens SET revoked_at = now() WHERE ... â€”
 // bulk = the kill-switch).
 export async function consumeRefreshToken(
   token: string,
   client_id: string
 ): Promise<{ resource: string | null } | RefreshTokenError> {
   const supabase = createAdminSupabaseClient()
+  const cfg = getOAuthConfig()
   const hashed = hashCode(token)
   const { data: row, error } = await supabase
     .from('oauth_refresh_tokens')
-    .select('client_id, resource, revoked_at, expires_at')
+    .select('client_id, resource, revoked_at, expires_at, issued_at')
     .eq('token_hash', hashed)
     .maybeSingle()
 
@@ -423,15 +428,37 @@ export async function consumeRefreshToken(
     return { code: 'server_error', message: 'refresh lookup failed' }
   }
   if (!row) return { code: 'invalid_grant', message: 'refresh token is invalid' }
-  // Wrong client is inert — no side effects, same error as unknown.
+  // Wrong client is inert â€” no side effects, same error as unknown.
   if (row.client_id !== client_id) return { code: 'invalid_grant', message: 'refresh token is invalid' }
   if (row.revoked_at) return { code: 'invalid_grant', message: 'refresh token revoked' }
   if (new Date(row.expires_at) <= new Date()) return { code: 'invalid_grant', message: 'refresh token expired' }
 
-  // Best-effort touch; never blocks or fails the response.
+  // Renew the inactivity window, bounded by an absolute lifetime from issuance.
+  // Await this indexed update: detached writes can be dropped by serverless
+  // runtimes. Repeat every validation predicate so a concurrent revoke/expiry
+  // cannot be extended between the read and this write.
   const nowIso = new Date().toISOString()
-  void supabase.from('oauth_refresh_tokens').update({ last_used_at: nowIso }).eq('token_hash', hashed)
-    .then(({ error: e }) => { if (e) console.error('[oauth] last_used_at touch failed (non-fatal):', e.message) })
+  const slidingExpiryMs = Date.now() + cfg.refreshTokenTtl * 1000
+  const absoluteExpiryMs = new Date(row.issued_at).getTime() + cfg.refreshTokenMaxTtl * 1000
+  if (!Number.isFinite(absoluteExpiryMs) || absoluteExpiryMs <= Date.now()) {
+    return { code: 'invalid_grant', message: 'refresh token reached its maximum lifetime' }
+  }
+  const renewedExpiry = new Date(Math.min(slidingExpiryMs, absoluteExpiryMs)).toISOString()
+  const { data: renewed, error: renewError } = await supabase
+    .from('oauth_refresh_tokens')
+    .update({ last_used_at: nowIso, expires_at: renewedExpiry })
+    .eq('token_hash', hashed)
+    .eq('client_id', client_id)
+    .is('revoked_at', null)
+    .gt('expires_at', nowIso)
+    .select('resource')
+    .maybeSingle()
+  if (renewError) {
+    console.error('[oauth] refresh-token renewal failed:', renewError.message)
+    return { code: 'server_error', message: 'refresh renewal failed' }
+  }
+  if (!renewed) return { code: 'invalid_grant', message: 'refresh token is invalid' }
 
-  return { resource: row.resource ?? null }
+  return { resource: renewed.resource ?? row.resource ?? null }
 }
+
