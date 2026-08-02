@@ -8,6 +8,7 @@ import { logout } from '@/app/login/actions'
 const navLinks = [
   { href: '/', label: 'Dashboard' },
   { href: '/inbox', label: 'Inbox' },
+  { href: '/queue', label: 'Queue' },
   { href: '/ship', label: 'Ship' },
   { href: '/vault', label: 'Vault' },
   { href: '/guide', label: 'Guide' },
