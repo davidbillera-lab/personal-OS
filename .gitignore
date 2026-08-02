@@ -77,3 +77,9 @@ supabase/.temp/
 
 # Hermes MCP server stderr capture (local runtime noise)
 mcp_stderr.txt
+
+# Rig dispatcher isolated build workspaces (regenerated each build, never committed)
+builds/
+
+# Hermes local runtime state
+.hermes/
