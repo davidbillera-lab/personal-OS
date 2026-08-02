@@ -286,19 +286,34 @@ async function safeTick(sb) {
   try { await tick(sb) } catch (e) { console.error(`[tick] error: ${e.message}`) }
 }
 
+// ---- graceful shutdown ----
+// pm2 (and Ctrl-C) send SIGINT/SIGTERM. Finish the current tick, then exit
+// cleanly so a half-run tick never looks approved. A second signal forces exit.
+// NOTE: a build runs via a BLOCKING spawnSync, so a signal received mid-build is
+// handled only after that build returns (bounded by DISPATCHER_TIMEOUT_MS).
+let shuttingDown = false
+function requestShutdown(sig) {
+  if (shuttingDown) { console.log(`[dispatcher] second ${sig} — forcing exit`); process.exit(1) }
+  shuttingDown = true
+  console.log(`[dispatcher] ${sig} received — finishing current tick, then exiting`)
+}
+process.on('SIGINT', () => requestShutdown('SIGINT'))
+process.on('SIGTERM', () => requestShutdown('SIGTERM'))
+
 async function main() {
   const sb = createAdminSupabaseClient()
   console.log(`[dispatcher] start executor=${EXECUTOR} poll=${POLL_MS}ms timeout=${TIMEOUT_MS}ms allowed=[${ALLOWED_REPOS.join(', ')}] remote=${SANDBOX_REMOTE || '(github default)'} skipPermissions=${SKIP_PERMISSIONS} once=${RUN_ONCE} maxTicks=${MAX_TICKS ?? '∞'}`)
   await faultRecovery(sb)
   if (RUN_ONCE) { await safeTick(sb); console.log('[dispatcher] ONCE complete — exiting'); return }
   let ticks = 0
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
+  while (!shuttingDown) {
     await safeTick(sb)
     ticks += 1
     if (MAX_TICKS && ticks >= MAX_TICKS) { console.log(`[dispatcher] reached maxTicks=${MAX_TICKS} — exiting`); break }
+    if (shuttingDown) break
     await sleep(POLL_MS)
   }
+  if (shuttingDown) console.log('[dispatcher] shutdown complete — exiting cleanly')
 }
 
 main().catch((e) => { console.error(`[dispatcher] fatal: ${e.message}`); process.exit(1) })
