@@ -66,11 +66,14 @@ function fatalPage(message: string): NextResponse {
 }
 
 // A recoverable error → redirect back to the client with OAuth error params.
-function redirectError(redirectUri: string, state: string, error: string, description: string): NextResponse {
+// `iss` (RFC 9207) rides on EVERY authorization response, success or error —
+// strict clients (ChatGPT's connector) abort a response that omits it.
+function redirectError(redirectUri: string, state: string, error: string, description: string, issuer: string): NextResponse {
   const u = new URL(redirectUri)
   u.searchParams.set('error', error)
   u.searchParams.set('error_description', description)
   if (state) u.searchParams.set('state', state)
+  u.searchParams.set('iss', issuer)
   return NextResponse.redirect(u.toString(), { status: 302 })
 }
 
@@ -127,17 +130,17 @@ async function validateClientAndRedirect(
 
 // Validate the remaining OAuth params. Failures here are safe to redirect back.
 function validateRequest(p: AuthParams, cfg: OAuthConfig): NextResponse | null {
-  if (p.response_type !== 'code') return redirectError(p.redirect_uri, p.state, 'unsupported_response_type', 'only response_type=code is supported')
-  if (!p.code_challenge) return redirectError(p.redirect_uri, p.state, 'invalid_request', 'code_challenge is required (PKCE)')
-  if (p.code_challenge_method !== 'S256') return redirectError(p.redirect_uri, p.state, 'invalid_request', 'code_challenge_method must be S256')
+  if (p.response_type !== 'code') return redirectError(p.redirect_uri, p.state, 'unsupported_response_type', 'only response_type=code is supported', cfg.issuer)
+  if (!p.code_challenge) return redirectError(p.redirect_uri, p.state, 'invalid_request', 'code_challenge is required (PKCE)', cfg.issuer)
+  if (p.code_challenge_method !== 'S256') return redirectError(p.redirect_uri, p.state, 'invalid_request', 'code_challenge_method must be S256', cfg.issuer)
   // Always validate scope — an empty/omitted scope defaults to 'liaison' rather
   // than skipping the subset check (H4: a falsy scope must not bypass validation).
   const requestedScopes = new Set((p.scope || 'liaison').trim().split(/\s+/).filter(Boolean))
   const hasUnsupportedScope = [...requestedScopes].some(scope => scope !== 'liaison' && scope !== 'offline_access')
   if (!requestedScopes.has('liaison') || hasUnsupportedScope) {
-    return redirectError(p.redirect_uri, p.state, 'invalid_scope', 'available scopes are liaison and offline_access')
+    return redirectError(p.redirect_uri, p.state, 'invalid_scope', 'available scopes are liaison and offline_access', cfg.issuer)
   }
-  if (p.resource && p.resource !== cfg.resource) return redirectError(p.redirect_uri, p.state, 'invalid_target', 'resource does not match this MCP server')
+  if (p.resource && p.resource !== cfg.resource) return redirectError(p.redirect_uri, p.state, 'invalid_target', 'resource does not match this MCP server', cfg.issuer)
   return null
 }
 
@@ -202,5 +205,6 @@ export async function POST(req: NextRequest) {
   const u = new URL(p.redirect_uri)
   u.searchParams.set('code', code)
   if (p.state) u.searchParams.set('state', p.state)
+  u.searchParams.set('iss', cfg.issuer) // RFC 9207 — ChatGPT's connector requires it
   return NextResponse.redirect(u.toString(), { status: 302 })
 }
