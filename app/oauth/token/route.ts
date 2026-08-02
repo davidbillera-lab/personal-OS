@@ -16,7 +16,7 @@ function clientIp(req: NextRequest): string {
 //   verifier, wrong resource.
 // - refresh_token: exchanges a valid (unrevoked, unexpired) refresh token for
 //   a new access token; the refresh token itself is returned unchanged
-//   (non-rotating â€” see lib/oauth.ts consumeRefreshToken). Rejects: missing
+//   (non-rotating — see lib/oauth.ts consumeRefreshToken). Rejects: missing
 //   params, unknown/expired/revoked token, client mismatch.
 
 function tokenError(error: string, description: string, status = 400): NextResponse {
@@ -29,7 +29,7 @@ function tokenError(error: string, description: string, status = 400): NextRespo
 export async function POST(req: NextRequest) {
   const cfg = getOAuthConfig()
 
-  // 30 token requests / min / IP â€” generous for a real client, caps grinding.
+  // 30 token requests / min / IP — generous for a real client, caps grinding.
   if (!(await checkRateLimit(rateKey('token', clientIp(req)), 30, 60))) {
     return tokenError('rate_limited', 'too many token requests', 429)
   }
@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
 
     const result = await consumeRefreshToken(refreshToken, clientId)
     if ('code' in result) {
-      // Structured error from consumeRefreshToken â€” server_error maps to 500,
+      // Structured error from consumeRefreshToken — server_error maps to 500,
       // every invalid_grant variant to 400.
       return tokenError(result.code, result.message, result.code === 'server_error' ? 500 : 400)
     }
@@ -125,4 +125,3 @@ export async function POST(req: NextRequest) {
     { headers: { 'Cache-Control': 'no-store', Pragma: 'no-cache' } }
   )
 }
-
