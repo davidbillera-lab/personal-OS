@@ -446,3 +446,15 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 **Open items:** (1) **Alias-pin is a live recurring hazard** — the git-main alias must be manually repointed after every `main` deploy or ChatGPT silently runs stale code. Permanent fix = auto-promote step in CI, or point ChatGPT's issuer at a stable production alias instead of the branch alias. (2) **Voice-out is a ChatGPT platform limit** — Advanced Voice Mode doesn't support connectors, so the tool-enabled chat replies in text; true talk-back needs Read-Aloud / standard Voice mode, or a custom voice client against the MC MCP (tool-agnostic, deferred build). (3) Dispatcher still foreground-only (background-service setup pending). (4) `OAUTH_REFRESH_TOKEN_MAX_TTL` unset in prod → the 1-year cap uses the code default; set it explicitly if a different ceiling is ever wanted.
 **Made by:** operator + agent (Claude); sliding-window refresh design by Codex
 
+---
+
+### 2026-08-02 - Jarvis Liaison uses a fail-safe submitted-state bridge and native Remote Voice
+
+**Decision:** Expanded the OAuth-gated ChatGPT Liaison from six to twelve narrowly scoped tools: safe project resolution, `mc_start_workflow`, workflow status/result reads, and pending-approval reads, while preserving the six legacy request tools. `mc_start_workflow` creates the `spec_build_qc_push` handoff as `status='submitted'`, `assigned_to='hermes'`, and `preferred_worker='hermes'`. It does not queue or claim execution. The Liaison MCP handshake now instructs ChatGPT to resolve project names from Mission Control, report only current evidence, re-read state before approval, and never equate a working-branch push with merge or deploy. Native paired ChatGPT Remote Voice is the mobile interface; a custom Realtime voice client remains deferred.
+
+**Reasoning:** The current v0 desktop dispatcher claims every `queued` request directly for Claude. Sending the new multi-agent workflow to `queued` would silently bypass the required Hermes planning and Claude repository-validation stages. Parking the handoff in the existing legal `submitted` state freezes a usable, backward-compatible contract while failing safely until Claude's planner-capable backend promotes it. The active ChatGPT surface remains the OAuth HTTP Liaison; the legacy local stdio MCP server was intentionally not widened because it does not implement the Liaison authorization boundary and is not the connected ChatGPT endpoint.
+
+**Consequence:** Voice can now resolve projects without guessing, create one idempotent durable Jarvis handoff, inspect evidence-backed progress/results, and discover approvals through the narrow Liaison. Until Claude implements and deploys the planning-stage transition, new Jarvis workflows intentionally remain `submitted` and no build starts. Existing `mc_submit_request` remains for backward compatibility but is explicitly documented as the legacy direct-queue path. No schema migration, deployment, merge, or production workflow enablement occurred in this Codex build.
+
+**Made by:** Codex
+

@@ -3,6 +3,12 @@ import { decrypt, encrypt } from '@/lib/crypto'
 import { fetchGitHubDiff } from '@/lib/github'
 import { runCodexQC, rerunCodexQCOnSpec } from '@/app/(app)/projects/[id]/actions'
 import { captureToVault } from '@/lib/vault'
+import {
+  buildWorkflowRequestText,
+  JARVIS_WORKFLOW_TYPE,
+  workflowTitle,
+  workflowTypeFromRequestText,
+} from '@/lib/liaison-workflows'
 
 // 'read' = safe to expose to low-trust clients (e.g. a phone connector).
 // 'write' = mutates state OR returns secrets (mc_get_credential); full token only.
@@ -34,6 +40,12 @@ export const LIAISON_TOOLS = new Set<string>([
   'mc_whats_stalled',
   'mc_get_result',
   'mc_respond_approval',
+  'mc_list_projects',
+  'mc_get_project_summary',
+  'mc_start_workflow',
+  'mc_get_workflow_status',
+  'mc_list_pending_approvals',
+  'mc_get_workflow_result',
 ])
 
 export interface McpTool {
@@ -267,7 +279,7 @@ export const MCP_TOOLS: McpTool[] = [
   },
   {
     name: 'mc_submit_request',
-    description: 'Submit a request into the Mission Control queue for a worker (Hermes/Claude) to pick up. Creates a queue record only — it never runs code, deploys, sends messages, or spends money. Returns a request_id to track it.',
+    description: 'Submit a legacy direct request into the Mission Control worker queue. Do NOT use this for the Hermes-plan, Claude-build, Codex-review route; use mc_start_workflow instead. Creates a queue record only — it never runs code, deploys, sends messages, or spends money.',
     scope: 'write',
     inputSchema: {
       type: 'object',
@@ -322,6 +334,83 @@ export const MCP_TOOLS: McpTool[] = [
       type: 'object',
       properties: { request_id: { type: 'string', description: 'The request_id to fetch the result for.' } },
       required: ['request_id'],
+    },
+  },
+  {
+    name: 'mc_list_projects',
+    description: 'List safe Mission Control project identifiers and concise status fields so a liaison can resolve a spoken project name without guessing. Never returns vault items or credentials.',
+    scope: 'read',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'string', description: 'Max projects to return (default 30, max 50).' },
+      },
+    },
+  },
+  {
+    name: 'mc_get_project_summary',
+    description: 'Get a redacted Mission Control project summary by exact project UUID. Use mc_list_projects first when the user spoke a project name; never guess the UUID.',
+    scope: 'read',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Exact project UUID returned by mc_list_projects.' },
+      },
+      required: ['project_id'],
+    },
+  },
+  {
+    name: 'mc_start_workflow',
+    description: 'Record a spec_build_qc_push workflow for one exact project. It enters submitted state for Hermes planning and DOES NOT claim work, run code, push, merge, or deploy. Returns a workflow/request ID for tracking.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id:       { type: 'string', description: 'Exact project UUID returned by mc_list_projects.' },
+        outcome:          { type: 'string', description: 'The concrete result David wants.' },
+        constraints:      { type: 'string', description: 'Optional scope, safety, timing, or implementation constraints.' },
+        title:            { type: 'string', description: 'Optional short workflow title.' },
+        priority:         { type: 'string', description: 'low | normal | high | urgent (default normal).' },
+        source:           { type: 'string', description: 'chatgpt_voice or chatgpt_text (default chatgpt_voice).' },
+        client_request_id:{ type: 'string', description: 'Strongly recommended idempotency key for voice retries.' },
+      },
+      required: ['project_id', 'outcome'],
+    },
+  },
+  {
+    name: 'mc_get_workflow_status',
+    description: 'Read the evidence-backed state of one Jarvis workflow, including stage, worker, progress, blocker, current attempt, reviewed SHA, and approval state. Call before reporting progress or accepting approval.',
+    scope: 'read',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: { workflow_id: { type: 'string', description: 'The workflow_id returned by mc_start_workflow.' } },
+      required: ['workflow_id'],
+    },
+  },
+  {
+    name: 'mc_list_pending_approvals',
+    description: 'List current Mission Control approvals requiring David. Returns exact workflow, attempt, action context, and reviewed SHA when available; never executes the action.',
+    scope: 'read',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'string', description: 'Max approvals to return (default 20, max 50).' },
+      },
+    },
+  },
+  {
+    name: 'mc_get_workflow_result',
+    description: 'Get the evidence-backed final result and artifacts for one Jarvis workflow. A non-completed workflow is returned as not complete; no result is inferred.',
+    scope: 'read',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: { workflow_id: { type: 'string', description: 'The workflow_id returned by mc_start_workflow.' } },
+      required: ['workflow_id'],
     },
   },
   // --- Worker interface (Phase 1) ---------------------------------------------
@@ -930,6 +1019,150 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
 
     if (error || !data) throw new Error(error?.message ?? 'Insert failed')
     return JSON.stringify({ id: data.id, name: data.name })
+  }
+
+  if (name === 'mc_list_projects') {
+    const parsedLimit = args.limit ? Math.min(Math.max(parseInt(args.limit, 10) || 30, 1), 50) : 30
+    const { data, error } = await supabase
+      .from('projects')
+      .select('id, name, slug, tier, protected, stage, status, next_action, blockers, last_update')
+      .order('tier', { ascending: true })
+      .order('name', { ascending: true })
+      .limit(parsedLimit)
+    if (error) throw new Error(error.message)
+    return JSON.stringify(data ?? [])
+  }
+
+  if (name === 'mc_get_project_summary') {
+    const { project_id } = args
+    if (!project_id) throw new Error('project_id is required')
+    const { data, error } = await supabase
+      .from('projects')
+      .select('id, name, slug, tier, protected, stage, status, description, repo_url, next_action, blockers, last_update')
+      .eq('id', project_id)
+      .single()
+    if (error || !data) throw new Error(`Project not found: ${project_id}`)
+    return JSON.stringify(data)
+  }
+
+  if (name === 'mc_start_workflow') {
+    const { project_id, constraints, client_request_id } = args
+    const outcome = args.outcome?.trim()
+    if (!project_id) throw new Error('project_id is required')
+    if (!outcome) throw new Error('outcome is required')
+    if (outcome.length > 4000) throw new Error('outcome too long (max 4000 chars)')
+    if ((constraints?.length ?? 0) > 4000) throw new Error('constraints too long (max 4000 chars)')
+
+    const { data: project, error: projectError } = await supabase
+      .from('projects').select('id, name, slug').eq('id', project_id).single()
+    if (projectError || !project) throw new Error(`Project not found: ${project_id}`)
+
+    const request_text = buildWorkflowRequestText(project, outcome, constraints)
+    const title = workflowTitle(outcome, args.title)
+    const priority = ['low', 'normal', 'high', 'urgent'].includes(args.priority ?? '') ? args.priority : 'normal'
+    const source = ['chatgpt_voice', 'chatgpt_text'].includes(args.source ?? '') ? args.source : 'chatgpt_voice'
+    const dupCols = 'id, status, created_at, assigned_to, project_id, request_text'
+
+    if (client_request_id) {
+      const { data: existing } = await supabase
+        .from('mc_requests').select(dupCols).eq('client_request_id', client_request_id).maybeSingle()
+      if (existing) {
+        if (workflowTypeFromRequestText(existing.request_text) !== JARVIS_WORKFLOW_TYPE) {
+          throw new Error('client_request_id already belongs to a non-Jarvis request')
+        }
+        return JSON.stringify({
+          workflow_id: existing.id, request_id: existing.id, workflow_type: JARVIS_WORKFLOW_TYPE,
+          status: existing.status, created_at: existing.created_at, assigned_to: existing.assigned_to,
+          project_id: existing.project_id, duplicate: true,
+          confirmation: 'Existing workflow returned (idempotent). No new execution was started.',
+        })
+      }
+    } else {
+      const twoMinAgo = new Date(Date.now() - 120_000).toISOString()
+      const { data: recent } = await supabase
+        .from('mc_requests').select(dupCols).eq('project_id', project_id).eq('request_text', request_text)
+        .gte('created_at', twoMinAgo).order('created_at', { ascending: false }).limit(1)
+      if (recent?.length) {
+        const existing = recent[0]
+        return JSON.stringify({
+          workflow_id: existing.id, request_id: existing.id, workflow_type: JARVIS_WORKFLOW_TYPE,
+          status: existing.status, created_at: existing.created_at, assigned_to: existing.assigned_to,
+          project_id: existing.project_id, duplicate: true,
+          confirmation: 'Duplicate voice workflow suppressed. No new execution was started.',
+        })
+      }
+    }
+
+    // Fail-safe bridge to Claude's planner-capable backend: the existing v0
+    // dispatcher claims only `queued`, so `submitted` cannot skip Hermes planning.
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .insert({
+        title, request_text, priority, preferred_worker: 'hermes', source,
+        created_by: actor, client_request_id: client_request_id ?? null,
+        status: 'submitted', assigned_to: 'hermes', project_id,
+        latest_progress: 'Workflow submitted; waiting for the Hermes planning stage.',
+      })
+      .select('id, status, created_at, assigned_to, project_id')
+      .single()
+    if (error || !data) throw new Error(error?.message ?? 'Workflow insert failed')
+    return JSON.stringify({
+      workflow_id: data.id, request_id: data.id, workflow_type: JARVIS_WORKFLOW_TYPE,
+      status: data.status, created_at: data.created_at, assigned_to: data.assigned_to,
+      project_id: data.project_id, duplicate: false,
+      confirmation: 'Workflow submitted for Hermes planning. No build, push, merge, or deployment has run.',
+    })
+  }
+
+  if (name === 'mc_get_workflow_status') {
+    const workflow_id = args.workflow_id
+    if (!workflow_id) throw new Error('workflow_id is required')
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .select('id, project_id, title, request_text, status, phase, assigned_to, latest_progress, blocker, approval_required, attempt_id, reviewed_sha, approved_by, approved_at, updated_at')
+      .eq('id', workflow_id).single()
+    if (error || !data) throw new Error(`Workflow not found: ${workflow_id}`)
+    return JSON.stringify({
+      workflow_id: data.id, workflow_type: workflowTypeFromRequestText(data.request_text), project_id: data.project_id,
+      title: data.title, status: data.status, phase: data.phase, assigned_to: data.assigned_to,
+      latest_progress: data.latest_progress, blocker: data.blocker,
+      approval_required: data.approval_required, attempt_id: data.attempt_id,
+      reviewed_sha: data.reviewed_sha, approved_by: data.approved_by,
+      approved_at: data.approved_at, updated_at: data.updated_at,
+    })
+  }
+
+  if (name === 'mc_list_pending_approvals') {
+    const parsedLimit = args.limit ? Math.min(Math.max(parseInt(args.limit, 10) || 20, 1), 50) : 20
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .select('id, project_id, title, request_text, status, phase, assigned_to, blocker, attempt_id, reviewed_sha, updated_at')
+      .eq('status', 'awaiting_approval').eq('approval_required', true)
+      .order('updated_at', { ascending: true }).limit(parsedLimit)
+    if (error) throw new Error(error.message)
+    return JSON.stringify((data ?? []).map(row => ({
+      workflow_id: row.id, workflow_type: workflowTypeFromRequestText(row.request_text), project_id: row.project_id,
+      title: row.title, status: row.status, phase: row.phase, assigned_to: row.assigned_to,
+      requested_action: row.blocker, attempt_id: row.attempt_id, reviewed_sha: row.reviewed_sha,
+      updated_at: row.updated_at,
+    })))
+  }
+
+  if (name === 'mc_get_workflow_result') {
+    const workflow_id = args.workflow_id
+    if (!workflow_id) throw new Error('workflow_id is required')
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .select('id, project_id, title, request_text, status, phase, result_summary, artifact_refs, latest_progress, reviewed_sha, completed_at, updated_at')
+      .eq('id', workflow_id).single()
+    if (error || !data) throw new Error(`Workflow not found: ${workflow_id}`)
+    return JSON.stringify({
+      workflow_id: data.id, workflow_type: workflowTypeFromRequestText(data.request_text), project_id: data.project_id,
+      title: data.title, status: data.status, phase: data.phase, completed: data.status === 'completed',
+      result_summary: data.result_summary, artifact_refs: data.artifact_refs,
+      latest_progress: data.latest_progress, reviewed_sha: data.reviewed_sha,
+      completed_at: data.completed_at, updated_at: data.updated_at,
+    })
   }
 
   if (name === 'mc_submit_request') {

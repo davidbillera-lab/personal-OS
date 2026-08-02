@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { callTool, toolsForScope, isToolAllowed } from '@/lib/mcp-tools'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { getOAuthConfig, verifyAccessToken, isOAuthConfigured, isTokenRevoked, checkRateLimit, rateKey } from '@/lib/oauth'
+import { LIAISON_INSTRUCTIONS } from '@/lib/liaison-workflows'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -109,6 +110,7 @@ export async function POST(req: NextRequest) {
         protocolVersion: version,
         capabilities: { tools: {} },
         serverInfo: { name: 'mission-control-liaison', version: '1.0.0' },
+        instructions: LIAISON_INSTRUCTIONS,
       },
       version
     )

@@ -256,12 +256,24 @@ async function main() {
   // 16. Real token: initialize echoes protocol version
   const init = await rpc(accessToken, 'initialize', { protocolVersion: '2025-11-25' })
   ok('initialize echoes protocolVersion 2025-11-25', init.status === 200 && init.json?.result?.protocolVersion === '2025-11-25')
+  ok('initialize supplies evidence-first Liaison instructions', /system of record/.test(init.json?.result?.instructions || '') && /never guess/.test(init.json?.result?.instructions || ''))
 
-  // 17. tools/list = exactly the 6 liaison tools (now includes mc_respond_approval)
+  // 17. tools/list = exactly the approved legacy + Jarvis Liaison tools
   const list = await rpc(accessToken, 'tools/list', {})
   const names = (list.json?.result?.tools || []).map(t => t.name).sort()
-  const expected = ['mc_get_request_status', 'mc_get_result', 'mc_list_recent_requests', 'mc_respond_approval', 'mc_submit_request', 'mc_whats_stalled'].sort()
-  ok('tools/list returns exactly the 6 liaison tools', JSON.stringify(names) === JSON.stringify(expected), names.join(','))
+  const expected = [
+    'mc_get_project_summary', 'mc_get_request_status', 'mc_get_result',
+    'mc_get_workflow_result', 'mc_get_workflow_status', 'mc_list_pending_approvals',
+    'mc_list_projects', 'mc_list_recent_requests', 'mc_respond_approval',
+    'mc_start_workflow', 'mc_submit_request', 'mc_whats_stalled',
+  ].sort()
+  ok('tools/list returns exactly the 12 approved Liaison tools', JSON.stringify(names) === JSON.stringify(expected), names.join(','))
+
+  const projects = await rpc(accessToken, 'tools/call', { name: 'mc_list_projects', arguments: { limit: '3' } })
+  const projectsText = projects.json?.result?.content?.[0]?.text || ''
+  let projectList = []
+  try { projectList = JSON.parse(projectsText) } catch { /* */ }
+  ok('mc_list_projects via liaison token → safe read succeeds', projects.status === 200 && !projects.json?.result?.isError && projectList.length > 0)
 
   // 18. Worker tool via liaison → 403
   const worker = await rpc(accessToken, 'tools/call', { name: 'mc_claim_request', arguments: { request_id: 'x', worker: 'claude' } })
@@ -281,6 +293,36 @@ async function main() {
   let requestId = null
   try { requestId = JSON.parse(submitText).request_id } catch { /* */ }
   ok('mc_submit_request via liaison token → success', submit.status === 200 && !!requestId, submitText.slice(0, 120))
+
+  // Jarvis workflow intake is durable but fail-safe: it stops at submitted so
+  // the current Claude-only dispatcher (queued-only) cannot bypass Hermes.
+  const workflowClientId = `oauth-jarvis-${b64url(randomBytes(6))}`
+  const workflowArgs = {
+    project_id: projectList[0]?.id,
+    outcome: '[oauth-facade-test] verify Jarvis workflow bridge — safe to delete',
+    constraints: 'Do not build, push, merge, or deploy.',
+    title: 'oauth-jarvis-test',
+    source: 'chatgpt_text',
+    client_request_id: workflowClientId,
+  }
+  const workflow = await rpc(accessToken, 'tools/call', { name: 'mc_start_workflow', arguments: workflowArgs })
+  const workflowText = workflow.json?.result?.content?.[0]?.text || ''
+  let workflowResult = {}
+  try { workflowResult = JSON.parse(workflowText) } catch { /* */ }
+  const workflowId = workflowResult.workflow_id || null
+  ok('mc_start_workflow → submitted to Hermes without execution', workflow.status === 200 && workflowResult.status === 'submitted' && workflowResult.assigned_to === 'hermes' && !!workflowId, workflowText.slice(0, 160))
+
+  const workflowRetry = await rpc(accessToken, 'tools/call', { name: 'mc_start_workflow', arguments: workflowArgs })
+  const workflowRetryText = workflowRetry.json?.result?.content?.[0]?.text || ''
+  let workflowRetryResult = {}
+  try { workflowRetryResult = JSON.parse(workflowRetryText) } catch { /* */ }
+  ok('mc_start_workflow retry → same idempotent workflow', workflowRetry.status === 200 && workflowRetryResult.duplicate === true && workflowRetryResult.workflow_id === workflowId, workflowRetryText.slice(0, 160))
+
+  const workflowStatus = await rpc(accessToken, 'tools/call', { name: 'mc_get_workflow_status', arguments: { workflow_id: workflowId } })
+  const workflowStatusText = workflowStatus.json?.result?.content?.[0]?.text || ''
+  let workflowStatusResult = {}
+  try { workflowStatusResult = JSON.parse(workflowStatusText) } catch { /* */ }
+  ok('mc_get_workflow_status → evidence preserves submitted gate', workflowStatus.status === 200 && workflowStatusResult.status === 'submitted' && workflowStatusResult.attempt_id == null && workflowStatusResult.workflow_type === 'spec_build_qc_push', workflowStatusText.slice(0, 160))
 
   // 22. Refresh grant: valid refresh token → new access token, SAME refresh
   // token returned unchanged (non-rotating by design — see lib/oauth.ts).
@@ -334,12 +376,15 @@ async function main() {
     await db.from('oauth_refresh_tokens').delete().in('client_id', createdClients)
     await db.from('oauth_auth_codes').delete().in('client_id', createdClients)
     await db.from('oauth_clients').delete().in('client_id', createdClients)
-    try { if (requestId) await db.from('mc_requests').delete().eq('id', requestId) } catch { /* best-effort */ }
+    try {
+      const requestIds = [requestId, workflowId].filter(Boolean)
+      if (requestIds.length) await db.from('mc_requests').delete().in('id', requestIds)
+    } catch { /* best-effort */ }
     const { count: leftTokens } = await db.from('oauth_refresh_tokens').select('token_hash', { count: 'exact', head: true }).in('client_id', createdClients)
     const { count: leftClients } = await db.from('oauth_clients').select('client_id', { count: 'exact', head: true }).in('client_id', createdClients)
     ok('cleanup: no seeded clients or refresh tokens remain', (leftTokens ?? 0) === 0 && (leftClients ?? 0) === 0, `tokens=${leftTokens} clients=${leftClients}`)
   } else if (!db) {
-    console.log(`  NOTE  seeded clients not auto-cleaned (no DB creds). Request row id ${requestId ?? 'n/a'} also left in place.`)
+    console.log(`  NOTE  seeded clients not auto-cleaned (no DB creds). Request rows ${[requestId, workflowId].filter(Boolean).join(', ') || 'n/a'} also left in place.`)
   }
 
   console.log(`\n${pass} passed, ${fail} failed\n`)
