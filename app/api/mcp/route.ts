@@ -8,13 +8,20 @@ export const runtime = 'nodejs' // needs Node crypto for the timing-safe token c
 // Append-only audit stamp for every tool call through this HTTP route. Records the
 // resolved actor, the tool, and whether it succeeded. Non-fatal: an audit failure
 // must never break the caller's tool response.
-async function logAudit(actor: string, tool: string, ok: boolean, error?: string) {
+async function logAudit(actor: string, tool: string, ok: boolean, error?: string, requestId?: string | null) {
   try {
     const supabase = createAdminSupabaseClient()
-    await supabase.from('mcp_audit_log').insert({ actor, tool, ok, error: error ?? null })
+    await supabase.from('mcp_audit_log').insert({ actor, tool, ok, error: error ?? null, request_id: requestId ?? null })
   } catch (err) {
     console.error('[mcp] audit log write failed (non-fatal):', err)
   }
+}
+
+function auditRequestId(args: Record<string, string | undefined>): string | null {
+  const value = args.request_id ?? args.workflow_id
+  return value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+    ? value
+    : null
 }
 
 const MCP_API_KEY = process.env.MCP_API_KEY
@@ -187,6 +194,7 @@ export async function POST(req: NextRequest) {
   if (method === 'tools/call') {
     const toolName = params?.name as string | undefined
     const toolArgs = (params?.arguments ?? {}) as Record<string, string | undefined>
+    const requestId = auditRequestId(toolArgs)
 
     if (!toolName) {
       await logAudit(actor, '(missing)', false, 'missing tool name')
@@ -197,19 +205,19 @@ export async function POST(req: NextRequest) {
     // it knows the name. Defense in depth beyond filtering tools/list. Logged as a
     // denied call so a read key probing a write tool leaves an audit trail.
     if (!isToolAllowed(toolName, scope)) {
-      await logAudit(actor, toolName, false, 'forbidden: out of scope')
+      await logAudit(actor, toolName, false, 'forbidden: out of scope', requestId)
       return forbidden(id, `Tool not permitted for this scope: ${toolName}`)
     }
 
     try {
       const text = await callTool(toolName, toolArgs, actor)
-      await logAudit(actor, toolName, true)
+      await logAudit(actor, toolName, true, undefined, requestId)
       return jsonrpcResult(id, {
         content: [{ type: 'text', text }],
       })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      await logAudit(actor, toolName, false, msg)
+      await logAudit(actor, toolName, false, msg, requestId)
       return jsonrpcResult(id, {
         content: [{ type: 'text', text: `Error: ${msg}` }],
         isError: true,

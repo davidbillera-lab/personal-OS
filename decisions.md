@@ -458,3 +458,15 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 **Made by:** Codex
 
+---
+
+### 2026-08-02 - Liaison queue operations remain policy-bound and request-audited
+
+**Decision:** Add five narrowly scoped OAuth Liaison tools: `mc_queue_status`, `mc_list_workers`, `mc_get_request`, `mc_assign_request`, and `mc_resume_request`. Assignment accepts only the fixed worker identities `hermes`, `claude`, and `codex-qc`. Resume is limited to blocked or failed requests; Jarvis workflows return to `submitted` under Hermes, while legacy work returns to `queued`. Awaiting-approval, completed, cancelled, active, and `auto-classifier:` safety-held requests cannot use resume to bypass their state gates. Add nullable request correlation to `mcp_audit_log` so `mc_get_request` can return request-specific MCP history from migration 024 forward. The Liaison receives an explicit request-column allowlist and audit event metadata without raw audit error strings.
+
+**Reasoning:** The Chief-of-Staff surface needs enough control to inspect the queue, understand ownership, retrieve a complete request record, route authorized work, and recover interrupted work. Those capabilities must not become generic worker mutation or a shortcut around Hermes planning, exact approvals, terminal states, merge, or deployment. Historical audit rows have no reliable request identity, so the API reports the correlation boundary instead of inferring an inaccurate history.
+
+**Consequence:** The Liaison contract grows from 12 to 17 tools without exposing credentials, vault writes, arbitrary workers, direct code execution, merge, or deployment. Migration 024 must be applied before deploying the route changes. Claude's initial FIX-FIRST review identified the classifier-hold bypass and request/audit overexposure; both were fixed, full verification passed, and Claude's re-QC approved release on 2026-08-03.
+
+**Made by:** Codex
+

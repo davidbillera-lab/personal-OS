@@ -6,6 +6,9 @@ import { captureToVault } from '@/lib/vault'
 import {
   buildWorkflowRequestText,
   JARVIS_WORKFLOW_TYPE,
+  LIAISON_WORKERS,
+  planRequestResume,
+  validateLiaisonAssignment,
   workflowTitle,
   workflowTypeFromRequestText,
 } from '@/lib/liaison-workflows'
@@ -36,7 +39,10 @@ export const ORCHESTRATOR_EXTRA_TOOLS = new Set<string>([
 export const LIAISON_TOOLS = new Set<string>([
   'mc_submit_request',
   'mc_get_request_status',
+  'mc_get_request',
   'mc_list_recent_requests',
+  'mc_queue_status',
+  'mc_list_workers',
   'mc_whats_stalled',
   'mc_get_result',
   'mc_respond_approval',
@@ -46,6 +52,8 @@ export const LIAISON_TOOLS = new Set<string>([
   'mc_get_workflow_status',
   'mc_list_pending_approvals',
   'mc_get_workflow_result',
+  'mc_assign_request',
+  'mc_resume_request',
 ])
 
 export interface McpTool {
@@ -306,6 +314,17 @@ export const MCP_TOOLS: McpTool[] = [
     },
   },
   {
+    name: 'mc_get_request',
+    description: 'Get allowlisted Mission Control request details plus its request-linked MCP audit trail. Audit correlation begins with the request-context migration; older audit calls cannot be attributed retroactively.',
+    scope: 'read',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: { request_id: { type: 'string', description: 'Exact Mission Control request UUID.' } },
+      required: ['request_id'],
+    },
+  },
+  {
     name: 'mc_list_recent_requests',
     description: 'List recent Mission Control requests (most recent first). Optionally filter by status. Concise fields only.',
     scope: 'read',
@@ -317,6 +336,20 @@ export const MCP_TOOLS: McpTool[] = [
         limit:  { type: 'string', description: 'Max rows to return (default 20, max 50).' },
       },
     },
+  },
+  {
+    name: 'mc_queue_status',
+    description: 'Summarize the Mission Control request queue by state, including total active work, attention-needed work, and the oldest active request. Does not mutate the queue.',
+    scope: 'read',
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'mc_list_workers',
+    description: 'List the fixed worker identities that the Liaison may assign, with their roles and capabilities. This is a policy allowlist, not a claim that a worker is currently online.',
+    scope: 'read',
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'mc_whats_stalled',
@@ -411,6 +444,32 @@ export const MCP_TOOLS: McpTool[] = [
       type: 'object',
       properties: { workflow_id: { type: 'string', description: 'The workflow_id returned by mc_start_workflow.' } },
       required: ['workflow_id'],
+    },
+  },
+  {
+    name: 'mc_assign_request',
+    description: 'Assign a non-terminal Mission Control request to one allowlisted worker without changing its state. Cannot bypass a pending approval or alter completed, failed, or cancelled work.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'string', description: 'Exact Mission Control request UUID.' },
+        worker: { type: 'string', description: 'One of hermes, claude, or codex-qc.' },
+      },
+      required: ['request_id', 'worker'],
+    },
+  },
+  {
+    name: 'mc_resume_request',
+    description: 'Resume blocked or failed work using fail-safe routing. Jarvis workflows return to submitted/Hermes planning; legacy requests return to the ordinary queue. Never resolves approvals, restarts terminal work, pushes, merges, or deploys.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'string', description: 'Exact blocked or failed Mission Control request UUID.' },
+        reason: { type: 'string', description: 'Short operator-provided reason for resuming the work.' },
+      },
+      required: ['request_id', 'reason'],
     },
   },
   // --- Worker interface (Phase 1) ---------------------------------------------
@@ -1227,6 +1286,30 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
     })
   }
 
+  if (name === 'mc_get_request') {
+    const { request_id } = args
+    if (!request_id) throw new Error('request_id is required')
+    const [{ data: request, error: requestError }, { data: audit, error: auditError }] = await Promise.all([
+      supabase
+        .from('mc_requests')
+        .select('id, title, status, assigned_to, priority, source, created_at, updated_at, latest_progress, blocker, request_text')
+        .eq('id', request_id)
+        .single(),
+      supabase
+        .from('mcp_audit_log')
+        .select('id, actor, tool, ok, created_at')
+        .eq('request_id', request_id)
+        .order('created_at', { ascending: true }),
+    ])
+    if (requestError || !request) throw new Error(`Request not found: ${request_id}`)
+    if (auditError) throw new Error('Request audit unavailable')
+    return JSON.stringify({
+      request,
+      audit_trail: audit ?? [],
+      audit_scope: 'Request-linked MCP calls from the audit-correlation migration forward; historical unlinked calls are not inferred.',
+    })
+  }
+
   if (name === 'mc_list_recent_requests') {
     const parsedLimit = args.limit ? Math.min(Math.max(parseInt(args.limit, 10) || 20, 1), 50) : 20
     let q = supabase
@@ -1240,6 +1323,42 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       request_id: r.id, title: r.title, status: r.status, priority: r.priority,
       assigned_to: r.assigned_to, created_at: r.created_at, updated_at: r.updated_at,
     })))
+  }
+
+  if (name === 'mc_queue_status') {
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .select('id, title, status, assigned_to, created_at, updated_at')
+      .order('created_at', { ascending: true })
+    if (error) throw new Error(error.message)
+
+    const counts: Record<string, number> = {}
+    for (const request of data ?? []) counts[request.status] = (counts[request.status] ?? 0) + 1
+    const terminal = new Set(['completed', 'failed', 'cancelled'])
+    const active = (data ?? []).filter(request => !terminal.has(request.status))
+    const attention = (data ?? []).filter(request => ['blocked', 'awaiting_approval', 'failed'].includes(request.status))
+    const oldest = active[0]
+    return JSON.stringify({
+      total: data?.length ?? 0,
+      active: active.length,
+      attention_needed: attention.length,
+      by_status: counts,
+      oldest_active: oldest ? {
+        request_id: oldest.id,
+        title: oldest.title,
+        status: oldest.status,
+        assigned_to: oldest.assigned_to,
+        created_at: oldest.created_at,
+        updated_at: oldest.updated_at,
+      } : null,
+    })
+  }
+
+  if (name === 'mc_list_workers') {
+    return JSON.stringify({
+      workers: LIAISON_WORKERS,
+      availability: 'Not reported by this tool; these are the only identities the Liaison may assign.',
+    })
   }
 
   if (name === 'mc_whats_stalled') {
@@ -1271,6 +1390,77 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       request_id: data.id, status: data.status, completed: data.status === 'completed',
       result_summary: data.result_summary, artifact_refs: data.artifact_refs,
       latest_progress: data.latest_progress, completed_at: data.completed_at,
+    })
+  }
+
+  if (name === 'mc_assign_request') {
+    const { request_id, worker } = args
+    if (!request_id || !worker) throw new Error('request_id and worker are required')
+    const allowedStates = ['submitted', 'queued', 'claimed', 'in_progress', 'blocked']
+    const { data: current, error: currentError } = await supabase
+      .from('mc_requests')
+      .select('status, request_text')
+      .eq('id', request_id)
+      .single()
+    if (currentError || !current) throw new Error(`Request not found: ${request_id}`)
+    if (!allowedStates.includes(current.status)) {
+      throw new Error(`Not allowed from status '${current.status}' (allowed: ${allowedStates.join(', ')})`)
+    }
+    const assignedWorker = validateLiaisonAssignment(current.status, current.request_text, worker)
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .update({ assigned_to: assignedWorker, updated_at: new Date().toISOString() })
+      .eq('id', request_id)
+      .eq('status', current.status)
+      .select('id, status, assigned_to')
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    if (!data) throw new Error('Request changed while assignment was being applied; fetch current status and retry')
+    return JSON.stringify({ request_id: data.id, status: data.status, assigned_to: data.assigned_to })
+  }
+
+  if (name === 'mc_resume_request') {
+    const { request_id } = args
+    const reason = args.reason?.trim()
+    if (!request_id || !reason) throw new Error('request_id and reason are required')
+    if (reason.length > 1000) throw new Error('reason too long (max 1000 chars)')
+
+    const { data: current, error: currentError } = await supabase
+      .from('mc_requests')
+      .select('status, request_text, blocker')
+      .eq('id', request_id)
+      .single()
+    if (currentError || !current) throw new Error(`Request not found: ${request_id}`)
+    const plan = planRequestResume(current.status, current.request_text, current.blocker)
+    const resumedAt = new Date().toISOString()
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .update({
+        ...plan,
+        blocker: null,
+        approval_required: false,
+        approved_by: null,
+        approved_at: null,
+        attempt_id: null,
+        reviewed_sha: null,
+        workspace_ref: null,
+        latest_progress: `Resumed by ${actor}: ${reason}`,
+        completed_at: null,
+        updated_at: resumedAt,
+      })
+      .eq('id', request_id)
+      .eq('status', current.status)
+      .select('id, status, assigned_to, preferred_worker, latest_progress, updated_at')
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    if (!data) throw new Error('Request changed while resume was being applied; fetch current status and retry')
+    return JSON.stringify({
+      request_id: data.id,
+      status: data.status,
+      assigned_to: data.assigned_to,
+      preferred_worker: data.preferred_worker,
+      latest_progress: data.latest_progress,
+      updated_at: data.updated_at,
     })
   }
 

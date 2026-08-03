@@ -262,12 +262,14 @@ async function main() {
   const list = await rpc(accessToken, 'tools/list', {})
   const names = (list.json?.result?.tools || []).map(t => t.name).sort()
   const expected = [
-    'mc_get_project_summary', 'mc_get_request_status', 'mc_get_result',
+    'mc_assign_request', 'mc_get_project_summary', 'mc_get_request',
+    'mc_get_request_status', 'mc_get_result',
     'mc_get_workflow_result', 'mc_get_workflow_status', 'mc_list_pending_approvals',
-    'mc_list_projects', 'mc_list_recent_requests', 'mc_respond_approval',
+    'mc_list_projects', 'mc_list_recent_requests', 'mc_list_workers',
+    'mc_queue_status', 'mc_respond_approval', 'mc_resume_request',
     'mc_start_workflow', 'mc_submit_request', 'mc_whats_stalled',
   ].sort()
-  ok('tools/list returns exactly the 12 approved Liaison tools', JSON.stringify(names) === JSON.stringify(expected), names.join(','))
+  ok('tools/list returns exactly the 17 approved Liaison tools', JSON.stringify(names) === JSON.stringify(expected), names.join(','))
 
   const projects = await rpc(accessToken, 'tools/call', { name: 'mc_list_projects', arguments: { limit: '3' } })
   const projectsText = projects.json?.result?.content?.[0]?.text || ''

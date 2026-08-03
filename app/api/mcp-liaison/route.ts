@@ -19,13 +19,26 @@ const SCOPE = 'liaison' as const
 const ACTOR = 'chatgpt-liaison'
 
 // Append-only audit stamp — mirrors /api/mcp. Non-fatal: never breaks a response.
-async function logAudit(tool: string, ok: boolean, error?: string) {
+async function logAudit(tool: string, ok: boolean, error?: string, requestId?: string | null) {
   try {
     const supabase = createAdminSupabaseClient()
-    await supabase.from('mcp_audit_log').insert({ actor: ACTOR, tool, ok, error: error ?? null })
+    await supabase.from('mcp_audit_log').insert({
+      actor: ACTOR,
+      tool,
+      ok,
+      error: error ?? null,
+      request_id: requestId ?? null,
+    })
   } catch (err) {
     console.error('[mcp-liaison] audit log write failed (non-fatal):', err)
   }
+}
+
+function auditRequestId(args: Record<string, string | undefined>): string | null {
+  const value = args.request_id ?? args.workflow_id
+  return value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+    ? value
+    : null
 }
 
 function jsonrpcResult(id: unknown, result: unknown, version: string) {
@@ -127,6 +140,7 @@ export async function POST(req: NextRequest) {
   if (method === 'tools/call') {
     const toolName = params?.name as string | undefined
     const toolArgs = (params?.arguments ?? {}) as Record<string, string | undefined>
+    const requestId = auditRequestId(toolArgs)
 
     if (!toolName) {
       await logAudit('(missing)', false, 'missing tool name')
@@ -135,7 +149,7 @@ export async function POST(req: NextRequest) {
     // Scope gate — defense in depth beyond the filtered tools/list. A liaison
     // token calling a worker/vault/credential tool is denied and audited.
     if (!isToolAllowed(toolName, SCOPE)) {
-      await logAudit(toolName, false, 'forbidden: out of scope')
+      await logAudit(toolName, false, 'forbidden: out of scope', requestId)
       return NextResponse.json(
         { jsonrpc: '2.0', id: id ?? null, error: { code: -32004, message: `Tool not permitted for this scope: ${toolName}` } },
         { status: 403 }
@@ -144,11 +158,11 @@ export async function POST(req: NextRequest) {
 
     try {
       const text = await callTool(toolName, toolArgs, ACTOR)
-      await logAudit(toolName, true)
+      await logAudit(toolName, true, undefined, requestId)
       return jsonrpcResult(id, { content: [{ type: 'text', text }] }, version)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      await logAudit(toolName, false, msg)
+      await logAudit(toolName, false, msg, requestId)
       return jsonrpcResult(id, { content: [{ type: 'text', text: `Error: ${msg}` }], isError: true }, version)
     }
   }
