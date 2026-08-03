@@ -6,12 +6,16 @@
 // mc_requests, same env/client pattern as dispatcher.mjs.
 
 import { createClient } from '@supabase/supabase-js'
-import { readFileSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
+
+// Same resolution as dispatcher.mjs's PAUSE_FILE — both scripts live in scripts/, so this
+// must resolve to the identical path for the kill-switch to work.
+const PAUSE_FILE = process.env.DISPATCHER_PAUSE_FILE || join(__dirname, '..', '.dispatcher-paused')
 
 // ---- .env.local bootstrap (mirrors dispatcher.mjs / mcp-server.mjs; repo root is one level up) ----
 try {
@@ -64,6 +68,8 @@ Commands:
   reject <id>              Simulate a voice rejection (awaiting_approval → blocked).
   list                     List recent rig-test requests (newest first).
   cleanup                  Delete all rig-test requests.
+  pause                    Engage the dispatcher kill-switch (writes .dispatcher-paused).
+  resume                   Release the dispatcher kill-switch (deletes .dispatcher-paused).
 `.trim())
 }
 
@@ -224,9 +230,27 @@ async function cmdCleanup(sb) {
   console.log(`Deleted ${count} rig-test request(s).`)
 }
 
+function cmdPause() {
+  writeFileSync(PAUSE_FILE, `paused via rig-test at ${nowISO()}\n`)
+  console.log(`Kill-switch ENGAGED — wrote ${PAUSE_FILE}`)
+  console.log('Dispatcher will halt (no claim, no build, no push) within one poll interval.')
+}
+
+function cmdResume() {
+  if (existsSync(PAUSE_FILE)) {
+    unlinkSync(PAUSE_FILE)
+    console.log(`Kill-switch RELEASED — removed ${PAUSE_FILE}`)
+  } else {
+    console.log(`Kill-switch already released (${PAUSE_FILE} not present)`)
+  }
+}
+
 async function main() {
   const [, , cmd, ...args] = process.argv
-  const commands = { seed: cmdSeed, status: cmdStatus, approve: cmdApprove, reject: cmdReject, list: cmdList, cleanup: cmdCleanup }
+  const commands = {
+    seed: cmdSeed, status: cmdStatus, approve: cmdApprove, reject: cmdReject, list: cmdList, cleanup: cmdCleanup,
+    pause: cmdPause, resume: cmdResume,
+  }
   const handler = commands[cmd]
   if (!handler) {
     usage()

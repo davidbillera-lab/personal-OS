@@ -83,3 +83,6 @@ builds/
 
 # Hermes local runtime state
 .hermes/
+
+# Dispatcher kill-switch flag (local runtime toggle, never committed)
+.dispatcher-paused

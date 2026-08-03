@@ -72,6 +72,19 @@ const SKIP_PERMISSIONS = process.env.DISPATCHER_SKIP_PERMISSIONS === '1' || proc
 const RUN_ONCE = process.env.DISPATCHER_ONCE === '1' || process.env.DISPATCHER_ONCE === 'true'
 const MAX_TICKS = process.env.DISPATCHER_MAX_TICKS ? Number(process.env.DISPATCHER_MAX_TICKS) : null
 
+// Kill-switch (operator emergency stop): while this file exists, tick() is a no-op —
+// no claim, no build, no push. Migration-free, instant, no restart. Toggle via
+// `node scripts/rig-test.mjs pause|resume`.
+const PAUSE_FILE = process.env.DISPATCHER_PAUSE_FILE || join(__dirname, '..', '.dispatcher-paused')
+let wasPaused = false
+function isPaused() {
+  const paused = existsSync(PAUSE_FILE)
+  if (paused && !wasPaused) console.log(`[dispatcher] PAUSED — kill-switch engaged (${PAUSE_FILE})`)
+  else if (!paused && wasPaused) console.log('[dispatcher] RESUMED — kill-switch released')
+  wasPaused = paused
+  return paused
+}
+
 const adapter = pickAdapter(EXECUTOR)
 const nowISO = () => new Date().toISOString()
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -299,6 +312,7 @@ async function faultRecovery(sb) {
 
 // ---- one tick ----
 async function tick(sb) {
+  if (isPaused()) return // skip every tick while paused; isPaused() logs the engage/release edge only
   const pushable = await findPushable(sb)
   if (pushable) { await gatedPush(sb, pushable); return } // path B before path A
   const claimed = await claimOne(sb)
