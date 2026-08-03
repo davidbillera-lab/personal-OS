@@ -44,3 +44,31 @@ export async function notifyAwaitingApproval(params = {}) {
 
   return { sent: true }
 }
+
+// Sent when the ops-classifier auto-holds a claimed request instead of building it.
+// Same no-throw / config-guard pattern as notifyAwaitingApproval above.
+export async function notifyClassifierHold(params = {}) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN
+  const chatId = process.env.TELEGRAM_CHAT_ID
+  if (!botToken || !chatId) {
+    const missing = [!botToken && 'TELEGRAM_BOT_TOKEN', !chatId && 'TELEGRAM_CHAT_ID'].filter(Boolean)
+    console.error('telegram-notify: missing config', missing)
+    return { sent: false, reason: 'not configured' }
+  }
+
+  const { id, title, category } = params
+  const text = `⚠️ MC auto-held request ${v(id)} ("${v(title)}") — flagged ${v(category)}. Review in Mission Control; not built.`
+
+  const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+  })
+
+  if (!resp.ok) {
+    console.error('telegram-notify: send failed', resp.status)
+    return { sent: false, reason: `telegram ${resp.status}` }
+  }
+
+  return { sent: true }
+}

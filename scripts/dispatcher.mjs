@@ -27,8 +27,9 @@ import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve } from 'path'
 import crypto from 'crypto'
-import { notifyAwaitingApproval } from './lib/telegram-notify.mjs'
+import { notifyAwaitingApproval, notifyClassifierHold } from './lib/telegram-notify.mjs'
 import { pickAdapter } from './lib/claude-executor-adapter.mjs'
+import { classifyOps } from './lib/ops-classifier.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -118,8 +119,30 @@ async function claimOne(sb) {
   return claimed
 }
 
+// ---- Path A: ops-content safety check (blocklist — build unless flagged dangerous) ----
+// Runs on every claimed row BEFORE the executor is invoked. Flagged ⇒ hold for operator
+// review, no build, no push. See lib/ops-classifier.mjs for the rule set + caveats.
+async function classifierGate(sb, row) {
+  const verdict = classifyOps(`${row.title ?? ''}\n${row.request_text}`)
+  if (!verdict.flagged) {
+    console.log(`[classifier] passed ${row.id}`)
+    return false
+  }
+  console.log(`[classifier] HELD ${row.id} category=${verdict.category} matched="${verdict.matched}"`)
+  const blocker = clip(`auto-classifier: ${verdict.category} — held for operator review (matched: ${verdict.matched})`)
+  await sb.from('mc_requests')
+    .update({ status: 'blocked', phase: null, blocker, updated_at: nowISO() })
+    .eq('id', row.id).eq('status', 'claimed')
+  await logAudit(sb, 'dispatcher.classifier_blocked', false, verdict.category)
+  const ping = await notifyClassifierHold({ id: row.id, title: row.title || clip(row.request_text, 40), category: verdict.category })
+  console.log(`[classifier] ping ${JSON.stringify(ping)}`)
+  return true
+}
+
 // ---- Path A: build attempt via adapter ----
 async function runAttempt(sb, row) {
+  if (await classifierGate(sb, row)) return
+
   const attemptId = row.attempt_id
   const workspace = resolve(BUILDS_DIR, row.id, attemptId)
   const branch = branchFor(row.id)
