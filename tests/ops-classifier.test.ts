@@ -52,4 +52,42 @@ describe('classifyOps', () => {
       expect(result.flagged).toBe(false)
     })
   })
+
+  describe('allows read-only cost analysis but holds authorized changes', () => {
+    it('allows a read-only spend/cost report', () => {
+      const result = classifyOps(
+        'Analyze and report FlipRadar monthly operational spend. Read-only: do not make any changes.'
+      )
+      expect(result.flagged).toBe(false)
+      expect(result.category).toBeNull()
+      expect(result.matched).toBeNull()
+    })
+
+    it('holds a billing/purchase authorization as spend', () => {
+      const result = classifyOps(
+        'Authorize the purchase of additional API quota and update the billing plan.'
+      )
+      expect(result.flagged).toBe(true)
+      expect(result.category).toBe('spend')
+    })
+
+    it('holds a credential/secret change as secrets', () => {
+      const result = classifyOps(
+        'Rotate the FlipRadar API credentials and update the stored secret.'
+      )
+      expect(result.flagged).toBe(true)
+      expect(result.category).toBe('secrets')
+    })
+
+    it('still flags a bare mention with no read-only intent', () => {
+      const result = classifyOps('charge the customer')
+      expect(result.flagged).toBe(true)
+      expect(result.category).toBe('spend')
+    })
+
+    it('allows a bare mention when read-only intent is stated', () => {
+      const result = classifyOps('analyze our spend, read-only')
+      expect(result.flagged).toBe(false)
+    })
+  })
 })

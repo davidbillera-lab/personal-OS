@@ -72,15 +72,47 @@ const RULES = [
   { category: 'destructive', pattern: /delete .*(database|table|repo|project|production)/i },
 ]
 
+// Categories that MAY be exempted when the request is read-only. Every other
+// category (live-deploy, dns-domain, infra-account, protected-git,
+// external-comms, destructive) is hard and can never be suppressed.
+const SUPPRESSIBLE = new Set(['spend', 'secrets'])
+
+const READ_ONLY_INTENT_PATTERN = /\b(measure|analyz(e|ing)|analys(e|ing)|estimate|report|forecast|calculate|review|audit|assess|evaluat(e|ing)|summariz(e|ing)|summaris(e|ing))\b|\bcost analysis\b|\bread[ -]only\b|\bdo not (make )?chang|\bdon't change|\bno changes\b|\bwithout chang|\bprohibits chang/i
+
+const MUTATION_VERB_PATTERN = /\b(purchase|buy|pay|charge|refund|bill(ing)?|authoriz(e|ing)|authoris(e|ing)|approve|subscribe|upgrade|downgrade|increase|decrease|raise|lower|set|change|modify|update|edit|add|remove|delete|rotate|revoke|issue|provision|deploy|migrate|enable|disable|cancel|schedule|reschedule|quota)\b/i
+
+/**
+ * hasReadOnlyIntent(text) → true if the text contains an affirmative
+ * analysis/read-only signal (e.g. "analyze", "report", "read-only",
+ * "do not make changes").
+ */
+function hasReadOnlyIntent(text) {
+  return READ_ONLY_INTENT_PATTERN.test(text)
+}
+
+/**
+ * hasMutationVerb(text) → true if the text contains any authorization,
+ * mutation, or action signal (e.g. "purchase", "update", "deploy").
+ */
+function hasMutationVerb(text) {
+  return MUTATION_VERB_PATTERN.test(text)
+}
+
 /**
  * classifyOps(text) → { flagged, category, matched }
  * Scans text against the curated blocklist above and returns the FIRST match.
+ * A match in a SUPPRESSIBLE category (spend, secrets) is skipped — scanning
+ * continues — when the text has read-only intent AND no mutation verb.
+ * Hard categories are never suppressed.
  */
 export function classifyOps(text) {
   const input = String(text ?? '')
+  const readOnlyExempt = hasReadOnlyIntent(input) && !hasMutationVerb(input)
   for (const { category, pattern } of RULES) {
     const m = input.match(pattern)
-    if (m) return { flagged: true, category, matched: m[0] }
+    if (!m) continue
+    if (SUPPRESSIBLE.has(category) && readOnlyExempt) continue
+    return { flagged: true, category, matched: m[0] }
   }
   return { flagged: false, category: null, matched: null }
 }
