@@ -75,7 +75,7 @@ const RULES = [
 // Categories that MAY be exempted when the request is read-only. Every other
 // category (live-deploy, dns-domain, infra-account, protected-git,
 // external-comms, destructive) is hard and can never be suppressed.
-const SUPPRESSIBLE = new Set(['spend', 'secrets'])
+const SUPPRESSIBLE = new Set(['spend'])
 
 const READ_ONLY_INTENT_PATTERN = /\b(measure|analyz(e|ing)|analys(e|ing)|estimate|report|forecast|calculate|review|audit|assess|evaluat(e|ing)|summariz(e|ing)|summaris(e|ing))\b|\bcost analysis\b|\bread[ -]only\b|\bdo not (make )?chang|\bdon't change|\bno changes\b|\bwithout chang|\bprohibits chang/i
 
