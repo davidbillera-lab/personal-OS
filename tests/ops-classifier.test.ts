@@ -97,5 +97,45 @@ describe('classifyOps', () => {
       const result = classifyOps('analyze our spend, read-only')
       expect(result.flagged).toBe(false)
     })
+
+    it('allows a read-only report mentioning lower-cost and break-even', () => {
+      const result = classifyOps(
+        'Analyze and report FlipRadar monthly operational spend, including lower-cost alternatives and a break-even price. Read-only, do not make changes.'
+      )
+      expect(result.flagged).toBe(false)
+    })
+
+    it('allows a read-only audit mentioning deployment cadence', () => {
+      const result = classifyOps(
+        'Audit FlipRadar production costs and deployment cadence for one scheduled daily run. Evidence-based report only; do not make changes.'
+      )
+      expect(result.flagged).toBe(false)
+    })
+
+    it('holds ambiguous action words when they govern an object', () => {
+      // Read-only intent present ("Review"), but an ambiguous action word
+      // governing an object ("increase the monthly") defeats the exemption.
+      const result = classifyOps('Review our spend, then increase the monthly budget and lower the price.')
+      expect(result.flagged).toBe(true)
+      expect(result.category).toBe('spend')
+    })
+
+    it('holds "deploy to production" as live-deploy', () => {
+      const result = classifyOps('deploy to production')
+      expect(result.flagged).toBe(true)
+      expect(result.category).toBe('live-deploy')
+    })
+
+    it('holds a bare credential rotation as secrets', () => {
+      const result = classifyOps('Rotate the FlipRadar API credentials.')
+      expect(result.flagged).toBe(true)
+      expect(result.category).toBe('secrets')
+    })
+
+    it('holds "merge to main" as protected-git', () => {
+      const result = classifyOps('merge to main')
+      expect(result.flagged).toBe(true)
+      expect(result.category).toBe('protected-git')
+    })
   })
 })

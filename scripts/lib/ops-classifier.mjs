@@ -73,13 +73,18 @@ const RULES = [
 ]
 
 // Categories that MAY be exempted when the request is read-only. Every other
-// category (live-deploy, dns-domain, infra-account, protected-git,
-// external-comms, destructive) is hard and can never be suppressed.
-const SUPPRESSIBLE = new Set(['spend'])
+// category (secrets, dns-domain, infra-account, protected-git, external-comms,
+// destructive) is hard and can never be suppressed.
+const SUPPRESSIBLE = new Set(['spend', 'live-deploy'])
 
 const READ_ONLY_INTENT_PATTERN = /\b(measure|analyz(e|ing)|analys(e|ing)|estimate|report|forecast|calculate|review|audit|assess|evaluat(e|ing)|summariz(e|ing)|summaris(e|ing))\b|\bcost analysis\b|\bread[ -]only\b|\bdo not (make )?chang|\bdon't change|\bno changes\b|\bwithout chang|\bprohibits chang/i
 
-const MUTATION_VERB_PATTERN = /\b(purchase|buy|pay|charge|refund|bill(ing)?|authoriz(e|ing)|authoris(e|ing)|approve|subscribe|upgrade|downgrade|increase|decrease|raise|lower|set|change|modify|update|edit|add|remove|delete|rotate|revoke|issue|provision|deploy|migrate|enable|disable|cancel|schedule|reschedule|quota)\b/i
+// Two-tier action detection. Tier 1 fires bare on unambiguous action verbs.
+// Tier 2 fires only when an ambiguous word is followed by an object/determiner,
+// so "lower-cost" / "break-even" / "billing plan" do not count as actions.
+const ACTION_WORDS = /\b(purchase|buy|refund|authoriz(e|es|ing)|authoris(e|es|ing)|approv(e|es|ing)|subscrib(e|es|ing)|unsubscrib(e|es|ing)|deploy(s|ing)?|redeploy|rotat(e|es|ing)|revok(e|es|ing)|provision(s|ing)?|migrat(e|es|ing))\b/i
+
+const ACTION_PHRASE = /\b(increase|decrease|raise|lower|set|add|update|modify|edit|change|remove|delete|enable|disable|cancel|charge|pay|bill|issue|schedule|reschedule)\s+(the|a|an|our|your|its|their|this|that|these|those|all|new|more|additional|another|\d+)\b/i
 
 /**
  * hasReadOnlyIntent(text) → true if the text contains an affirmative
@@ -91,23 +96,24 @@ function hasReadOnlyIntent(text) {
 }
 
 /**
- * hasMutationVerb(text) → true if the text contains any authorization,
- * mutation, or action signal (e.g. "purchase", "update", "deploy").
+ * hasAction(text) → true if the text contains an authorization/mutation/action
+ * signal: an unambiguous action word (Tier 1) OR an ambiguous word directly
+ * governing an object (Tier 2).
  */
-function hasMutationVerb(text) {
-  return MUTATION_VERB_PATTERN.test(text)
+function hasAction(text) {
+  return ACTION_WORDS.test(text) || ACTION_PHRASE.test(text)
 }
 
 /**
  * classifyOps(text) → { flagged, category, matched }
  * Scans text against the curated blocklist above and returns the FIRST match.
- * A match in a SUPPRESSIBLE category (spend, secrets) is skipped — scanning
- * continues — when the text has read-only intent AND no mutation verb.
+ * A match in a SUPPRESSIBLE category (spend, live-deploy) is skipped -- scanning
+ * continues -- when the text has read-only intent AND no action signal.
  * Hard categories are never suppressed.
  */
 export function classifyOps(text) {
   const input = String(text ?? '')
-  const readOnlyExempt = hasReadOnlyIntent(input) && !hasMutationVerb(input)
+  const readOnlyExempt = hasReadOnlyIntent(input) && !hasAction(input)
   for (const { category, pattern } of RULES) {
     const m = input.match(pattern)
     if (!m) continue
