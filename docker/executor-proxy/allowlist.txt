@@ -1,0 +1,17 @@
+# ============================================================================
+# THE EGRESS ALLOWLIST (C6-P3) — the ONLY hosts an unattended build can reach.
+# ============================================================================
+# One host regex per line, POSIX extended, anchored, case-insensitive.
+# Matched by tinyproxy against the CONNECT / request host. FilterDefaultDeny is
+# On, so anything not listed here is refused — including raw IP literals.
+#
+# Tighten or widen HERE and nowhere else, then: npm run executor:net (restarts
+# the proxy). Every entry needs a one-line justification. Do not add a host
+# speculatively — add it only after observing a build actually fail without it.
+
+# Claude Code's API. Without this the executor cannot run at all.
+^api\.anthropic\.com$
+
+# npm registry — `npm install` inside a build. NOTE: this is a real (accepted)
+# exfil channel; see handoff. Metadata + tarballs only, no CDN split today.
+^registry\.npmjs\.org$

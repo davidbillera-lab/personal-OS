@@ -11,7 +11,10 @@
     "sync:skills": "node scripts/sync-skills.mjs",
     "sync:codex-skills": "node scripts/sync-codex-skills.mjs",
     "test": "vitest run",
-    "executor:image": "docker build -t mc-executor:latest docker/executor"
+    "executor:image": "docker build -t mc-executor:latest docker/executor",
+    "executor:net": "node scripts/executor-net.mjs up",
+    "executor:net:status": "node scripts/executor-net.mjs status",
+    "executor:net:down": "node scripts/executor-net.mjs down"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.1",

@@ -226,11 +226,24 @@ export const claudeExecutorAdapter = {
 // NO host env crosses in. Host-side we still do git init, the deny-list (defense
 // in depth), SHA harvest and CodexQC — all after the container is gone.
 //
-// NOTE (C6-P2): network is still WIDE OPEN in this container. Egress lockdown is P3.
+// Egress (C6-P3): the container joins EXECUTOR_NET only, which is a Docker
+// `--internal` network — no route to the internet AT ALL. The single reachable
+// host on it is the allowlisting forward proxy, so the proxy is not a policy the
+// build can opt out of, it is the only wire that exists. The allowlist itself
+// lives in ONE file: docker/executor-proxy/allowlist.txt.
 const DOCKER_BIN = () => process.env.DOCKER_BIN || 'docker'
 const EXECUTOR_IMAGE = () => process.env.EXECUTOR_IMAGE || 'mc-executor:latest'
 const CONTAINER_WORKSPACE = '/workspace'
 const CONTAINER_CREDS = '/home/builder/.claude/.credentials.json'
+
+// Sandbox egress topology — shared with scripts/executor-net.mjs (single source).
+export const EXECUTOR_NET = 'mc-executor-net'
+export const EXECUTOR_EGRESS_NET = 'mc-executor-egress'
+export const EXECUTOR_NET_SUBNET = '172.31.250.0/24'
+export const EXECUTOR_PROXY_CONTAINER = 'mc-executor-proxy'
+export const EXECUTOR_PROXY_IMAGE = 'mc-executor-proxy:latest'
+export const EXECUTOR_PROXY_URL = `http://${EXECUTOR_PROXY_CONTAINER}:8888`
+const NET_SETUP_CMD = 'npm run executor:net'
 
 // Docker Desktop on Windows takes native `C:\path` sources; a POSIX-ified
 // `/c/path` is not a real path inside the WSL2 VM. resolve() gives us exactly
@@ -262,6 +275,34 @@ function preflight() {
   if (!existsSync(creds)) {
     throw new Error(`docker executor: no Claude credentials at ${creds} — run \`claude\` once on the host to authenticate.`)
   }
+
+  // --- egress boundary (C6-P3): every check FAILS CLOSED. There is deliberately
+  // no fallback to default-bridge networking; an unverifiable boundary is a
+  // no-build, never an open-network build.
+  const net = docker(['network', 'inspect', EXECUTOR_NET, '--format', '{{.Internal}}'])
+  if (net.status !== 0) {
+    throw new Error(`docker executor: egress network '${EXECUTOR_NET}' missing — create it with: ${NET_SETUP_CMD}`)
+  }
+  if ((net.stdout || '').trim() !== 'true') {
+    throw new Error(
+      `docker executor: network '${EXECUTOR_NET}' is NOT --internal, so the sandbox would have open egress. ` +
+      `Refusing to run. Fix with: npm run executor:net:down && ${NET_SETUP_CMD}`,
+    )
+  }
+  const proxy = docker(['inspect', '-f', '{{.State.Running}}|{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}', EXECUTOR_PROXY_CONTAINER])
+  if (proxy.status !== 0) {
+    throw new Error(`docker executor: proxy container '${EXECUTOR_PROXY_CONTAINER}' missing — start it with: ${NET_SETUP_CMD}`)
+  }
+  const [running, attached = ''] = (proxy.stdout || '').trim().split('|')
+  if (running !== 'true') {
+    throw new Error(`docker executor: proxy container '${EXECUTOR_PROXY_CONTAINER}' is not running — start it with: ${NET_SETUP_CMD}`)
+  }
+  if (!attached.split(/\s+/).includes(EXECUTOR_NET)) {
+    throw new Error(
+      `docker executor: proxy '${EXECUTOR_PROXY_CONTAINER}' is not attached to '${EXECUTOR_NET}' — ` +
+      `the sandbox would have no egress at all. Fix with: ${NET_SETUP_CMD}`,
+    )
+  }
   return { image, creds }
 }
 
@@ -279,8 +320,19 @@ export function buildDockerArgs({ workspace, creds, image, containerName, prompt
     '-v', `${toDockerMountPath(workspace)}:${CONTAINER_WORKSPACE}`,
     '-v', `${toDockerMountPath(creds)}:${CONTAINER_CREDS}:ro`,
     '-w', CONTAINER_WORKSPACE,
-    // Deliberately NO -e flags: zero host env crosses the boundary, and
-    // CLAUDECODE stays unset (recursion guard).
+    // Egress: an --internal network, so there is no route off this box except
+    // through the allowlisting proxy. The proxy vars below are a convenience for
+    // well-behaved clients (claude, npm) — NOT the control. A build that strips
+    // them just gets no network at all.
+    '--network', EXECUTOR_NET,
+    '-e', `HTTPS_PROXY=${EXECUTOR_PROXY_URL}`,
+    '-e', `https_proxy=${EXECUTOR_PROXY_URL}`,
+    '-e', `HTTP_PROXY=${EXECUTOR_PROXY_URL}`,
+    '-e', `http_proxy=${EXECUTOR_PROXY_URL}`,
+    '-e', 'NO_PROXY=localhost,127.0.0.1',
+    '-e', 'no_proxy=localhost,127.0.0.1',
+    // Still NO host env crosses the boundary — the six vars above are values we
+    // author here, not values read from process.env. CLAUDECODE stays unset.
     image,
     'claude', '-p', prompt, '--output-format', 'text',
   ]
