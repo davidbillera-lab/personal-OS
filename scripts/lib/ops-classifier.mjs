@@ -86,6 +86,34 @@ const ACTION_WORDS = /\b(purchase|buy|refund|authoriz(e|es|ing)|authoris(e|es|in
 
 const ACTION_PHRASE = /\b(increase|decrease|raise|lower|set|add|update|modify|edit|change|remove|delete|enable|disable|cancel|charge|pay|bill|issue|schedule|reschedule)\s+(the|a|an|our|your|its|their|this|that|these|those|all|new|more|additional|another|\d+)\b/i
 
+// Negation guard. Well-formed specs list what a build must NOT do ("do not
+// deploy", "never merge or deploy", "do not spend money"). A substring matcher
+// otherwise fires on those prohibitions — the safer the spec, the more it trips.
+// A matched term counts only when it is NOT governed by a preceding negator
+// within the same clause. Look back a short window; a clause boundary
+// (.!?;: or newline) between the negator and the term cancels the negation.
+const NEGATOR = /\b(do not|don't|does not|doesn't|did not|didn't|never|without|cannot|can't|won't|will not|would not|wouldn't|must not|mustn't|should not|shouldn't|shall not|not|no|avoid|refrain from|prohibit\w*|forbid\w*)\b/i
+const NEG_WINDOW = 64
+
+/** isNegatedAt(text, index) → true if the match at `index` is negated by a
+ *  preceding in-clause negator. */
+function isNegatedAt(text, index) {
+  const before = text.slice(Math.max(0, index - NEG_WINDOW), index)
+  return new RegExp(NEGATOR.source + '[^.!?;:\\n]*$', 'i').test(before)
+}
+
+/** firstUnnegatedMatch(text, pattern) → first non-negated match of pattern, or
+ *  null if every occurrence is negated (or none exist). */
+function firstUnnegatedMatch(text, pattern) {
+  const g = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g')
+  let m
+  while ((m = g.exec(text)) !== null) {
+    if (!isNegatedAt(text, m.index)) return m
+    if (m.index === g.lastIndex) g.lastIndex++ // guard against zero-width loops
+  }
+  return null
+}
+
 /**
  * hasReadOnlyIntent(text) → true if the text contains an affirmative
  * analysis/read-only signal (e.g. "analyze", "report", "read-only",
@@ -101,7 +129,7 @@ function hasReadOnlyIntent(text) {
  * governing an object (Tier 2).
  */
 function hasAction(text) {
-  return ACTION_WORDS.test(text) || ACTION_PHRASE.test(text)
+  return firstUnnegatedMatch(text, ACTION_WORDS) !== null || firstUnnegatedMatch(text, ACTION_PHRASE) !== null
 }
 
 /**
@@ -115,7 +143,7 @@ export function classifyOps(text) {
   const input = String(text ?? '')
   const readOnlyExempt = hasReadOnlyIntent(input) && !hasAction(input)
   for (const { category, pattern } of RULES) {
-    const m = input.match(pattern)
+    const m = firstUnnegatedMatch(input, pattern)
     if (!m) continue
     if (SUPPRESSIBLE.has(category) && readOnlyExempt) continue
     return { flagged: true, category, matched: m[0] }

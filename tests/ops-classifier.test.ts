@@ -138,4 +138,34 @@ describe('classifyOps', () => {
       expect(result.category).toBe('protected-git')
     })
   })
+
+  describe('negated safety boilerplate (relay envelopes)', () => {
+    it('does not flag a spec that forbids deploy/spend/send (all negated)', () => {
+      const result = classifyOps(
+        'Do not send messages, buy ads, spend money, deploy, change live copy, or access private customer data. ' +
+        'Delivery boundary: working-branch push only after exact attempt/SHA approval; never merge or deploy automatically.'
+      )
+      expect(result.flagged).toBe(false)
+      expect(result.category).toBeNull()
+    })
+
+    it('still holds a non-negated deploy instruction in a longer sentence', () => {
+      const result = classifyOps('First build the feature, then deploy the edge function to production.')
+      expect(result.flagged).toBe(true)
+      expect(result.category).toBe('live-deploy')
+    })
+
+    it('still holds a spec that genuinely reuses a stored credential (secrets)', () => {
+      const result = classifyOps(
+        'Reuse an existing securely stored Hermes bot credential only if it is already available through approved secret storage; never expose or commit the token.'
+      )
+      expect(result.flagged).toBe(true)
+      expect(result.category).toBe('secrets')
+    })
+
+    it('does not flag a negated credential mention when it is the only secret reference', () => {
+      const result = classifyOps('Build the UI component. Do not read or log any credential or token.')
+      expect(result.flagged).toBe(false)
+    })
+  })
 })
