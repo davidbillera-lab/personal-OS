@@ -17,6 +17,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs'
 import { join, dirname, resolve } from 'path'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
+import { sanitizeForMC } from './sanitize-result.mjs'
 
 // ---- resolve the real claude binary ----
 // On Windows, `claude` on PATH is an npm shim (claude.cmd/.ps1) that Node's spawnSync
@@ -139,7 +140,8 @@ export function runHostQc({ workspace, sha, timeoutMs = 300000 }) {
   const output = `${r.stdout || ''}\n${r.stderr || ''}`.trim()
   if (r.error || r.status !== 0) {
     const why = r.error ? (r.error.code || r.error.message) : `exit ${r.status}`
-    console.log(`[host-qc] unavailable (${why}): ${output.slice(0, 300)}`)
+    // QC output is model-authored text — sanitize before it lands in the pm2 log (C6-P5).
+    console.log(`[host-qc] unavailable (${why}): ${sanitizeForMC(output, { maxLen: 300 })}`)
     return { verdict: 'UNKNOWN', output }
   }
   // Prefer the report's explicit verdict line; a bare keyword anywhere in the prose is a

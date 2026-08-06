@@ -30,6 +30,7 @@ import crypto from 'crypto'
 import { notifyAwaitingApproval, notifyClassifierHold } from './lib/telegram-notify.mjs'
 import { pickAdapter } from './lib/claude-executor-adapter.mjs'
 import { classifyOps } from './lib/ops-classifier.mjs'
+import { sanitizeForMC } from './lib/sanitize-result.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -90,7 +91,10 @@ const adapter = pickAdapter(EXECUTOR)
 const nowISO = () => new Date().toISOString()
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const branchFor = (id) => `mc-build-${id}`
-const clip = (s, n = 480) => String(s ?? '').slice(0, n)
+// C6-P5: every value that leaves this process goes through here. clip() keeps its old
+// name and call sites, but now redacts secret-shaped strings before bounding length —
+// the build result is an outbound channel even with the container sandbox in place.
+const clip = (s, n = 480) => sanitizeForMC(s, { maxLen: n })
 
 function createAdminSupabaseClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -167,7 +171,8 @@ async function runAttempt(sb, row) {
   try {
     result = await adapter.launch({ workspace, request: row, env: process.env, timeoutMs: TIMEOUT_MS, skipPermissions: SKIP_PERMISSIONS })
   } catch (e) {
-    console.log(`[build] FAILED ${row.id}: ${e.message}`)
+    // Raw executor stderr — sanitize before it reaches the log OR mc_requests.blocker.
+    console.log(`[build] FAILED ${row.id}: ${clip(e.message)}`)
     await sb.from('mc_requests')
       .update({ status: 'failed', phase: null, blocker: clip(`build failed: ${e.message}`), updated_at: nowISO() })
       .eq('id', row.id).in('status', ['claimed', 'in_progress'])
@@ -187,7 +192,7 @@ async function runAttempt(sb, row) {
     .update({
       status: 'awaiting_approval', phase: 'review', approval_required: true,
       reviewed_sha: reviewedSha, workspace_ref: workspace,
-      latest_progress: `built; CodexQC ${qcVerdict}; commit ${reviewedSha}`,
+      latest_progress: clip(`built; CodexQC ${qcVerdict}; commit ${reviewedSha}`),
       blocker: clip(blocker), updated_at: nowISO(),
     })
     .eq('id', row.id).eq('status', 'claimed') // guard from-state
@@ -200,7 +205,7 @@ async function runAttempt(sb, row) {
   // Telegram ping — best-effort, never throws (no-ops if TELEGRAM_* absent).
   const ping = await notifyAwaitingApproval({
     id: row.id, title, attempt_id: attemptId,
-    summary: Array.isArray(commits) ? commits.join('; ') : String(commits ?? ''),
+    summary: clip(commits, 800), // commit messages are executor-authored — sanitize
     qcVerdict, repo: SANDBOX_REPO, branch, sha: reviewedSha, runtimeSec,
   })
   console.log(`[ping] ${JSON.stringify(ping)}`)

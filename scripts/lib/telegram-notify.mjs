@@ -6,7 +6,13 @@
 // Send pattern mirrors app/api/alerts/digest/route.ts: no parse_mode (plain
 // text so build/QC output can't break formatting), no retry.
 
+import { sanitizeForMC } from './sanitize-result.mjs'
+
 const v = (x) => (x === undefined || x === null || x === '' ? '—' : x)
+// C6-P5: Telegram is an outbound boundary in its own right. The dispatcher already
+// sanitizes per field; this is the backstop for any caller that doesn't. 3500 keeps us
+// inside Telegram's 4096-char message limit.
+const outbound = (text) => sanitizeForMC(text, { maxLen: 3500 })
 
 export async function notifyAwaitingApproval(params = {}) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN
@@ -18,7 +24,7 @@ export async function notifyAwaitingApproval(params = {}) {
   }
 
   const { id, title, attempt_id, summary, qcVerdict, repo, branch, sha, runtimeSec } = params
-  const text = [
+  const text = outbound([
     `🔔 Approval needed — ${v(title)}`,
     `Request: ${v(id)}`,
     `Attempt: ${v(attempt_id)}`,
@@ -29,7 +35,7 @@ export async function notifyAwaitingApproval(params = {}) {
     `Run time: ${v(runtimeSec)}s`,
     '',
     'Approve through ChatGPT Voice.',
-  ].join('\n')
+  ].join('\n'))
 
   const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: 'POST',
@@ -57,7 +63,7 @@ export async function notifyClassifierHold(params = {}) {
   }
 
   const { id, title, category } = params
-  const text = `⚠️ MC auto-held request ${v(id)} ("${v(title)}") — flagged ${v(category)}. Review in Mission Control; not built.`
+  const text = outbound(`⚠️ MC auto-held request ${v(id)} ("${v(title)}") — flagged ${v(category)}. Review in Mission Control; not built.`)
 
   const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: 'POST',
