@@ -304,7 +304,23 @@ const MCP_TOOLS = [
       required: ['name', 'value'],
     },
   },
+  {
+    name: 'mc_submit_plan',
+    description: 'Hermes deposits a planning artifact on its own submitted+assigned request. Sets phase to planned; never changes status, assignment, or approval fields, and can never produce a queued (executable) request.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'string', description: 'The submitted, hermes-assigned Mission Control request UUID.' },
+        plan: { type: 'string', description: 'The planning artifact text (max 32768 characters). Write-once — rejected if a plan is already stored.' },
+      },
+      required: ['request_id', 'plan'],
+    },
+  },
 ]
+
+// Hard size cap for a submitted planning artifact (mc_submit_plan) — matches
+// lib/mcp-tools.ts.
+const MC_SUBMIT_PLAN_MAX_LENGTH = 32768
 
 async function callTool(name, args) {
   const supabase = createAdminSupabaseClient()
@@ -723,6 +739,44 @@ async function callTool(name, args) {
 
     if (error || !data) throw new Error(error?.message ?? 'Insert failed')
     return JSON.stringify({ id: data.id, name: data.name })
+  }
+
+  if (name === 'mc_submit_plan') {
+    const { request_id, plan } = args
+    if (!request_id) throw new Error('request_id is required')
+    if (!plan || !plan.trim()) throw new Error('plan is required')
+    if (plan.length > MC_SUBMIT_PLAN_MAX_LENGTH) {
+      throw new Error(`plan exceeds max length of ${MC_SUBMIT_PLAN_MAX_LENGTH} characters`)
+    }
+
+    const { data: current, error: currentError } = await supabase
+      .from('mc_requests')
+      .select('status, assigned_to, plan')
+      .eq('id', request_id)
+      .single()
+    if (currentError || !current) throw new Error(`Request not found: ${request_id}`)
+    if (current.status !== 'submitted' || current.assigned_to !== 'hermes') {
+      throw new Error('Plan intake requires a submitted request assigned to hermes')
+    }
+    if (current.plan) throw new Error('plan already submitted')
+
+    const now = new Date().toISOString()
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .update({
+        plan,
+        phase: 'planned',
+        plan_submitted_at: now,
+        plan_by: 'full',
+        updated_at: now,
+      })
+      .eq('id', request_id)
+      .eq('status', 'submitted')
+      .select('id, phase, plan_submitted_at')
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    if (!data) throw new Error('Request changed while plan was being submitted; re-fetch and retry')
+    return JSON.stringify({ request_id: data.id, phase: data.phase, plan_submitted_at: data.plan_submitted_at })
   }
 
   throw new Error(`Unknown tool: ${name}`)

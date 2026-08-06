@@ -21,9 +21,11 @@ export type McpScope = 'read' | 'write'
 // 'read' is restricted to read-scoped tools; 'liaison' is the narrow ChatGPT
 // chief-of-staff surface — exactly the request-queue tools below, nothing else
 // (no vault, no credentials, no worker mutations). 'orchestrator' is Hermes's
-// dispatcher role: every read tool PLUS exactly two routing writes (claim +
-// reassign) — it can pick up and route a request, but never execute, complete,
-// fail, submit, or touch the vault/credentials. Execution stays with real workers.
+// dispatcher role: every read tool PLUS exactly three routing/planning writes
+// (claim + reassign + submit-plan) — it can pick up and route a request, and
+// deposit a planning artifact on its own submitted work, but never execute,
+// complete, fail, promote to queued, or touch the vault/credentials. Execution
+// stays with real workers.
 export type McpTokenScope = 'full' | 'read' | 'liaison' | 'orchestrator'
 
 // The only write tools an 'orchestrator' token adds on top of the read set.
@@ -31,6 +33,7 @@ export type McpTokenScope = 'full' | 'read' | 'liaison' | 'orchestrator'
 export const ORCHESTRATOR_EXTRA_TOOLS = new Set<string>([
   'mc_claim_request',
   'mc_reassign_request',
+  'mc_submit_plan',
 ])
 
 // The exact tool set a 'liaison' token may see and call. Deliberately tiny:
@@ -472,6 +475,19 @@ export const MCP_TOOLS: McpTool[] = [
       required: ['request_id', 'reason'],
     },
   },
+  {
+    name: 'mc_submit_plan',
+    description: 'Hermes deposits a planning artifact on its own submitted+assigned request. Sets phase to planned; never changes status, assignment, or approval fields, and can never produce a queued (executable) request.',
+    scope: 'write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'string', description: 'The submitted, hermes-assigned Mission Control request UUID.' },
+        plan: { type: 'string', description: 'The planning artifact text (max 32768 characters). Write-once — rejected if a plan is already stored.' },
+      },
+      required: ['request_id', 'plan'],
+    },
+  },
   // --- Worker interface (Phase 1) ---------------------------------------------
   // Full-key only (scope 'write'); NEVER exposed to the liaison. Operated by real
   // Claude/Codex sessions. Every call is state-machine-validated + audited.
@@ -626,6 +642,31 @@ async function transitionRequest(
     .single()
   if (uerr || !data) throw new Error(uerr?.message ?? 'Update failed')
   return data
+}
+
+// Hard size cap for a submitted planning artifact (mc_submit_plan). Kept as a
+// named export so the limit is documented in one place and testable.
+export const MC_SUBMIT_PLAN_MAX_LENGTH = 32768
+
+// Pure input check for mc_submit_plan's `plan` argument — no DB access, so it's
+// unit-testable on its own. Throws a clean Error; returns the validated plan.
+export function validatePlanArg(plan: string | undefined): string {
+  if (!plan || !plan.trim()) throw new Error('plan is required')
+  if (plan.length > MC_SUBMIT_PLAN_MAX_LENGTH) {
+    throw new Error(`plan exceeds max length of ${MC_SUBMIT_PLAN_MAX_LENGTH} characters`)
+  }
+  return plan
+}
+
+// Pure precondition + write-once check for mc_submit_plan, run against the
+// fetched mc_requests row. No DB access, so it's unit-testable on its own.
+export function validatePlanPrecondition(current: { status: string; assigned_to: string | null; plan?: string | null }): void {
+  if (current.status !== 'submitted' || current.assigned_to !== 'hermes') {
+    throw new Error('Plan intake requires a submitted request assigned to hermes')
+  }
+  if (current.plan) {
+    throw new Error('plan already submitted')
+  }
 }
 
 export async function callTool(name: string, args: ToolArgs, actor = 'system'): Promise<string> {
@@ -1462,6 +1503,39 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       latest_progress: data.latest_progress,
       updated_at: data.updated_at,
     })
+  }
+
+  if (name === 'mc_submit_plan') {
+    const { request_id, plan: rawPlan } = args
+    if (!request_id) throw new Error('request_id is required')
+    const plan = validatePlanArg(rawPlan)
+
+    const { data: current, error: currentError } = await supabase
+      .from('mc_requests')
+      .select('status, assigned_to, plan')
+      .eq('id', request_id)
+      .single()
+    if (currentError || !current) throw new Error(`Request not found: ${request_id}`)
+
+    validatePlanPrecondition(current)
+
+    const now = new Date().toISOString()
+    const { data, error } = await supabase
+      .from('mc_requests')
+      .update({
+        plan,
+        phase: 'planned',
+        plan_submitted_at: now,
+        plan_by: actor,
+        updated_at: now,
+      })
+      .eq('id', request_id)
+      .eq('status', 'submitted')
+      .select('id, phase, plan_submitted_at')
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    if (!data) throw new Error('Request changed while plan was being submitted; re-fetch and retry')
+    return JSON.stringify({ request_id: data.id, phase: data.phase, plan_submitted_at: data.plan_submitted_at })
   }
 
   if (name === 'mc_claim_request') {
