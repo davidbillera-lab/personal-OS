@@ -19,6 +19,8 @@ pm2 status                    # mc-dispatcher online
 2. `pm2 restart mc-dispatcher`  (loads the latest code + the flag)
 3. `pm2 save`
 
+(Windows PowerShell: run these on separate lines, or join with `;` — `&&` is a bash-ism and errors in PowerShell 5.1.)
+
 That's it. The dispatcher now, on any Realtime change or poll tick, claims the oldest `status='submitted' AND phase='planned' AND plan IS NOT NULL` row (after queued rows), transitions it to building, and builds **from the deposited plan**. CodexQC runs in-build; then it waits for your push approval.
 
 ## Verify
