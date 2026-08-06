@@ -68,8 +68,9 @@ export const mockExecutorAdapter = {
 }
 
 // ---- real adapter ----
-// Provisions an isolated push-denied workspace, stamps trust, injects OPENAI_API_KEY,
-// unsets CLAUDECODE, and runs headless Claude with a hard timeout. The workspace's
+// Provisions an isolated push-denied workspace, stamps trust, unsets CLAUDECODE, and runs
+// headless Claude with a hard timeout. The executor child holds ZERO secrets (C6-P1) — QC
+// runs host-side, after the child exits, on the diff the child committed. The workspace's
 // .claude/settings.json denies git push / gh / curl / rm — the build loop STRUCTURALLY
 // cannot push. Only the dispatcher (this adapter's caller) ever pushes, post-approval.
 const WORKSPACE_SETTINGS = {
@@ -105,6 +106,43 @@ function parseVerdict(output) {
   return anyMatch && anyMatch.length ? anyMatch[anyMatch.length - 1] : 'UNKNOWN'
 }
 
+// ---- host-side QC (C6-P1) ----
+// CodexQC used to run INSIDE the sandbox, which is why the OpenAI key was injected there.
+// It now runs here, on the host, AFTER the untrusted child has exited — that key never
+// enters childEnv. Report-only: the commit is reviewed, not auto-repaired.
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+
+function codexQcPath() {
+  const p = process.env.CODEX_QC_SCRIPT || join(homedir(), '.claude', 'skills', 'CodexQC', 'codex-qc.mjs')
+  return existsSync(p) ? p : null
+}
+
+// Review exactly the diff `sha` introduced. Fresh build workspaces usually have a single
+// commit (no parent), so fall back to the empty tree — `git diff <empty-tree> HEAD` is the
+// whole build. Never throws: a missing key or a QC failure returns UNKNOWN, not a dead build.
+export function runHostQc({ workspace, sha, timeoutMs = 300000 }) {
+  const script = codexQcPath()
+  if (!script) return { verdict: 'UNKNOWN', output: 'host QC skipped: codex-qc.mjs not found' }
+
+  let base
+  try { base = git(workspace, ['rev-parse', '--verify', '--quiet', `${sha}^`]) } catch { base = EMPTY_TREE }
+
+  // HOST env on purpose — this is where the OpenAI key legitimately lives.
+  const r = spawnSync('node', [script, '--base', base], {
+    cwd: workspace, env: process.env, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024,
+  })
+  const output = `${r.stdout || ''}\n${r.stderr || ''}`.trim()
+  if (r.error || r.status !== 0) {
+    const why = r.error ? (r.error.code || r.error.message) : `exit ${r.status}`
+    console.log(`[host-qc] unavailable (${why}): ${output.slice(0, 300)}`)
+    return { verdict: 'UNKNOWN', output }
+  }
+  // Prefer the report's explicit verdict line; a bare keyword anywhere in the prose is a
+  // false-RECONSIDER risk, and RECONSIDER fails the build.
+  const explicit = output.match(/\*\*Verdict:\*\*\s*(SHIP|FIX-FIRST|RECONSIDER)/)
+  return { verdict: explicit ? explicit[1] : parseVerdict(output), output }
+}
+
 export const claudeExecutorAdapter = {
   name: 'claude',
   async launch({ workspace, request, env, timeoutMs, skipPermissions }) {
@@ -116,29 +154,26 @@ export const claudeExecutorAdapter = {
     // 2. Stamp trust so headless Claude doesn't block on the trust dialog.
     stampTrust(workspace)
 
-    // 3. Minimal env — the executor is treated as untrusted. Pass only what claude + CodexQC
-    // need; NEVER the dispatcher's secrets (service-role key, GitHub/Telegram/MCP keys).
+    // 3. Minimal env — the executor is treated as untrusted and holds ZERO secrets.
+    // Only OS plumbing claude itself needs; NEVER any key (service-role, GitHub/Telegram/MCP,
+    // OpenAI). Nothing in this env is exfiltratable because nothing in it is sensitive.
     // If the rig's `claude` auth needs an env var (it authed via subscription in Phase 0, so
-    // likely not), add it to ALLOWED_ENV.
+    // likely not), add it to ALLOWED_ENV — and re-audit this comment if it is a secret.
     const ALLOWED_ENV = ['PATH','Path','SystemRoot','windir','TEMP','TMP','HOME','USERPROFILE','APPDATA','LOCALAPPDATA','HOMEDRIVE','HOMEPATH','LANG','LC_ALL','NUMBER_OF_PROCESSORS','OS','PATHEXT','COMSPEC']
     const childEnv = {}
     for (const k of ALLOWED_ENV) if (process.env[k] !== undefined) childEnv[k] = process.env[k]
-    if (process.env.OPENAI_API_KEY) childEnv.OPENAI_API_KEY = process.env.OPENAI_API_KEY
     // CLAUDECODE deliberately omitted (recursion guard must stay unset).
 
     // 4. Launch headless Claude with a hard timeout. Deny-list blocks push regardless.
     const task = request?.request_text || request?.title || 'the requested build'
     const shortMsg = (request?.title || task).slice(0, 60)
     const prompt = [
-      'Build this in the current empty git repo, then self-review and commit.',
+      'Build this in the current empty git repo, then commit it.',
       `Task: ${task}.`,
       'Steps: (1) implement it as minimal working files;',
       '(2) `git add -A`;',
-      '(3) run `node ~/.claude/skills/CodexQC/codex-qc.mjs --staged` and read the verdict;',
-      '(4) apply any Blocking/Should-fix items it raises;',
-      '(5) `git add -A` again;',
-      `(6) \`git commit -m "${shortMsg}"\`;`,
-      '(7) print the final CodexQC verdict word (SHIP/FIX-FIRST/RECONSIDER) ALONE on the LAST line.',
+      `(3) \`git commit -m "${shortMsg}"\`.`,
+      'Stay inside this workspace — do not read or write files outside it.',
       'DO NOT run git push or gh — you cannot, and must not try.',
     ].join(' ')
 
@@ -165,12 +200,11 @@ export const claudeExecutorAdapter = {
       throw new Error(`executor exited ${r.status}: ${(r.stderr || r.stdout || '').trim().slice(0, 400)}`)
     }
 
-    // 5. Harvest the reviewed commit.
-    const output = r.stdout || ''
-    const qcVerdict = parseVerdict(output)
+    // 5. Harvest the committed SHA, then QC it host-side (child has exited).
     let reviewedSha
     try { reviewedSha = git(workspace, ['rev-parse', 'HEAD']) } catch { reviewedSha = null }
     if (!reviewedSha) throw new Error('no commit produced by executor')
+    const { verdict: qcVerdict } = runHostQc({ workspace, sha: reviewedSha })
     if (qcVerdict === 'RECONSIDER') throw new Error('CodexQC verdict RECONSIDER — build not approvable')
     const commits = git(workspace, ['log', '--oneline']).split('\n').filter(Boolean)
     return { reviewedSha, qcVerdict, commits }
