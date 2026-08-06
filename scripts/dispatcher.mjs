@@ -17,9 +17,16 @@
 //   - Sandbox target is ALWAYS davidbillera-lab/mc-spike-test @ mc-build-<id>. Never a
 //     portfolio repo.
 //
-// DEBT (v0, flagged): event source is a 5s poll loop — Realtime (publication is ready)
-// is a deferred fast-follow. DB identity is the broad service-role key (scope-split
-// deferred). Timeout is the spend-cap stand-in until Phase-2 spend tracking lands.
+// Second-half relay additions (specs/2026-08-06-autonomous-relay-second-half.md):
+//   - Realtime: subscribes to mc_requests postgres_changes and schedules an immediate
+//     debounced tick on change, in addition to (never instead of) the 5s poll loop, which
+//     stays as the backstop if Realtime is unavailable for any reason.
+//   - Gap A1, GATED OFF by default (DISPATCHER_CLAIM_PLANNED): when on, and only after no
+//     queued row was found, the dispatcher may also claim a Hermes-deposited plan row
+//     (status='submitted' AND phase='planned' AND plan IS NOT NULL).
+//
+// DEBT (v0, flagged): DB identity is the broad service-role key (scope-split deferred).
+// Timeout is the spend-cap stand-in until Phase-2 spend tracking lands.
 
 import { createClient } from '@supabase/supabase-js'
 import { spawnSync } from 'child_process'
@@ -31,6 +38,7 @@ import { notifyAwaitingApproval, notifyClassifierHold } from './lib/telegram-not
 import { pickAdapter } from './lib/claude-executor-adapter.mjs'
 import { classifyOps } from './lib/ops-classifier.mjs'
 import { sanitizeForMC } from './lib/sanitize-result.mjs'
+import { isClaimablePlanned } from './lib/planned-claim.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -73,6 +81,16 @@ const SKIP_PERMISSIONS = process.env.DISPATCHER_SKIP_PERMISSIONS === '1' || proc
 // DISPATCHER_MAX_TICKS=N → loop N ticks then exit. Neither set → run forever.
 const RUN_ONCE = process.env.DISPATCHER_ONCE === '1' || process.env.DISPATCHER_ONCE === 'true'
 const MAX_TICKS = process.env.DISPATCHER_MAX_TICKS ? Number(process.env.DISPATCHER_MAX_TICKS) : null
+// Gap A1 (second-half relay), GATED OFF by default. Unset/false ⇒ dispatcher claims ONLY
+// status='queued' rows, byte-for-byte the same as before this flag existed — see claimOne()
+// and tick() below, where the planned-claim branch is guarded behind this flag and never
+// touches a phase='planned' row unless it is true. Flip on to let the dispatcher also claim
+// a Hermes-deposited plan (status='submitted' AND phase='planned' AND plan IS NOT NULL).
+const CLAIM_PLANNED = process.env.DISPATCHER_CLAIM_PLANNED === '1' || process.env.DISPATCHER_CLAIM_PLANNED === 'true'
+// Realtime event trigger (pure addition — the 5s poll loop below remains the backstop and
+// keeps working on its own if Realtime setup throws or the subscription never connects).
+// Debounce window: rapid-fire postgres_changes events collapse into a single tick.
+const REALTIME_DEBOUNCE_MS = Number(process.env.DISPATCHER_REALTIME_DEBOUNCE_MS || 300)
 
 // Kill-switch (operator emergency stop): while this file exists, tick() is a no-op —
 // no claim, no build, no push. Migration-free, instant, no restart. Toggle via
@@ -134,6 +152,39 @@ async function claimOne(sb) {
   if (!claimed) { console.log(`[claim] lost race on ${candidateId} (already claimed) — backing off`); return null }
   console.log(`[claim] ${claimed.id} attempt=${attemptId}`)
   await logAudit(sb, 'dispatcher.claim', true)
+  return claimed
+}
+
+// ---- Path A: atomic claim of a Hermes-deposited plan (Gap A1, GATED OFF by default) ----
+// Mirrors claimOne() exactly: select oldest eligible candidate, then a conditional UPDATE
+// guarded on the row's still-unclaimed from-state; 0 rows back ⇒ another worker won the
+// race, skip (no retry this tick). Only ever called from tick() when CLAIM_PLANNED is true
+// AND claimOne() found no queued row — queued rows are always preferred, preserving the
+// exact current ordering/behavior when this feature is off or idle.
+async function claimPlannedOne(sb) {
+  if (!CLAIM_PLANNED) return null // defense-in-depth; tick() already guards this before calling
+  const { data: candidates, error: selErr } = await sb
+    .from('mc_requests').select('*')
+    .eq('status', 'submitted').eq('phase', 'planned').not('plan', 'is', null)
+    .order('created_at', { ascending: true }).limit(1)
+  if (selErr) throw new Error(`claim(planned) select failed: ${selErr.message}`)
+  if (!candidates || candidates.length === 0) return null
+  const candidate = candidates[0]
+  // Belt-and-suspenders re-check against the pure eligibility rule (unit-tested in
+  // tests/planned-claim.test.ts) before touching the row.
+  if (!isClaimablePlanned(candidate, CLAIM_PLANNED)) return null
+  const attemptId = crypto.randomUUID()
+  const { data: claimed, error: updErr } = await sb
+    .from('mc_requests')
+    // Same target state as a queued claim: status='claimed', phase='building',
+    // assigned_to='claude', attempt_id set, updated_at bumped.
+    .update({ status: 'claimed', assigned_to: 'claude', phase: 'building', attempt_id: attemptId, updated_at: nowISO() })
+    .eq('id', candidate.id).eq('status', 'submitted').eq('phase', 'planned') // conditional: 0 rows ⇒ already claimed
+    .select('*').maybeSingle()
+  if (updErr) throw new Error(`claim(planned) update failed: ${updErr.message}`)
+  if (!claimed) { console.log(`[claim] lost race on planned ${candidate.id} (already claimed) — backing off`); return null }
+  console.log(`[claim] planned ${claimed.id} attempt=${attemptId}`)
+  await logAudit(sb, 'dispatcher.claim_planned', true)
   return claimed
 }
 
@@ -321,12 +372,67 @@ async function tick(sb) {
   if (isPaused()) return // skip every tick while paused; isPaused() logs the engage/release edge only
   const pushable = await findPushable(sb)
   if (pushable) { await gatedPush(sb, pushable); return } // path B before path A
-  const claimed = await claimOne(sb)
+  let claimed = await claimOne(sb)
+  // Gap A1, GATED OFF by default: claimOne() above is untouched, so queued rows are always
+  // tried first, exactly as before this feature existed. Only when no queued row was found
+  // AND CLAIM_PLANNED is true do we call claimPlannedOne() at all — with the flag off/unset,
+  // `&& CLAIM_PLANNED` is false, so claimPlannedOne() (and its phase='planned' query) is never
+  // invoked, making this branch provably unreachable in the default state.
+  if (!claimed && CLAIM_PLANNED) claimed = await claimPlannedOne(sb)
   if (claimed) await runAttempt(sb, claimed)
 }
 
 async function safeTick(sb) {
   try { await tick(sb) } catch (e) { console.error(`[tick] error: ${e.message}`) }
+}
+
+// ---- concurrency guard + Realtime event trigger (pure addition to the poll loop) ----
+// `ticking` makes sure only one tick ever runs at a time, whether it was woken by the poll
+// loop or by a Realtime event. guardedTick() is what BOTH the poll loop and the Realtime
+// handler call — never tick()/safeTick() directly — so there is one single gate.
+let ticking = false
+async function guardedTick(sb) {
+  if (ticking) { console.log('[tick] skip — a tick is already running'); return }
+  ticking = true
+  try { await safeTick(sb) } finally { ticking = false }
+}
+
+// Debounce: rapid-fire postgres_changes events (e.g. an insert immediately followed by an
+// update) collapse into a single guardedTick() call instead of one per event.
+let realtimeDebounceTimer = null
+function scheduleTickFromRealtime(sb) {
+  if (realtimeDebounceTimer) clearTimeout(realtimeDebounceTimer)
+  realtimeDebounceTimer = setTimeout(() => {
+    realtimeDebounceTimer = null
+    guardedTick(sb).catch((e) => console.error(`[realtime] guarded tick error: ${e.message}`))
+  }, REALTIME_DEBOUNCE_MS)
+}
+
+// Subscribing is a pure addition: on ANY failure here (network, auth, publication not
+// configured, client shape mismatch, etc.) we log and return — the 5s poll loop below never
+// depends on this succeeding and keeps running exactly as it always has.
+let realtimeChannel = null
+function setupRealtime(sb) {
+  try {
+    realtimeChannel = sb
+      .channel('mc-dispatcher')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'mc_requests' }, () => {
+        console.log('[realtime] mc_requests change received — scheduling a tick')
+        scheduleTickFromRealtime(sb)
+      })
+      .subscribe((status) => console.log(`[realtime] subscription status: ${status}`))
+    console.log('[realtime] subscribed to mc_requests postgres_changes (poll loop remains the backstop)')
+  } catch (e) {
+    console.error(`[realtime] setup failed — continuing on poll loop only: ${e.message}`)
+    realtimeChannel = null
+  }
+}
+
+function teardownRealtime(sb) {
+  if (realtimeDebounceTimer) { clearTimeout(realtimeDebounceTimer); realtimeDebounceTimer = null }
+  if (!realtimeChannel) return
+  try { sb.removeChannel(realtimeChannel) } catch (e) { console.error(`[realtime] teardown error (non-fatal): ${e.message}`) }
+  realtimeChannel = null
 }
 
 // ---- graceful shutdown ----
@@ -345,17 +451,21 @@ process.on('SIGTERM', () => requestShutdown('SIGTERM'))
 
 async function main() {
   const sb = createAdminSupabaseClient()
-  console.log(`[dispatcher] start executor=${EXECUTOR} poll=${POLL_MS}ms timeout=${TIMEOUT_MS}ms allowed=[${ALLOWED_REPOS.join(', ')}] remote=${SANDBOX_REMOTE || '(github default)'} skipPermissions=${SKIP_PERMISSIONS} once=${RUN_ONCE} maxTicks=${MAX_TICKS ?? '∞'}`)
+  console.log(`[dispatcher] start executor=${EXECUTOR} poll=${POLL_MS}ms timeout=${TIMEOUT_MS}ms allowed=[${ALLOWED_REPOS.join(', ')}] remote=${SANDBOX_REMOTE || '(github default)'} skipPermissions=${SKIP_PERMISSIONS} once=${RUN_ONCE} maxTicks=${MAX_TICKS ?? '∞'} claimPlanned=${CLAIM_PLANNED}`)
   await faultRecovery(sb)
-  if (RUN_ONCE) { await safeTick(sb); console.log('[dispatcher] ONCE complete — exiting'); return }
+  // RUN_ONCE is the deterministic single-tick test mode — a Realtime subscription would
+  // outlive that one tick for no benefit, so it's skipped there. Every other run mode gets it.
+  if (RUN_ONCE) { await guardedTick(sb); console.log('[dispatcher] ONCE complete — exiting'); return }
+  setupRealtime(sb)
   let ticks = 0
   while (!shuttingDown) {
-    await safeTick(sb)
+    await guardedTick(sb)
     ticks += 1
     if (MAX_TICKS && ticks >= MAX_TICKS) { console.log(`[dispatcher] reached maxTicks=${MAX_TICKS} — exiting`); break }
     if (shuttingDown) break
     await sleep(POLL_MS)
   }
+  teardownRealtime(sb)
   if (shuttingDown) console.log('[dispatcher] shutdown complete — exiting cleanly')
 }
 
