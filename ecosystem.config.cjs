@@ -46,7 +46,7 @@ module.exports = {
       // (2026-08-06). The classifier stays ON as the compensating control for the
       // residual inference-spend on the mounted token — do NOT relax it. Runbook:
       // docs/runbooks/go-live-autonomous-relay.md
-      DISPATCHER_CLAIM_PLANNED: '0',
+      DISPATCHER_CLAIM_PLANNED: '1', // ENABLED 2026-08-06 (go-live). Rollback: '0' + pm2 restart.
     },
   }],
 }
