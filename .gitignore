@@ -21,6 +21,10 @@ out/
 # Seed script secrets (local file expected, not committed)
 scripts/*.secrets.json
 
+# Executor proxy MITM CA — the PRIVATE key (key+cert bundle) must NEVER be committed.
+# Only the public cert (mitmproxy-ca-cert.pem / executor-proxy-ca.crt) is committed.
+docker/executor-proxy/ca/mitmproxy-ca.pem
+
 # Vercel local env previews
 .vercel/.env*
 
@@ -60,6 +64,10 @@ coverage/
 
 # Misc
 *.pem
+
+# Executor proxy MITM CA: keep the PUBLIC cert as a committed audit anchor (overrides
+# the *.pem rule above), but the private-key bundle stays ignored (rule near the top).
+!docker/executor-proxy/ca/mitmproxy-ca-cert.pem
 
 # Scaffold temp dir (can be deleted when Windows releases the handle)
 nextinit/

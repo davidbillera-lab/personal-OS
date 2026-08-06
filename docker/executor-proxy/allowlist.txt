@@ -2,8 +2,11 @@
 # THE EGRESS ALLOWLIST (C6-P3) — the ONLY hosts an unattended build can reach.
 # ============================================================================
 # One host regex per line, POSIX extended, anchored, case-insensitive.
-# Matched by tinyproxy against the CONNECT / request host. FilterDefaultDeny is
-# On, so anything not listed here is refused — including raw IP literals.
+#
+# NOTE (Case 7 fix): the proxy is now mitmproxy, not tinyproxy. The AUTHORITATIVE
+# allowlist lives in docker/executor-proxy/addon.py -> ALLOWED_HOSTS. This file is
+# kept as human-readable parity documentation; keep the two in sync. Deny-by-default
+# still holds: anything not listed is refused (403), including raw IP literals.
 #
 # Tighten or widen HERE and nowhere else, then: npm run executor:net (restarts
 # the proxy). Every entry needs a one-line justification. Do not add a host

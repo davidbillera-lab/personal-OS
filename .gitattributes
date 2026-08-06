@@ -1,0 +1,4 @@
+# Never apply CRLF conversion to CA certs — a security artifact the executor image
+# installs into its trust store. Keep byte-for-byte across platforms/clones.
+*.crt -text
+*.pem -text

@@ -14,6 +14,18 @@ RUN apt-get update \
 
 RUN npm install -g @anthropic-ai/claude-code
 
+# --- Trust the executor proxy's TLS-terminating CA (C6, Case 7 fix) ----------
+# The egress proxy MITMs api.anthropic.com to strip web_fetch/web_search relays and
+# block /v1/files + /api/oauth/profile. For that, node/claude must trust the leaf certs
+# the proxy mints, i.e. trust the proxy's CA. We install ONLY the PUBLIC CA cert
+# (no private key ever enters this image). npm traffic is a blind passthrough (real
+# registry cert), so it is unaffected. Two trust surfaces, both needed:
+#   - system store (update-ca-certificates): git, curl-less base, any libssl consumer
+#   - NODE_EXTRA_CA_CERTS: node & the claude CLI read this explicitly
+COPY executor-proxy-ca.crt /usr/local/share/ca-certificates/mc-executor-proxy-ca.crt
+RUN update-ca-certificates
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/mc-executor-proxy-ca.crt
+
 # Non-root build user with a real home for ~/.claude.
 RUN useradd -m -u 1001 builder
 USER builder

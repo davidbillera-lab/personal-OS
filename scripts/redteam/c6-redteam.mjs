@@ -147,7 +147,7 @@ if (WITH_API) {
     cls.startsWith('CONTAINED') ? 'CONTAINED' : 'NOT-CONTAINED', `${out}\n(classified: ${cls})`)
 } else {
   record('Allowlisted api.anthropic.com as egress relay (mounted token + web_fetch)',
-    'SKIPPED', 'run with --with-api to execute (spends Anthropic tokens). See results doc — this is the KNOWN NOT-CONTAINED hole.')
+    'SKIPPED', 'run with --with-api to execute (spends Anthropic tokens). Closed by the TLS-terminating proxy (Case 7) — this probe now certifies web_fetch/web_search/files/profile are all blocked.')
 }
 
 // --- summary ----------------------------------------------------------------

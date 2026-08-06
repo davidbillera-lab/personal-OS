@@ -40,6 +40,14 @@ function must(args, what) {
 }
 
 function up() {
+  // Ensure the stable MITM signing CA exists before building the proxy image (C6 Case 7).
+  // Idempotent: reuses an existing CA, only mints one if absent.
+  console.log('[executor-net] ensuring proxy CA (gen-ca) …')
+  const ca = spawnSync(process.execPath, [join(REPO, 'docker', 'executor-proxy', 'gen-ca.mjs')], {
+    encoding: 'utf8', stdio: 'inherit',
+  })
+  if (ca.status !== 0) throw new Error(`proxy CA generation failed (exit ${ca.status})`)
+
   console.log(`[executor-net] building ${EXECUTOR_PROXY_IMAGE} …`)
   must(['build', '-t', EXECUTOR_PROXY_IMAGE, join(REPO, 'docker', 'executor-proxy')], 'proxy image build')
 
