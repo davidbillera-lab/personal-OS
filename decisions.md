@@ -470,3 +470,27 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 **Made by:** Codex
 
+---
+
+### 2026-08-05 - Ops-classifier: read-only intent-gating, not bare-noun blocking
+
+**Decision:** The dispatcher's ops-classifier now distinguishes read-only analysis from action. Categories `spend` and `live-deploy` are suppressed (allowed) when the request shows affirmative read-only intent (measure/analyze/estimate/report/forecast/audit/"read-only"/"do not change") AND contains no action signal. Action detection is two-tier: unambiguous verbs fire bare (purchase, deploy, rotate, authorize…); ambiguous words (lower, set, increase, change…) fire only when governing an object ("lower **the** price", not "lower-cost"). `secrets` is NEVER suppressed. All other categories (dns-domain, infra-account, protected-git, external-comms, destructive) stay hard.
+
+**Reasoning:** The bare-noun blocklist false-positived read-only cost/audit requests that merely mention "spend"/"production". But `secrets` is the one category where read-only ≠ safe — "report the API keys, read-only" is itself exfiltration — so it stays always-held. `live-deploy` read-only *mentions* are safe to allow because analysis can't deploy (executor is sandboxed + push is host-gated). The classifier is a content heuristic, not the security boundary; that boundary is C6.
+
+**Consequence:** Of four blocked read-only FlipRadar cost requests, two auto-cleared; two remain held only because they contain "credential" (the preserved `secrets` safeguard) and can be operator-cleared by hand. The classifier stays front-line until C6 lands, then relaxes to defense-in-depth. Commits: fcd6396 → 6b3534 → b794704. 64/64 tests.
+
+**Made by:** David (policy) / Claude (implementation + independent verification)
+
+---
+
+### 2026-08-05 - C6 executor sandbox: full container boundary approved
+
+**Decision:** C6 (the executor sandbox) will be a full **OS-level container boundary**, not app-level hardening alone. The headless build executor runs in a locked, throwaway container per attempt: workspace-only mount, no host secrets, deny-by-default network egress (allowlist Anthropic + npm only). CodexQC moves host-side (removing the last secret, `OPENAI_API_KEY`, from the executor). A new `dockerClaudeExecutorAdapter` slots into the existing `pickAdapter` seam. Spec: `specs/2026-08-05-c6-executor-sandbox.md`.
+
+**Reasoning:** Today's deny-list is app-level (Claude enforcing its own permissions), `--dangerously-skip-permissions` nullifies it, and the injected `OPENAI_API_KEY` plus open `node` is a real exfil path. A container is a true boundary a confused/adversarial build cannot cross regardless of what the model decides. Only a real boundary lets us safely run the dispatcher always-on AND relax the classifier `secrets`/`live-deploy` categories to intent-gating.
+
+**Consequence:** Build proceeds in phases P1–P6 (de-secret → containerize → egress lockdown → retire skip-permissions → result sanitization → red-team verification). Gated on a Claude-auth-in-container spike (the one unknown). The dispatcher stays stopped and the classifier stays front-line until the red-team suite proves containment.
+
+**Made by:** David
+
