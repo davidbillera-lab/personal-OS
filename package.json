@@ -14,7 +14,9 @@
     "executor:image": "docker build -t mc-executor:latest docker/executor",
     "executor:net": "node scripts/executor-net.mjs up",
     "executor:net:status": "node scripts/executor-net.mjs status",
-    "executor:net:down": "node scripts/executor-net.mjs down"
+    "executor:net:down": "node scripts/executor-net.mjs down",
+    "redteam:c6": "node scripts/redteam/c6-redteam.mjs",
+    "redteam:c6:api": "node scripts/redteam/c6-redteam.mjs --with-api"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.1",
