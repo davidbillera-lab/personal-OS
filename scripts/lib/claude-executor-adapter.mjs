@@ -13,8 +13,9 @@
 
 import { spawnSync } from 'child_process'
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs'
-import { join, dirname } from 'path'
+import { join, dirname, resolve } from 'path'
 import { homedir } from 'os'
+import { randomUUID } from 'crypto'
 
 // ---- resolve the real claude binary ----
 // On Windows, `claude` on PATH is an npm shim (claude.cmd/.ps1) that Node's spawnSync
@@ -143,6 +144,23 @@ export function runHostQc({ workspace, sha, timeoutMs = 300000 }) {
   return { verdict: explicit ? explicit[1] : parseVerdict(output), output }
 }
 
+// Shared by both real adapters — the sandbox prompt is identical whether the child
+// runs on the host or in a container. Implement → git add -A → git commit. No QC
+// (that is host-side, post-exit) and no push (structurally impossible).
+export function buildPrompt(request) {
+  const task = request?.request_text || request?.title || 'the requested build'
+  const shortMsg = (request?.title || task).slice(0, 60)
+  return [
+    'Build this in the current empty git repo, then commit it.',
+    `Task: ${task}.`,
+    'Steps: (1) implement it as minimal working files;',
+    '(2) `git add -A`;',
+    `(3) \`git commit -m "${shortMsg}"\`.`,
+    'Stay inside this workspace — do not read or write files outside it.',
+    'DO NOT run git push or gh — you cannot, and must not try.',
+  ].join(' ')
+}
+
 export const claudeExecutorAdapter = {
   name: 'claude',
   async launch({ workspace, request, env, timeoutMs, skipPermissions }) {
@@ -165,17 +183,7 @@ export const claudeExecutorAdapter = {
     // CLAUDECODE deliberately omitted (recursion guard must stay unset).
 
     // 4. Launch headless Claude with a hard timeout. Deny-list blocks push regardless.
-    const task = request?.request_text || request?.title || 'the requested build'
-    const shortMsg = (request?.title || task).slice(0, 60)
-    const prompt = [
-      'Build this in the current empty git repo, then commit it.',
-      `Task: ${task}.`,
-      'Steps: (1) implement it as minimal working files;',
-      '(2) `git add -A`;',
-      `(3) \`git commit -m "${shortMsg}"\`.`,
-      'Stay inside this workspace — do not read or write files outside it.',
-      'DO NOT run git push or gh — you cannot, and must not try.',
-    ].join(' ')
+    const prompt = buildPrompt(request)
 
     // Default relies on the trust-stamp so the workspace deny-list is ENFORCED.
     // --dangerously-skip-permissions is an opt-in escape hatch that NULLIFIES the
@@ -211,8 +219,126 @@ export const claudeExecutorAdapter = {
   },
 }
 
+// ---- docker adapter (C6-P2) ----
+// Same contract as claudeExecutorAdapter, but the untrusted child runs inside a
+// throwaway container instead of on the host. The container is the boundary:
+// only the workspace is mounted (rw), auth is one read-only credential file, and
+// NO host env crosses in. Host-side we still do git init, the deny-list (defense
+// in depth), SHA harvest and CodexQC — all after the container is gone.
+//
+// NOTE (C6-P2): network is still WIDE OPEN in this container. Egress lockdown is P3.
+const DOCKER_BIN = () => process.env.DOCKER_BIN || 'docker'
+const EXECUTOR_IMAGE = () => process.env.EXECUTOR_IMAGE || 'mc-executor:latest'
+const CONTAINER_WORKSPACE = '/workspace'
+const CONTAINER_CREDS = '/home/builder/.claude/.credentials.json'
+
+// Docker Desktop on Windows takes native `C:\path` sources; a POSIX-ified
+// `/c/path` is not a real path inside the WSL2 VM. resolve() gives us exactly
+// the drive-letter form the auth spike proved, on either platform.
+export function toDockerMountPath(p) {
+  return resolve(p)
+}
+
+function docker(args, opts = {}) {
+  return spawnSync(DOCKER_BIN(), args, { encoding: 'utf8', ...opts })
+}
+
+// Fail loud and actionable BEFORE we spin a build: a missing daemon or image is
+// an operator problem, not a build failure.
+function preflight() {
+  const v = docker(['version', '--format', '{{.Server.Version}}'])
+  if (v.error || v.status !== 0) {
+    throw new Error(
+      `docker executor unavailable: cannot reach the Docker daemon (${v.error?.code || `exit ${v.status}`}). ` +
+      'Start Docker Desktop, or set DISPATCHER_EXECUTOR=claude.',
+    )
+  }
+  const image = EXECUTOR_IMAGE()
+  const i = docker(['image', 'inspect', image])
+  if (i.status !== 0) {
+    throw new Error(`docker executor image '${image}' not found — build it with: npm run executor:image`)
+  }
+  const creds = join(homedir(), '.claude', '.credentials.json')
+  if (!existsSync(creds)) {
+    throw new Error(`docker executor: no Claude credentials at ${creds} — run \`claude\` once on the host to authenticate.`)
+  }
+  return { image, creds }
+}
+
+export function buildDockerArgs({ workspace, creds, image, containerName, prompt, skipPermissions }) {
+  const args = [
+    'run', '--rm',
+    '--name', containerName,
+    // Hardening: no capabilities, no privilege escalation, bounded resources.
+    '--cap-drop=ALL',
+    '--security-opt=no-new-privileges',
+    `--memory=${process.env.EXECUTOR_MEMORY || '4g'}`,
+    `--cpus=${process.env.EXECUTOR_CPUS || '2'}`,
+    `--pids-limit=${process.env.EXECUTOR_PIDS_LIMIT || '512'}`,
+    // Only the build workspace is writable. Auth is read-only, single file.
+    '-v', `${toDockerMountPath(workspace)}:${CONTAINER_WORKSPACE}`,
+    '-v', `${toDockerMountPath(creds)}:${CONTAINER_CREDS}:ro`,
+    '-w', CONTAINER_WORKSPACE,
+    // Deliberately NO -e flags: zero host env crosses the boundary, and
+    // CLAUDECODE stays unset (recursion guard).
+    image,
+    'claude', '-p', prompt, '--output-format', 'text',
+  ]
+  // Safe here in a way it never was on the host: the container, not the
+  // deny-list, is the guarantee.
+  if (skipPermissions) args.push('--dangerously-skip-permissions')
+  return args
+}
+
+export const dockerClaudeExecutorAdapter = {
+  name: 'docker',
+  async launch({ workspace, request, env, timeoutMs, skipPermissions }) {
+    const { image, creds } = preflight()
+
+    // 1. Provision the workspace host-side (the container only ever sees the mount).
+    gitInitRepo(workspace)
+    mkdirSync(join(workspace, '.claude'), { recursive: true })
+    writeFileSync(join(workspace, '.claude', 'settings.json'), JSON.stringify(WORKSPACE_SETTINGS, null, 2))
+    // No stampTrust(): that mutates the HOST ~/.claude.json. The image pre-seeds
+    // onboarding + /workspace trust instead, so the host config is never touched.
+
+    const containerName = `mc-executor-${randomUUID().slice(0, 12)}`
+    const args = buildDockerArgs({
+      workspace, creds, image, containerName,
+      prompt: buildPrompt(request),
+      skipPermissions,
+    })
+
+    let r
+    try {
+      r = docker(args, { timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024 })
+    } finally {
+      // Killing the docker CLI does NOT kill the container. Always reap by name so
+      // a timeout can never leave an orphan holding the workspace or a credential.
+      docker(['rm', '-f', containerName], { timeout: 30000 })
+    }
+    if (r.error && r.error.code === 'ETIMEDOUT') {
+      throw new Error(`executor container timed out after ${timeoutMs}ms (killed ${containerName})`)
+    }
+    if (r.error) throw new Error(`docker run failed: ${r.error.code || r.error.message}`)
+    if (r.status !== 0) {
+      throw new Error(`executor container exited ${r.status}: ${(r.stderr || r.stdout || '').trim().slice(0, 400)}`)
+    }
+
+    // 2. Container is gone. Harvest + QC host-side, exactly as the claude adapter does.
+    let reviewedSha
+    try { reviewedSha = git(workspace, ['rev-parse', 'HEAD']) } catch { reviewedSha = null }
+    if (!reviewedSha) throw new Error('no commit produced by executor')
+    const { verdict: qcVerdict } = runHostQc({ workspace, sha: reviewedSha })
+    if (qcVerdict === 'RECONSIDER') throw new Error('CodexQC verdict RECONSIDER — build not approvable')
+    const commits = git(workspace, ['log', '--oneline']).split('\n').filter(Boolean)
+    return { reviewedSha, qcVerdict, commits }
+  },
+}
+
 export function pickAdapter(name) {
   if (name === 'mock') return mockExecutorAdapter
   if (name === 'claude') return claudeExecutorAdapter
-  throw new Error(`Unknown DISPATCHER_EXECUTOR '${name}' — must be 'claude' or 'mock'`)
+  if (name === 'docker') return dockerClaudeExecutorAdapter
+  throw new Error(`Unknown DISPATCHER_EXECUTOR '${name}' — must be 'docker', 'claude' or 'mock'`)
 }

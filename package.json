@@ -10,7 +10,8 @@
     "sync:agents": "node scripts/sync-agents.mjs",
     "sync:skills": "node scripts/sync-skills.mjs",
     "sync:codex-skills": "node scripts/sync-codex-skills.mjs",
-    "test": "vitest run"
+    "test": "vitest run",
+    "executor:image": "docker build -t mc-executor:latest docker/executor"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.1",
