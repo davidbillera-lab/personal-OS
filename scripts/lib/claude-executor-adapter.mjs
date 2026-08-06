@@ -150,11 +150,20 @@ export function runHostQc({ workspace, sha, timeoutMs = 300000 }) {
   return { verdict: explicit ? explicit[1] : parseVerdict(output), output }
 }
 
+// Gap B (second-half relay): a Hermes-deposited plan (mc_requests.plan) is the full
+// build spec — prefer it over the one-line voice ask it was deposited against. Falls
+// back to request_text/title when no plan was submitted (e.g. legacy/manual requests).
+export function buildTaskSpec(request) {
+  const plan = typeof request?.plan === 'string' ? request.plan.trim() : ''
+  if (plan) return plan
+  return request?.request_text || request?.title || 'the requested build'
+}
+
 // Shared by both real adapters — the sandbox prompt is identical whether the child
 // runs on the host or in a container. Implement → git add -A → git commit. No QC
 // (that is host-side, post-exit) and no push (structurally impossible).
 export function buildPrompt(request) {
-  const task = request?.request_text || request?.title || 'the requested build'
+  const task = buildTaskSpec(request)
   const shortMsg = (request?.title || task).slice(0, 60)
   return [
     'Build this in the current empty git repo, then commit it.',
