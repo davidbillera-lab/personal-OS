@@ -65,7 +65,8 @@ const BUILDS_DIR = process.env.DISPATCHER_BUILDS_DIR || 'builds'
 // env var cannot redirect the push.
 const SANDBOX_REMOTE = (EXECUTOR === 'mock' && process.env.DISPATCHER_SANDBOX_REMOTE) ? process.env.DISPATCHER_SANDBOX_REMOTE : null
 const SANDBOX_REPO = 'davidbillera-lab/mc-spike-test' // fixed; NEVER a portfolio repo
-// Opt-in escape hatch — see claude-executor-adapter.mjs for why this defaults OFF.
+// Opt-in escape hatch, defaults OFF (C6-P4: unset ⇒ permissions ENFORCED). Leaving it off
+// keeps the workspace deny-list live inside the container. See claude-executor-adapter.mjs.
 const SKIP_PERMISSIONS = process.env.DISPATCHER_SKIP_PERMISSIONS === '1' || process.env.DISPATCHER_SKIP_PERMISSIONS === 'true'
 // Test controls (deterministic runs): DISPATCHER_ONCE=1 → one tick then exit;
 // DISPATCHER_MAX_TICKS=N → loop N ticks then exit. Neither set → run forever.

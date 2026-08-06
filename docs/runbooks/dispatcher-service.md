@@ -107,6 +107,13 @@ The dispatcher reads `.env.local` itself for Supabase and Telegram secrets — y
 don't put secrets in `ecosystem.config.cjs`. That file only sets
 `DISPATCHER_EXECUTOR` and `DISPATCHER_SKIP_PERMISSIONS`.
 
+`DISPATCHER_EXECUTOR` ships as `docker`: every build runs inside a throwaway
+container that can only reach an allowlist of hosts. **Before the dispatcher can
+build anything, run `npm run executor:net`** (check with `npm run
+executor:net:status`). If the network or proxy is missing, the dispatcher refuses
+to build rather than running a build with open internet access — that is
+deliberate. `DISPATCHER_SKIP_PERMISSIONS` ships as `0`; leave it there.
+
 If Supabase or Telegram variables are missing from `.env.local`, the dispatcher
 will still start but DB reads/writes or Telegram pings will fail — check
 `pm2 logs mc-dispatcher` for errors mentioning those.

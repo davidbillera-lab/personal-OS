@@ -5,9 +5,10 @@
 // The dispatcher never knows which worker ran; future hermes/kimi/codex/docker
 // adapters slot in here with ZERO dispatcher changes. That seam is the whole point.
 //
-// Two adapters ship in v0:
-//   - claudeExecutorAdapter : the real headless-Claude build (NOT run in the mock
-//     verification session; that is the operator's rig DoD run).
+// Three adapters:
+//   - dockerClaudeExecutorAdapter : THE PRODUCTION PATH (C6). Headless Claude inside a
+//     throwaway container on an --internal network with an allowlisting egress proxy.
+//   - claudeExecutorAdapter  : legacy host path. UNSANDBOXED — fallback only, see below.
 //   - mockExecutorAdapter    : deterministic, no Claude/no secrets — used to prove
 //     every dispatcher safety path (claim, gate, recovery) with a local bare remote.
 
@@ -68,12 +69,15 @@ export const mockExecutorAdapter = {
   },
 }
 
-// ---- real adapter ----
-// Provisions an isolated push-denied workspace, stamps trust, unsets CLAUDECODE, and runs
-// headless Claude with a hard timeout. The executor child holds ZERO secrets (C6-P1) — QC
-// runs host-side, after the child exits, on the diff the child committed. The workspace's
-// .claude/settings.json denies git push / gh / curl / rm — the build loop STRUCTURALLY
-// cannot push. Only the dispatcher (this adapter's caller) ever pushes, post-approval.
+// ---- workspace permission policy (both real adapters) ----
+// Written into <workspace>/.claude/settings.json. The deny-list is the INNER layer of
+// defense in depth: the build loop cannot push, cannot shell out to gh/curl, cannot rm.
+// Verified enforced in-container on 2026-08-05 (C6-P4): a build told to run `rm victim.txt`
+// reported "permission to run it was denied" and the file survived on the host mount.
+// Enforcement depends on running WITHOUT --dangerously-skip-permissions — see skipPermissions.
+//
+// It is a layer, not the guarantee. The guarantee is the container + egress allowlist
+// (docker adapter). On the host adapter there is no outer layer at all.
 const WORKSPACE_SETTINGS = {
   permissions: {
     allow: [
@@ -161,6 +165,16 @@ export function buildPrompt(request) {
   ].join(' ')
 }
 
+// ---- legacy host adapter (LEGACY / FALLBACK ONLY — NOT the production path) ----
+// This runs the untrusted build directly ON THE HOST. There is NO sandbox: no container,
+// no egress allowlist, no filesystem boundary beyond the prompt asking nicely. The only
+// real controls are the workspace deny-list and the stripped childEnv — a build that
+// escapes either has the operator's whole machine and network.
+//
+// Kept because it is the only thing that still works if Docker Desktop is down. It is NOT
+// the supported production configuration: DISPATCHER_EXECUTOR=docker is. If you switch to
+// this, you have consciously turned the sandbox off — treat every build as if it were
+// running in your own shell, because it is.
 export const claudeExecutorAdapter = {
   name: 'claude',
   async launch({ workspace, request, env, timeoutMs, skipPermissions }) {
@@ -185,10 +199,9 @@ export const claudeExecutorAdapter = {
     // 4. Launch headless Claude with a hard timeout. Deny-list blocks push regardless.
     const prompt = buildPrompt(request)
 
-    // Default relies on the trust-stamp so the workspace deny-list is ENFORCED.
-    // --dangerously-skip-permissions is an opt-in escape hatch that NULLIFIES the
-    // deny-list — enable only if headless trust-only doesn't run, and treat as a
-    // documented risk.
+    // skipPermissions defaults OFF and must stay off here. On the host path the
+    // deny-list + stripped env are the ONLY controls that exist; turning permissions
+    // off leaves an unsandboxed agent with nothing between it and the machine.
     const cliArgs = ['-p', prompt, '--output-format', 'text']
     if (skipPermissions) cliArgs.push('--dangerously-skip-permissions')
 
@@ -221,10 +234,12 @@ export const claudeExecutorAdapter = {
 
 // ---- docker adapter (C6-P2) ----
 // Same contract as claudeExecutorAdapter, but the untrusted child runs inside a
-// throwaway container instead of on the host. The container is the boundary:
-// only the workspace is mounted (rw), auth is one read-only credential file, and
-// NO host env crosses in. Host-side we still do git init, the deny-list (defense
-// in depth), SHA harvest and CodexQC — all after the container is gone.
+// throwaway container instead of on the host. THIS IS THE PRODUCTION PATH
+// (DISPATCHER_EXECUTOR=docker). The container is the boundary: only the workspace
+// is mounted (rw), auth is one read-only credential file, and NO host env crosses
+// in. Host-side we still do git init, the deny-list (a real inner layer as of
+// C6-P4 — permissions run enforced), SHA harvest and CodexQC — all after the
+// container is gone.
 //
 // Egress (C6-P3): the container joins EXECUTOR_NET only, which is a Docker
 // `--internal` network — no route to the internet AT ALL. The single reachable
@@ -336,8 +351,10 @@ export function buildDockerArgs({ workspace, creds, image, containerName, prompt
     image,
     'claude', '-p', prompt, '--output-format', 'text',
   ]
-  // Safe here in a way it never was on the host: the container, not the
-  // deny-list, is the guarantee.
+  // Escape hatch, and it should stay unused. C6-P4 proved headless `claude -p` runs to
+  // completion in this image WITHOUT it (the image pre-seeds onboarding + /workspace
+  // trust), so leaving it off costs nothing and keeps the deny-list live behind the
+  // container boundary. ecosystem.config.cjs ships DISPATCHER_SKIP_PERMISSIONS='0'.
   if (skipPermissions) args.push('--dangerously-skip-permissions')
   return args
 }

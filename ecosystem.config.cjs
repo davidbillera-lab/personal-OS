@@ -21,8 +21,23 @@ module.exports = {
     env: {
       // Non-secret runtime toggles. Secrets (Supabase/Telegram keys) come from
       // .env.local, which the dispatcher loads itself.
-      DISPATCHER_EXECUTOR: 'claude',
-      DISPATCHER_SKIP_PERMISSIONS: '1',
+      //
+      // executor=docker (C6-P4): builds run in a throwaway `mc-executor:latest`
+      // container on the --internal network `mc-executor-net`, whose ONLY route off
+      // the box is the allowlisting proxy. The container + egress allowlist is the
+      // security boundary — not the prompt, not the deny-list.
+      // PREREQUISITE: `npm run executor:net` must have been run (network + proxy up)
+      // or preflight() fails closed and the dispatcher builds NOTHING. Check with
+      // `npm run executor:net:status`. Fallback if Docker is down: 'claude' — but
+      // that path is UNSANDBOXED (runs on the host) and is not the supported
+      // production configuration.
+      DISPATCHER_EXECUTOR: 'docker',
+      // OFF (C6-P4, verified 2026-08-05): headless `claude -p` completes inside the
+      // container without --dangerously-skip-permissions, so the workspace
+      // .claude/settings.json deny-list (git push / gh / curl / rm) is genuinely
+      // ENFORCED — real defense in depth behind the container boundary. Do not turn
+      // this back on to "unblock" a build; it removes a layer and buys nothing.
+      DISPATCHER_SKIP_PERMISSIONS: '0',
     },
   }],
 }
