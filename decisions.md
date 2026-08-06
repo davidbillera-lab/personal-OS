@@ -494,3 +494,9 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 **Made by:** David
 
+---
+
+### 2026-08-05 - mc_submit_plan shipped (Hermes planning-artifact intake)
+
+**Decision:** Built + deployed `mc_submit_plan` (spec `specs/2026-08-05-hermes-plan-intake.md`, option A / bounded `plan` column, migration 025). Adds exactly one orchestrator-scope write so Hermes can deposit a plan on its own `submitted`+assigned request (→ `phase='planned'`, write-once). It structurally cannot set `status='queued'`, touch other fields, or be reached by the liaison scope — verified live end-to-end (status stayed `submitted`, write-once enforced, server-set actor, liaison excluded). Promotion `planned → queued` remains a full-scope/human action. Commit 93d7744. **Made by:** David (call to build now) / Claude (implementation + verification).
+
