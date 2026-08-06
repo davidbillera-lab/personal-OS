@@ -500,3 +500,13 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 **Decision:** Built + deployed `mc_submit_plan` (spec `specs/2026-08-05-hermes-plan-intake.md`, option A / bounded `plan` column, migration 025). Adds exactly one orchestrator-scope write so Hermes can deposit a plan on its own `submitted`+assigned request (→ `phase='planned'`, write-once). It structurally cannot set `status='queued'`, touch other fields, or be reached by the liaison scope — verified live end-to-end (status stayed `submitted`, write-once enforced, server-set actor, liaison excluded). Promotion `planned → queued` remains a full-scope/human action. Commit 93d7744. **Made by:** David (call to build now) / Claude (implementation + verification).
 
+---
+
+### 2026-08-06 - C6 Case 7 closed + certified; autonomous second-half wired (go-live gated)
+
+**Decision:** Under operator `/goal`, drove the full remaining build. **(1) C6 Case 7 closed:** replaced the blind tinyproxy tunnel with a TLS-terminating mitmproxy (destination-keyed, SNI-lie-proof) that fail-closed blocks `web_fetch`/`web_search` tool blocks + web-tool beta headers + `/v1/files` + `/api/oauth/profile`, with a pinned CA (private key in the proxy image only, gitignored; public cert in the executor image). Independently re-ran the red-team: boundary all CONTAINED (no regression), `redteam:c6:api` Case 7 now CONTAINED (all four sinks 403), legit `claude -p` inference still works through the MITM. **(2) Second-half wired:** executor builds from the deposited `plan`; dispatcher is now event-driven (Supabase Realtime, 5s poll as backstop) and can claim `submitted`/`planned` rows — gated behind `DISPATCHER_CLAIM_PLANNED` (default OFF). Commits 7e7b5f0, 06e70f5, f793dc8.
+
+**Reasoning:** Case 7 was the red-team's one NOT-CONTAINED finding and the explicit gate on going always-on. Closing it makes autonomous execution genuinely safe (a build cannot reach infra OR exfil). The second-half is built but left OFF so enabling autonomous execution stays a deliberate operator flip, not a side effect.
+
+**Consequence:** The Rayetta class AND the exfil hole are closed and certified. Go-live is one flag flip — `DISPATCHER_CLAIM_PLANNED='1'` + `pm2 restart` (runbook: `docs/runbooks/go-live-autonomous-relay.md`). One accepted residual: a build can still spend inference on the mounted token (inherent; not exfil) — the classifier stays ON as the compensating control, NOT relaxed. Still open: gap D (real-repo push target — needs operator decision on which repos + checkout-vs-empty-workspace). **Made by:** David (goal + close-it-properly) / Claude (build + independent red-team certification).
+

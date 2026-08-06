@@ -38,6 +38,15 @@ module.exports = {
       // ENFORCED — real defense in depth behind the container boundary. Do not turn
       // this back on to "unblock" a build; it removes a layer and buys nothing.
       DISPATCHER_SKIP_PERMISSIONS: '0',
+      // GO-LIVE SWITCH for the second-half relay (Hermes plan -> autonomous build).
+      // OFF by default: the dispatcher claims only status='queued' rows (unchanged
+      // behavior). Flip to '1' + `pm2 restart mc-dispatcher` to let it also claim
+      // Hermes-deposited plans (status='submitted' phase='planned') and build them
+      // FROM the plan. Safe to enable now that C6 Case 7 is closed + red-team certified
+      // (2026-08-06). The classifier stays ON as the compensating control for the
+      // residual inference-spend on the mounted token — do NOT relax it. Runbook:
+      // docs/runbooks/go-live-autonomous-relay.md
+      DISPATCHER_CLAIM_PLANNED: '0',
     },
   }],
 }
