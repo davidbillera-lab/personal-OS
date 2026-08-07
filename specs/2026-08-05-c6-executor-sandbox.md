@@ -1,6 +1,19 @@
 # C6 — Executor Sandbox (real security boundary)
 
-**Status:** Spec APPROVED (2026-08-05) — operator chose the **full container** path. Ready for build window.
+**Status: ✅ CLOSED — Definition of Done MET. Built, red-teamed, live in production.**
+
+| | |
+|---|---|
+| Spec approved | 2026-08-05 (operator chose the full-container path) |
+| P1–P6 built | 2026-08-05 → 2026-08-06 |
+| Case 7 closed + certified | 2026-08-06 (TLS-terminating proxy) |
+| **Re-certified** | **2026-08-07 — `redteam:c6` + `redteam:c6:api` both green, zero NOT-CONTAINED** |
+| Running in production | `DISPATCHER_EXECUTOR=docker`, `SKIP_PERMISSIONS=0`, `CLAIM_PLANNED=1` |
+
+**This spec is historical. Do not re-open it as pending work.** Results: `docs/operator/c6-redteam-results.md`. Decisions: `decisions.md` 2026-08-05, 2026-08-06, 2026-08-07.
+
+**One DoD line item was deliberately abandoned, not forgotten:** the plan to relax the classifier `secrets`/`live-deploy` categories to intent-gating is **permanently cancelled**. The red-team's residual finding — plain `/v1/messages` inference on the mounted credential still succeeds and cannot be closed without removing the credential the executor needs to run — makes those word-blocks the standing compensating control. See "Post-closure standing rules" at the bottom.
+
 **Date:** 2026-08-05
 **Owner build:** fresh build window (this is HQ; spec only)
 **Parent:** autonomous execution engine (`051d870`), voice slice v0, dispatcher
@@ -86,3 +99,27 @@ Only after all pass do we: (a) flip `DISPATCHER_SKIP_PERMISSIONS` off / rely on 
 ## Definition of Done
 
 Red-team suite green → skip-permissions retired → dispatcher runs always-on → classifier `secrets`/`live-deploy` relaxed to intent-gating → `decisions.md` + this spec updated. Executor holds no secrets and cannot reach any host but Anthropic + npm.
+
+### DoD final status (2026-08-07)
+
+| Item | Status |
+|---|---|
+| Red-team suite green | ✅ re-verified 2026-08-07, both suites, zero NOT-CONTAINED |
+| skip-permissions retired | ✅ `DISPATCHER_SKIP_PERMISSIONS: '0'` |
+| Dispatcher always-on | ✅ `mc-dispatcher` online under PM2, docker executor, `CLAIM_PLANNED=1` |
+| Executor holds no secrets / egress-locked | ✅ Cases 1–6, 9, 11, 12 CONTAINED; Case 7 closed |
+| `decisions.md` + spec updated | ✅ this commit |
+| Classifier relaxed to intent-gating | ❌ **CANCELLED — permanent. See below.** |
+
+---
+
+## Post-closure standing rules
+
+These outlive the project. Anyone who reopens C6 should read these first.
+
+1. **Do NOT relax the classifier `secrets`/`live-deploy` word-blocks.** The original DoD called for it; the red-team invalidated that. The mounted OAuth credential still authorizes plain inference (`/v1/messages`, no web tools) — probe [A] returns 200 by design and cannot be closed without removing the credential the executor requires. The word-blocks are the compensating control against small-payload relay through normal inference text. This is not a leftover TODO.
+2. **Never introduce an npm token into a build.** Case 8: the registry's authenticated write endpoints are reachable through the allowlisted host. The channel is open by design and is safe *only* because no npm credential exists in the container. Adding one flips Case 8 to NOT CONTAINED.
+3. **Do not rely on `sanitizeForMC()` as a boundary.** Case 10: secrets split across whitespace, newlines, or zero-width characters pass straight through. It is defense-in-depth on result text, nothing more.
+4. **`mc-executor:latest` image integrity is a host-side trust assumption.** It is long-lived and shared across every build; nothing in the red-team tests its supply chain.
+5. **`npm run executor:net` must be up or the dispatcher fails closed** and builds nothing. Check with `npm run executor:net:status`.
+6. **Re-run both suites after any change to the proxy, the executor image, or the egress allowlist** — `npm run redteam:c6` (free) and `npm run redteam:c6:api` (spends a few hundred Anthropic tokens).
