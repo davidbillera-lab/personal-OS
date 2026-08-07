@@ -34,7 +34,7 @@ import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve } from 'path'
 import crypto from 'crypto'
-import { notifyAwaitingApproval, notifyClassifierHold } from './lib/telegram-notify.mjs'
+import { notifyAwaitingApproval, notifyClassifierHold, notifyBuildFailed } from './lib/telegram-notify.mjs'
 import { pickAdapter } from './lib/claude-executor-adapter.mjs'
 import { classifyOps } from './lib/ops-classifier.mjs'
 import { sanitizeForMC } from './lib/sanitize-result.mjs'
@@ -224,10 +224,18 @@ async function runAttempt(sb, row) {
   } catch (e) {
     // Raw executor stderr — sanitize before it reaches the log OR mc_requests.blocker.
     console.log(`[build] FAILED ${row.id}: ${clip(e.message)}`)
-    await sb.from('mc_requests')
+    // Release the row out of 'claimed' — a swallowed error here once left a row
+    // stuck mid-build (looked like it was still running). Check + log the write.
+    const { error: uerr } = await sb.from('mc_requests')
       .update({ status: 'failed', phase: null, blocker: clip(`build failed: ${e.message}`), updated_at: nowISO() })
       .eq('id', row.id).in('status', ['claimed', 'in_progress'])
+    if (uerr) console.log(`[build] FAILED status-update error for ${row.id}: ${clip(uerr.message)}`)
     await logAudit(sb, 'dispatcher.build_failed', false, e.message)
+    // Alert the operator: this job fell out of the autonomous path and needs a
+    // human to run it interactively. Best-effort; never throws (no-ops if unconfigured).
+    const ping = await notifyBuildFailed({ id: row.id, title: row.title || clip(row.request_text, 40), reason: clip(e.message, 200) })
+      .catch((err) => ({ sent: false, reason: err?.message }))
+    console.log(`[build] failure ping ${JSON.stringify(ping)}`)
     return
   }
 

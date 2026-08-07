@@ -4,6 +4,14 @@
     {
       "path": "/api/alerts/digest",
       "schedule": "0 14 * * *"
+    },
+    {
+      "path": "/api/alerts/stuck-jobs",
+      "schedule": "0 22 * * *"
+    },
+    {
+      "path": "/api/alerts/stuck-jobs",
+      "schedule": "59 5 * * *"
     }
   ]
 }
