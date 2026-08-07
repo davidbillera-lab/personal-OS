@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabaseClient } from '@/lib/supabase'
-import { buildStuckJobsDigest, type StuckRequest } from '@/lib/alerts/stuck-jobs'
+import {
+  buildStuckJobsDigest,
+  suppressAlreadySent,
+  transitionKey,
+  alertBucket,
+  type StuckRequest,
+} from '@/lib/alerts/stuck-jobs'
 
 export const runtime = 'nodejs'
 
@@ -51,13 +57,36 @@ export async function GET(req: NextRequest) {
     (r) => r.status !== 'submitted' || (r.phase === 'planned' && r.updated_at < cutoff),
   )
 
-  // 4. Build; suppress all-clear (send nothing).
-  const message = buildStuckJobsDigest(rows)
-  if (message === null) {
-    return NextResponse.json({ sent: false, reason: 'all_clear' }, { status: 200 })
+  // 4. Drop transitions already announced in an earlier sweep, so an unresolved
+  //    row isn't re-sent twice a day forever. A ledger read failure degrades to
+  //    "send anyway" (empty set) — a duplicate alert beats a missed one.
+  const now = new Date()
+  const keys = rows.map((r) => transitionKey(r, now)).filter((k) => k !== '')
+  let alreadySent = new Set<string>()
+  if (keys.length > 0) {
+    const { data: sentRows, error: sentErr } = await supabase
+      .from('mc_alert_sends')
+      .select('transition_key')
+      .in('transition_key', keys)
+    if (sentErr) {
+      console.error('stuck-jobs: dedup ledger read failed, sending unsuppressed', sentErr.message)
+    } else {
+      alreadySent = new Set((sentRows ?? []).map((r: { transition_key: string }) => r.transition_key))
+    }
   }
 
-  // 5. Send one plain-text message. No parse_mode so request text can't break
+  const fresh = suppressAlreadySent(rows, alreadySent, now)
+
+  // 5. Build; suppress all-clear (send nothing).
+  const message = buildStuckJobsDigest(fresh, now)
+  if (message === null) {
+    return NextResponse.json(
+      { sent: false, reason: keys.length > 0 ? 'no_new_transitions' : 'all_clear' },
+      { status: 200 },
+    )
+  }
+
+  // 6. Send one plain-text message. No parse_mode so request text can't break
   //    formatting. No retry — the next sweep is the retry.
   const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: 'POST',
@@ -68,8 +97,28 @@ export async function GET(req: NextRequest) {
   if (!resp.ok) {
     const body = (await resp.text()).slice(0, 300)
     console.error('stuck-jobs: telegram send failed', resp.status, body)
+    // Not recorded: a failed send must stay eligible for the next sweep.
     return NextResponse.json({ error: 'telegram send failed', status: resp.status }, { status: 502 })
   }
 
-  return NextResponse.json({ sent: true }, { status: 200 })
+  // 7. Record only what we actually announced, and only after Telegram accepted.
+  //    upsert + ignoreDuplicates makes a concurrent sweep a no-op rather than an
+  //    error. A ledger write failure means the next sweep repeats this message —
+  //    noisy, not silent, which is the correct direction to fail.
+  const ledger = fresh
+    .map((r) => ({
+      transition_key: transitionKey(r, now),
+      request_id: r.id,
+      bucket: alertBucket(r, now),
+    }))
+    .filter((row) => row.transition_key !== '' && row.bucket !== null)
+
+  if (ledger.length > 0) {
+    const { error: writeErr } = await supabase
+      .from('mc_alert_sends')
+      .upsert(ledger, { onConflict: 'transition_key', ignoreDuplicates: true })
+    if (writeErr) console.error('stuck-jobs: dedup ledger write failed', writeErr.message)
+  }
+
+  return NextResponse.json({ sent: true, announced: ledger.length }, { status: 200 })
 }

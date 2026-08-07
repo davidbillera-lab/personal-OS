@@ -39,6 +39,58 @@ const bullet = (r: StuckRequest): string => {
 }
 
 /**
+ * Deterministic, non-secret identity for "this request is actionable for this
+ * reason". Stable across sweeps so a row that hasn't changed produces the same
+ * key (and is suppressed); a row that moves to a new state produces a new key
+ * (and legitimately re-alerts).
+ *
+ * `blocker` is deliberately part of the blocked key: the classifier can re-hold
+ * the same request for a different reason, and that is worth telling the
+ * operator about. It is normalised to one line so cosmetic whitespace churn
+ * can't manufacture a new key.
+ */
+export function transitionKey(r: StuckRequest, now: Date = new Date()): string {
+  const bucket = alertBucket(r, now)
+  if (bucket === null) return ''
+  // stale_planned is a property of time, not of a state change, so it keys on
+  // the plan deposit alone -- one "never picked up" nudge per planned request.
+  if (bucket === 'stale_planned') return `${r.id}:stale_planned`
+  if (bucket === 'blocked') return `${r.id}:blocked:${oneLine(r.blocker)}`
+  return `${r.id}:${bucket}`
+}
+
+export type AlertBucket = 'failed' | 'blocked' | 'awaiting' | 'stale_planned'
+
+/** Which bucket a row belongs to, or null when it is not actionable. */
+export function alertBucket(r: StuckRequest, now: Date = new Date()): AlertBucket | null {
+  if (r.status === 'failed') return 'failed'
+  if (r.status === 'blocked') return 'blocked'
+  if (r.status === 'awaiting_approval') return 'awaiting'
+  if (isStalePlanned(r, now)) return 'stale_planned'
+  return null
+}
+
+/**
+ * Drop rows whose transition has already been announced. `alreadySent` is the
+ * set of transition keys read from mc_alert_sends.
+ *
+ * Fail-safe direction is deliberate: if the ledger read fails the caller passes
+ * an empty set, so the operator gets a duplicate rather than silence. A missed
+ * alert is worse than a repeated one.
+ */
+export function suppressAlreadySent(
+  rows: StuckRequest[],
+  alreadySent: ReadonlySet<string>,
+  now: Date = new Date(),
+): StuckRequest[] {
+  return rows.filter((r) => {
+    const key = transitionKey(r, now)
+    if (key === '') return false
+    return !alreadySent.has(key)
+  })
+}
+
+/**
  * Build the sweep message, or return null when nothing is actionable
  * (all-clear → the route sends nothing, matching the daily digest). Buckets:
  *   🛑 failed        — build errored/timed out; run it interactively
