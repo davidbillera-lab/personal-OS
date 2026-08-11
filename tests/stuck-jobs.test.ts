@@ -48,6 +48,48 @@ describe('buildStuckJobsDigest', () => {
     ], NOW)
     expect(msg).toBeNull()
   })
+
+  // Regression: request 26d1849b sat in submitted/phase=null for two days and never
+  // alerted, because a 'submitted' row was only ever considered when phase==='planned'.
+  // Nothing in the system auto-claims that state, so silence meant it waited forever.
+  it('surfaces a submitted workflow that Hermes never planned (phase null)', () => {
+    const msg = buildStuckJobsDigest([
+      row({ status: 'submitted', phase: null, updated_at: ago(3 * 60 * 60 * 1000) }),
+    ], NOW)!
+    expect(msg).toContain('📝 NOT PLANNED')
+    expect(msg).toContain('Homeroom Tutor')
+  })
+
+  it('does not alarm on a workflow submitted moments ago', () => {
+    expect(buildStuckJobsDigest([
+      row({ status: 'submitted', phase: null, updated_at: ago(5 * 60 * 1000) }),
+    ], NOW)).toBeNull()
+  })
+
+  it('keeps never-planned and never-picked-up in separate buckets', () => {
+    const msg = buildStuckJobsDigest([
+      row({ id: 'dddddddd-0000-0000-0000-000000000004', status: 'submitted', phase: null, updated_at: ago(3 * 60 * 60 * 1000) }),
+      row({ id: 'eeeeeeee-0000-0000-0000-000000000005', status: 'submitted', phase: 'planned', updated_at: ago(3 * 60 * 60 * 1000) }),
+    ], NOW)!
+    expect(msg).toContain('📝 NOT PLANNED')
+    expect(msg).toContain('🕒 NOT PICKED UP')
+  })
+})
+
+describe('alertBucket — never-planned workflows', () => {
+  it('classifies a stale unplanned submission as stale_unplanned', () => {
+    const r = row({ status: 'submitted', phase: null, updated_at: ago(3 * 60 * 60 * 1000) })
+    expect(alertBucket(r, NOW)).toBe('stale_unplanned')
+  })
+
+  it('gives it its own dedup key, so it nudges once rather than twice daily forever', () => {
+    const r = row({ status: 'submitted', phase: null, updated_at: ago(3 * 60 * 60 * 1000) })
+    expect(transitionKey(r, NOW)).toBe(`${r.id}:stale_unplanned`)
+  })
+
+  it('is not actionable while still fresh', () => {
+    expect(alertBucket(row({ status: 'submitted', phase: null, updated_at: ago(60_000) }), NOW)).toBeNull()
+  })
 })
 
 describe('alert dedup', () => {

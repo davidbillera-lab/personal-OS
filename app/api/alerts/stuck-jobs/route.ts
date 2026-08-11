@@ -53,8 +53,12 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
+  // Stale is the only condition here; phase is NOT filtered on. Requiring phase==='planned'
+  // meant a workflow waiting on Hermes to plan it (phase null) could never reach the digest,
+  // so it stalled invisibly — 26d1849b sat that way for two days. The builder still decides
+  // which bucket it lands in.
   const rows = ((data ?? []) as StuckRequest[]).filter(
-    (r) => r.status !== 'submitted' || (r.phase === 'planned' && r.updated_at < cutoff),
+    (r) => r.status !== 'submitted' || r.updated_at < cutoff,
   )
 
   // 4. Drop transitions already announced in an earlier sweep, so an unresolved
