@@ -39,6 +39,9 @@ import { pickAdapter } from './lib/claude-executor-adapter.mjs'
 import { classifyOps } from './lib/ops-classifier.mjs'
 import { sanitizeForMC } from './lib/sanitize-result.mjs'
 import { isClaimablePlanned } from './lib/planned-claim.mjs'
+import {
+  withRetry, persistAttemptResult, clearAttemptResult, recoverFinishedBuild, isOurAttempt,
+} from './lib/attempt-recovery.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -66,7 +69,11 @@ try {
 // ---- config ----
 const EXECUTOR = process.env.DISPATCHER_EXECUTOR || 'claude'
 const POLL_MS = Number(process.env.DISPATCHER_POLL_MS || 5000)
-const TIMEOUT_MS = Number(process.env.DISPATCHER_TIMEOUT_MS || 600000)
+// 30min default. Was 600000 (10min), which real portfolio builds ran straight through:
+// measured 2026-08-06/08, two builds were SIGKILLed at exactly the 600s wall and a third
+// only just survived (container ~600s + host QC = 684s total). The timeout is a spend cap,
+// not a correctness control — set it above the real work, not through the middle of it.
+const TIMEOUT_MS = Number(process.env.DISPATCHER_TIMEOUT_MS || 1800000)
 const ALLOWED_REPOS = (process.env.DISPATCHER_ALLOWED_REPOS || 'davidbillera-lab/mc-spike-test')
   .split(',').map((s) => s.trim()).filter(Boolean)
 const BUILDS_DIR = process.env.DISPATCHER_BUILDS_DIR || 'builds'
@@ -91,6 +98,13 @@ const CLAIM_PLANNED = process.env.DISPATCHER_CLAIM_PLANNED === '1' || process.en
 // keeps working on its own if Realtime setup throws or the subscription never connects).
 // Debounce window: rapid-fire postgres_changes events collapse into a single tick.
 const REALTIME_DEBOUNCE_MS = Number(process.env.DISPATCHER_REALTIME_DEBOUNCE_MS || 300)
+// How often the reconcile sweep re-examines rows stuck in claimed/in_progress. Recovery
+// used to run at startup ONLY, so a row stranded by a failed write-back stayed stranded
+// until someone restarted the process (2026-08-08: two days).
+const RECONCILE_MS = Number(process.env.DISPATCHER_RECONCILE_MS || 300000) // 5 min
+let lastReconcileAt = 0
+// Set for the duration of a build so the reconcile sweep never touches the live row.
+let activeRequestId = null
 
 // Kill-switch (operator emergency stop): while this file exists, tick() is a no-op —
 // no claim, no build, no push. Migration-free, instant, no restart. Toggle via
@@ -133,6 +147,19 @@ function git(cwd, args) {
   if (r.status !== 0) throw new Error(`git ${args.join(' ')} (${r.status}): ${(r.stderr || r.stdout || '').trim()}`)
   return (r.stdout || '').trim()
 }
+
+// ---- durability: a finished build must survive a flaky network ----
+// 2026-08-08 incident: request e0afb33a built cleanly (684s, commit 43f49d6, QC FIX-FIRST)
+// and the result was LOST — the single write-back to Supabase raised `TypeError: fetch
+// failed`, the throw unwound the tick, and the row sat in claimed/building forever with a
+// finished commit stranded on disk. A completed build is expensive and irreplaceable; the
+// network call that records it is neither. So: retry the write, and persist the result to
+// disk BEFORE attempting it so a crash or a total network outage is still recoverable.
+
+// Implementation + the full incident writeup live in scripts/lib/attempt-recovery.mjs
+// (imported above). Bound to BUILDS_DIR here so the call sites below stay short.
+const persistResult = (requestId, attemptId, result) => persistAttemptResult(BUILDS_DIR, requestId, attemptId, result)
+const clearResult = (requestId, attemptId) => clearAttemptResult(BUILDS_DIR, requestId, attemptId)
 
 // ---- Path A: atomic claim ----
 async function claimOne(sb) {
@@ -214,7 +241,6 @@ async function runAttempt(sb, row) {
 
   const attemptId = row.attempt_id
   const workspace = resolve(BUILDS_DIR, row.id, attemptId)
-  const branch = branchFor(row.id)
   const started = Date.now()
   console.log(`[build] start ${row.id} executor=${EXECUTOR} workspace=${workspace}`)
 
@@ -226,10 +252,12 @@ async function runAttempt(sb, row) {
     console.log(`[build] FAILED ${row.id}: ${clip(e.message)}`)
     // Release the row out of 'claimed' — a swallowed error here once left a row
     // stuck mid-build (looked like it was still running). Check + log the write.
-    const { error: uerr } = await sb.from('mc_requests')
+    // Retried: a failed build that ALSO fails to record its failure is the worst state —
+    // the row keeps claiming to be building and nothing sweeps it (2026-08-08).
+    const { error: uerr } = await withRetry('build-failed update', () => sb.from('mc_requests')
       .update({ status: 'failed', phase: null, blocker: clip(`build failed: ${e.message}`), updated_at: nowISO() })
-      .eq('id', row.id).in('status', ['claimed', 'in_progress'])
-    if (uerr) console.log(`[build] FAILED status-update error for ${row.id}: ${clip(uerr.message)}`)
+      .eq('id', row.id).in('status', ['claimed', 'in_progress']))
+    if (uerr) console.log(`[build] FAILED status-update error for ${row.id}: ${clip(uerr.message)} — reconcile will retry`)
     await logAudit(sb, 'dispatcher.build_failed', false, e.message)
     // Alert the operator: this job fell out of the autonomous path and needs a
     // human to run it interactively. Best-effort; never throws (no-ops if unconfigured).
@@ -239,14 +267,28 @@ async function runAttempt(sb, row) {
     return
   }
 
-  const { reviewedSha, qcVerdict, commits } = result
   const runtimeSec = Math.round((Date.now() - started) / 1000)
-  console.log(`[build] done ${row.id} sha=${reviewedSha} qc=${qcVerdict} (${runtimeSec}s)`)
+  console.log(`[build] done ${row.id} sha=${result.reviewedSha} qc=${result.qcVerdict} (${runtimeSec}s)`)
 
-  // Persist reviewed_sha + workspace_ref, then request approval — guarded on from-state.
+  // Disk FIRST, network second. From here on the build is recoverable even if every
+  // subsequent write fails: reconcile() replays this sidecar on the next tick.
+  persistResult(row.id, attemptId, { ...result, workspace, runtimeSec })
+
+  await requestApproval(sb, row, { ...result, workspace, runtimeSec })
+}
+
+// ---- move a finished build to awaiting_approval (shared: live path + reconcile) ----
+// Split out of runAttempt so a build whose write-back failed can be replayed later from
+// its sidecar without re-running the executor. Idempotent: the from-state guard means a
+// replay against an already-advanced row is a no-op, not a double-request.
+async function requestApproval(sb, row, result) {
+  const { reviewedSha, qcVerdict, commits, workspace, runtimeSec } = result
+  const attemptId = row.attempt_id
+  const branch = branchFor(row.id)
   const title = row.title || clip(row.request_text, 40)
   const blocker = `built ${title}; CodexQC ${qcVerdict}; push commit ${reviewedSha} to ${SANDBOX_REPO}@${branch} — approve via ChatGPT Voice`
-  const { data: awaiting, error: aerr } = await sb
+
+  const { data: awaiting, error: aerr } = await withRetry('request-approval update', () => sb
     .from('mc_requests')
     .update({
       status: 'awaiting_approval', phase: 'review', approval_required: true,
@@ -255,11 +297,24 @@ async function runAttempt(sb, row) {
       blocker: clip(blocker), updated_at: nowISO(),
     })
     .eq('id', row.id).eq('status', 'claimed') // guard from-state
-    .select('*').maybeSingle()
-  if (aerr) throw new Error(`request-approval update failed: ${aerr.message}`)
-  if (!awaiting) { console.log(`[approval] from-state guard failed for ${row.id} (no longer 'claimed') — not requesting`); return }
+    .select('*').maybeSingle())
+
+  // Retries exhausted: do NOT throw. The sidecar on disk is the record, the row stays
+  // claimed/building, and reconcile() picks it up next tick. Throwing here is exactly
+  // what lost the 2026-08-08 build.
+  if (aerr) {
+    console.log(`[approval] write-back failed for ${row.id} — build is SAFE on disk, reconcile will retry`)
+    await logAudit(sb, 'dispatcher.request_approval', false, `write-back failed: ${aerr.message}`)
+    return false
+  }
+  if (!awaiting) {
+    console.log(`[approval] from-state guard failed for ${row.id} (no longer 'claimed') — not requesting`)
+    clearResult(row.id, attemptId)
+    return false
+  }
   console.log(`[approval] requested ${row.id} → awaiting_approval (attempt ${attemptId})`)
   await logAudit(sb, 'dispatcher.request_approval', true)
+  clearResult(row.id, attemptId) // recorded in MC — the sidecar is no longer the record
 
   // Telegram ping — best-effort, never throws (no-ops if TELEGRAM_* absent).
   const ping = await notifyAwaitingApproval({
@@ -268,6 +323,7 @@ async function runAttempt(sb, row) {
     qcVerdict, repo: SANDBOX_REPO, branch, sha: reviewedSha, runtimeSec,
   })
   console.log(`[ping] ${JSON.stringify(ping)}`)
+  return true
 }
 
 // ---- Path B: find an approved, pushable row ----
@@ -345,32 +401,60 @@ async function gatedPush(sb, row) {
   await logAudit(sb, 'dispatcher.push', true)
 }
 
-// ---- fault recovery (startup, before the loop) ----
-async function faultRecovery(sb) {
+// ---- reconcile (startup, then periodically) ----
+// Was startup-only, which is why the 2026-08-08 strandings sat untouched for two days —
+// the dispatcher had been up since 08-06 and nothing re-examined a stuck row until restart.
+async function reconcile(sb) {
+  // Deliberately NOT filtered on assigned_to. That filter had a hole: mc_assign_request can
+  // rewrite assigned_to while a build is in flight (2026-08-08, request e0afb33a was flipped
+  // to 'hermes' mid-build), and the row then became invisible to its own recovery. Ownership
+  // is decided below by evidence on disk, which no external write can forge.
   const { data: rows, error } = await sb.from('mc_requests').select('*')
-    .eq('assigned_to', 'claude').in('status', ['claimed', 'in_progress'])
-  if (error) { console.log(`[recovery] query failed: ${error.message}`); return }
+    .in('status', ['claimed', 'in_progress'])
+  if (error) { console.log(`[reconcile] query failed: ${error.message}`); return }
   for (const r of rows || []) {
+    // Never touch the row this process is building right now. (Builds run via a blocking
+    // spawnSync so a sweep cannot physically interleave with one — this is belt-and-braces
+    // and documents the single-dispatcher assumption.)
+    if (r.id === activeRequestId) continue
+
+    // Ownership test: this dispatcher only reconciles attempts IT started, proven by the
+    // build workspace it created. A row claimed by another worker has no such directory,
+    // so we leave it strictly alone.
+    const ours = isOurAttempt(BUILDS_DIR, r)
+    if (!ours && r.assigned_to !== 'claude') continue
+
     // Cron orphan: a stray /api/queue/dispatch cron run claimed the row but never set
     // phase (only this dispatcher sets phase='building' at claim time). Reclaim it —
     // distinct from a legit interrupted build, which always has phase='building'.
     if (r.status === 'claimed' && !r.phase) {
-      await sb.from('mc_requests')
+      await withRetry('reconcile requeue', () => sb.from('mc_requests')
         .update({ status: 'queued', assigned_to: null, attempt_id: null, updated_at: nowISO() })
-        .eq('id', r.id).eq('status', 'claimed')
-      console.log(`[recovery] ${r.id} cron-orphan (claimed/phase=null) → requeued`)
+        .eq('id', r.id).eq('status', 'claimed'))
+      console.log(`[reconcile] ${r.id} cron-orphan (claimed/phase=null) → requeued`)
       continue
     }
+
     const midBuild = ['building', 'qc', 'fixing'].includes(r.phase)
     if (midBuild && !r.reviewed_sha) {
-      await sb.from('mc_requests')
-        .update({ status: 'failed', phase: null, blocker: 'dispatcher restart: build interrupted', updated_at: nowISO() })
-        .eq('id', r.id).in('status', ['claimed', 'in_progress'])
-      console.log(`[recovery] ${r.id} interrupted mid-build → failed (old attempt can never be approved)`)
+      // SALVAGE BEFORE FAILING. A finished build whose write-back died looks identical to
+      // an interrupted one from the DB alone; the difference is on disk. Marking this
+      // failed without looking is what threw away a good 684s build.
+      const finished = recoverFinishedBuild(BUILDS_DIR, r)
+      if (finished) {
+        console.log(`[reconcile] ${r.id} has a finished build on disk (${finished.reviewedSha}${finished.salvaged ? ', salvaged' : ''}) — replaying write-back`)
+        const ok = await requestApproval(sb, r, finished)
+        if (!ok) console.log(`[reconcile] ${r.id} write-back still failing — leaving claimed, will retry next sweep`)
+        continue
+      }
+      await withRetry('reconcile fail', () => sb.from('mc_requests')
+        .update({ status: 'failed', phase: null, blocker: 'dispatcher reconcile: build interrupted, no commit on disk', updated_at: nowISO() })
+        .eq('id', r.id).in('status', ['claimed', 'in_progress']))
+      console.log(`[reconcile] ${r.id} interrupted mid-build, nothing to salvage → failed`)
     } else if (r.phase === 'pushing' && r.approved_at && r.reviewed_sha) {
-      console.log(`[recovery] ${r.id} approved+pushing → leaving for path B resume`)
+      console.log(`[reconcile] ${r.id} approved+pushing → leaving for path B resume`)
     } else {
-      console.log(`[recovery] ${r.id} no action (status=${r.status} phase=${r.phase} reviewed_sha=${r.reviewed_sha ? 'set' : 'null'})`)
+      console.log(`[reconcile] ${r.id} no action (status=${r.status} phase=${r.phase} reviewed_sha=${r.reviewed_sha ? 'set' : 'null'})`)
     }
   }
 }
@@ -387,7 +471,10 @@ async function tick(sb) {
   // `&& CLAIM_PLANNED` is false, so claimPlannedOne() (and its phase='planned' query) is never
   // invoked, making this branch provably unreachable in the default state.
   if (!claimed && CLAIM_PLANNED) claimed = await claimPlannedOne(sb)
-  if (claimed) await runAttempt(sb, claimed)
+  if (claimed) {
+    activeRequestId = claimed.id
+    try { await runAttempt(sb, claimed) } finally { activeRequestId = null }
+  }
 }
 
 async function safeTick(sb) {
@@ -402,7 +489,15 @@ let ticking = false
 async function guardedTick(sb) {
   if (ticking) { console.log('[tick] skip — a tick is already running'); return }
   ticking = true
-  try { await safeTick(sb) } finally { ticking = false }
+  try {
+    // Periodic reconcile rides INSIDE the tick gate, so it can never overlap a build or
+    // another sweep. Cheap (one indexed query) and only every RECONCILE_MS.
+    if (Date.now() - lastReconcileAt >= RECONCILE_MS) {
+      lastReconcileAt = Date.now()
+      try { await reconcile(sb) } catch (e) { console.error(`[reconcile] error: ${e.message}`) }
+    }
+    await safeTick(sb)
+  } finally { ticking = false }
 }
 
 // Debounce: rapid-fire postgres_changes events (e.g. an insert immediately followed by an
@@ -460,7 +555,8 @@ process.on('SIGTERM', () => requestShutdown('SIGTERM'))
 async function main() {
   const sb = createAdminSupabaseClient()
   console.log(`[dispatcher] start executor=${EXECUTOR} poll=${POLL_MS}ms timeout=${TIMEOUT_MS}ms allowed=[${ALLOWED_REPOS.join(', ')}] remote=${SANDBOX_REMOTE || '(github default)'} skipPermissions=${SKIP_PERMISSIONS} once=${RUN_ONCE} maxTicks=${MAX_TICKS ?? '∞'} claimPlanned=${CLAIM_PLANNED}`)
-  await faultRecovery(sb)
+  await reconcile(sb)
+  lastReconcileAt = Date.now()
   // RUN_ONCE is the deterministic single-tick test mode — a Realtime subscription would
   // outlive that one tick for no benefit, so it's skipped there. Every other run mode gets it.
   if (RUN_ONCE) { await guardedTick(sb); console.log('[dispatcher] ONCE complete — exiting'); return }
