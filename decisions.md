@@ -545,3 +545,24 @@ Also: executor timeout 10min → 30min (two builds were killed at exactly 600s, 
 **Consequence:** Proven live, not on paper. On restart the sweep salvaged `e0afb33a` (commit `43f49d6` → `awaiting_approval`), and the full loop closed end to end on `268a0c76`: salvage → operator approval via ChatGPT voice → gated push → `completed`. Zero rows now sit in `claimed`/`in_progress`. Suite 144 → 150 passing.
 
 **Deliberately NOT done:** auto-starting Hermes planning. Nothing consumes a `submitted` workflow automatically, and making the dispatcher wake Hermes is a trust-ladder step (`specs/2026-07-16-hermes-ambient-layer-design.md`), not a side effect of a bug fix. The stall is now loud; who closes it is the operator's call. **Made by:** David ("finish the job end to end") / Claude (diagnosis, fix, live verification).
+
+
+---
+
+### 2026-08-11 - The operator's approval was the last thing that could vanish silently
+
+**Decision:** Fixed the final gap on the autonomous relay — an approved build could never be pushed if the row had been reassigned — and shipped the Hermes planning wakeup that the 2026-08-10 entry deliberately left out. Branch `fix/dispatcher-durable-attempts`, commit `56ccc51`. Suite 150 → 167 passing.
+
+**What was broken:** `findPushable()` filtered `assigned_to='claude'`. That is the *same hole* the previous entry had just fixed in `reconcile()`, in the same file, for the same reason — and it was left in place. `mc_assign_request` rewrites `assigned_to` at any time, and both `e0afb33a` and `713f6980` were sitting at `assigned_to='hermes'` with a real reviewed commit on disk. The filter made them invisible to the only code that can push. Worse, `reconcile()` looked straight at them every sweep and logged *"approved+pushing → leaving for path B resume"* — handing off to a path that could not see them. The operator approves, nothing pushes, nothing fails, nothing alerts. Ownership now comes from disk evidence (`isOurAttempt`), which no external write can forge.
+
+**The blind spot that kept it quiet:** `alertBucket()` returned `null` for every `in_progress` row, and the stuck-jobs route never fetched `in_progress` at all. So the one state that meant "your approval is stranded" was the one state the sweep was structurally incapable of reporting. Added a `stuck_pushing` bucket *and* the missing status in the route query — either alone would have been dead code.
+
+**The pattern worth naming:** three consecutive sessions have now found the same class of bug — a filter that looks like a safety narrowing but is actually a blind spot (`assigned_to` in reconcile, `assigned_to` in findPushable, `phase==='planned'` in the alert sweep). Filtering by *who claims to own a row* is unsound in a system where ownership is externally mutable. Filter on evidence, not on labels.
+
+**Hermes planning wakeup (reversing the previous entry's deferral):** Both halves of the relay already worked — `mc_submit_plan` sets `phase='planned'`, `claimPlannedOne()` builds from `row.plan`, and `buildPrompt()` already prefers the plan over `request_text`. Nothing was missing except a signal. The dispatcher sweep now announces a `submitted`/`phase=null` row within ~30 min, deduped through `mc_alert_sends`, naming the exact `mc_submit_plan` call that unsticks it. This is a nudge over a shared channel, **not an ingress into Hermes** — the dispatcher still cannot call Hermes, and building an inbound path remains a trust-ladder step. What changed is the detection gap: ~14h (twice-daily serverless sweep) → minutes.
+
+**Verified:** dispatcher restarted on the new code and immediately claimed and rebuilt `20d5c8af`. Not yet observed live: the plan nudge fires from the reconcile sweep, which rides the same tick gate as an in-flight build, so it is unit-tested (10 cases) but has not yet been seen in production logs.
+
+**Also decided:** approval remains operator-only. An attempt to record the two pending approvals from this session was correctly refused, and left refused — recording an approval is the one action this architecture reserves for a human, and an agent writing it would defeat the control regardless of intent.
+
+**Consequence:** Queue reconciled — 5 stale requests cancelled (one duplicate, one superseded by a shipped project, three rewordings of a single FlipRadar question that each tripped a different classifier rule), 4 dead tasks closed, 2 unpushable builds requeued and rebuilding. **Made by:** David (queue triage approvals, "fix the dispatcher... firm up its functionality") / Claude (diagnosis, fix, live verification).
