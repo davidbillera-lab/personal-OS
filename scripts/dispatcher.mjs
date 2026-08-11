@@ -34,11 +34,12 @@ import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve } from 'path'
 import crypto from 'crypto'
-import { notifyAwaitingApproval, notifyClassifierHold, notifyBuildFailed } from './lib/telegram-notify.mjs'
+import { notifyAwaitingApproval, notifyClassifierHold, notifyBuildFailed, notifyPlanNeeded } from './lib/telegram-notify.mjs'
 import { pickAdapter } from './lib/claude-executor-adapter.mjs'
 import { classifyOps } from './lib/ops-classifier.mjs'
 import { sanitizeForMC } from './lib/sanitize-result.mjs'
 import { isClaimablePlanned } from './lib/planned-claim.mjs'
+import { needsPlanNudge, planNudgeKey, PLAN_NUDGE_AFTER_MS } from './lib/plan-nudge.mjs'
 import {
   withRetry, persistAttemptResult, clearAttemptResult, recoverFinishedBuild, isOurAttempt,
 } from './lib/attempt-recovery.mjs'
@@ -327,14 +328,28 @@ async function requestApproval(sb, row, result) {
 }
 
 // ---- Path B: find an approved, pushable row ----
+// NOT filtered on assigned_to — same hole reconcile() had, and for the same reason.
+// mc_assign_request can rewrite assigned_to at any time (e0afb33a and 713f6980 were both
+// sitting at assigned_to='hermes' with a real reviewed commit on disk), and the old
+// `.eq('assigned_to','claude')` made an approved row invisible to the only code that can
+// push it. reconcile() then logged "leaving for path B resume" every sweep while path B
+// could never see it — a silent, permanent limbo with no alert. Ownership is decided by
+// evidence on disk (isOurAttempt), which no external write can forge; the gate in
+// gatedPush() independently re-checks workspace_ref exists before anything is pushed.
 async function findPushable(sb) {
   const { data, error } = await sb
     .from('mc_requests').select('*')
-    .eq('assigned_to', 'claude').eq('status', 'in_progress').eq('phase', 'pushing')
+    .eq('status', 'in_progress').eq('phase', 'pushing')
     .not('approved_at', 'is', null).not('reviewed_sha', 'is', null).not('workspace_ref', 'is', null)
-    .order('approved_at', { ascending: true }).limit(1)
+    .order('approved_at', { ascending: true }).limit(20)
   if (error) throw new Error(`findPushable failed: ${error.message}`)
-  return data && data.length ? data[0] : null
+  // Oldest approval first, but only rows THIS dispatcher built. A row claimed by another
+  // worker has no attempt directory here, so we leave it strictly alone.
+  for (const r of data || []) {
+    if (isOurAttempt(BUILDS_DIR, r)) return r
+    console.log(`[push] skip ${r.id} — approved but not this dispatcher's attempt (no workspace on disk)`)
+  }
+  return null
 }
 
 // ---- Path B: the SHA-bound GATED PUSH (safety core) ----
@@ -459,6 +474,46 @@ async function reconcile(sb) {
   }
 }
 
+// ---- Hermes planning wakeup ----
+// Rides the same sweep as reconcile(). The relay's two halves both work — Hermes deposits a
+// spec via mc_submit_plan (phase='planned'), claimPlannedOne() builds it from row.plan — but
+// nothing ever TELLS Hermes a request is waiting, so submitted/phase=null rows wait forever
+// (26d1849b: two days). This makes that stall loud within minutes instead of hours.
+// Deduped through mc_alert_sends so a still-unplanned row is announced once, not every sweep.
+async function nudgeUnplanned(sb) {
+  const { data: rows, error } = await sb.from('mc_requests')
+    .select('id, title, status, phase, plan, updated_at, created_at')
+    .eq('status', 'submitted').is('phase', null).is('plan', null)
+  if (error) { console.log(`[nudge] query failed: ${error.message}`); return }
+
+  const now = new Date()
+  const waiting = (rows || []).filter((r) => needsPlanNudge(r, now, PLAN_NUDGE_AFTER_MS))
+  if (waiting.length === 0) return
+
+  // Read the ledger once. A read failure degrades to "announce anyway" — same fail-safe
+  // direction as the serverless sweep: a duplicate nudge beats a silent stall.
+  const keys = waiting.map(planNudgeKey)
+  let alreadySent = new Set()
+  const { data: sent, error: sErr } = await sb.from('mc_alert_sends').select('transition_key').in('transition_key', keys)
+  if (sErr) console.log(`[nudge] ledger read failed, announcing unsuppressed: ${sErr.message}`)
+  else alreadySent = new Set((sent || []).map((s) => s.transition_key))
+
+  for (const r of waiting) {
+    const key = planNudgeKey(r)
+    if (alreadySent.has(key)) continue
+    const waitingMin = Math.round((now.getTime() - Date.parse(r.updated_at ?? r.created_at)) / 60000)
+    const ping = await notifyPlanNeeded({ id: r.id, title: r.title || clip(r.id, 40), waitingMin })
+      .catch((e) => ({ sent: false, reason: e?.message }))
+    console.log(`[nudge] plan needed ${r.id} (${waitingMin}min) ${JSON.stringify(ping)}`)
+    if (!ping.sent) continue // not announced ⇒ don't record it, so the next sweep retries
+    // Record only what actually went out. A ledger write failure means a repeat next
+    // sweep — noisy, not silent, which is the correct way to fail.
+    const { error: lErr } = await sb.from('mc_alert_sends')
+      .upsert({ transition_key: key, request_id: r.id, bucket: 'plan_nudge' }, { onConflict: 'transition_key', ignoreDuplicates: true })
+    if (lErr) console.log(`[nudge] ledger write failed for ${r.id} (will re-announce): ${lErr.message}`)
+  }
+}
+
 // ---- one tick ----
 async function tick(sb) {
   if (isPaused()) return // skip every tick while paused; isPaused() logs the engage/release edge only
@@ -495,6 +550,9 @@ async function guardedTick(sb) {
     if (Date.now() - lastReconcileAt >= RECONCILE_MS) {
       lastReconcileAt = Date.now()
       try { await reconcile(sb) } catch (e) { console.error(`[reconcile] error: ${e.message}`) }
+      // Separate try: a nudge failure must never stop reconcile from running, and vice
+      // versa. Both are best-effort sweeps; neither is allowed to take the tick down.
+      try { await nudgeUnplanned(sb) } catch (e) { console.error(`[nudge] error: ${e.message}`) }
     }
     await safeTick(sb)
   } finally { ticking = false }

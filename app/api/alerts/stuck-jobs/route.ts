@@ -45,7 +45,10 @@ export async function GET(req: NextRequest) {
   const { data, error } = await supabase
     .from('mc_requests')
     .select('id, title, status, phase, blocker, updated_at')
-    .in('status', ['failed', 'blocked', 'awaiting_approval', 'submitted'])
+    // 'in_progress' is here for the stuck_pushing bucket: a row approved for push that
+    // never pushed. Omitting it is why a stranded approval was invisible to this sweep.
+    // Non-stale in_progress rows are normal mid-flight work and bucket to null below.
+    .in('status', ['failed', 'blocked', 'awaiting_approval', 'submitted', 'in_progress'])
     .order('updated_at', { ascending: true })
 
   if (error) {

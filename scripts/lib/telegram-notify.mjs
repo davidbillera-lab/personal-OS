@@ -88,6 +88,48 @@ export async function notifyBuildFailed(params = {}) {
   return { sent: true }
 }
 
+// Hermes planning wakeup. Sent when a submitted request has waited past the nudge
+// threshold with no plan. Addressed to Hermes (which reads this channel) and names the
+// exact tool call that unsticks it, so the reply needs no lookup. Same no-throw /
+// config-guard pattern as the notifiers above.
+//
+// This is a nudge over a shared channel, not a direct call into Hermes — see the header of
+// lib/plan-nudge.mjs for why an ingress is a trust-ladder step rather than a bug fix.
+export async function notifyPlanNeeded(params = {}) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN
+  const chatId = process.env.TELEGRAM_CHAT_ID
+  if (!botToken || !chatId) {
+    const missing = [!botToken && 'TELEGRAM_BOT_TOKEN', !chatId && 'TELEGRAM_CHAT_ID'].filter(Boolean)
+    console.error('telegram-notify: missing config', missing)
+    return { sent: false, reason: 'not configured' }
+  }
+
+  const { id, title, waitingMin } = params
+  const text = outbound([
+    `📝 Hermes — plan needed: ${v(title)}`,
+    `Request: ${v(id)}`,
+    `Waiting: ${v(waitingMin)} min with no plan`,
+    '',
+    'Nothing auto-claims an unplanned request. To unstick it:',
+    `  mc_submit_plan(request_id="${v(id)}", plan="<the build spec>")`,
+    '',
+    'That sets phase=planned and the dispatcher builds it on the next tick.',
+  ].join('\n'))
+
+  const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+  })
+
+  if (!resp.ok) {
+    console.error('telegram-notify: send failed', resp.status)
+    return { sent: false, reason: `telegram ${resp.status}` }
+  }
+
+  return { sent: true }
+}
+
 // Sent when the ops-classifier auto-holds a claimed request instead of building it.
 // Same no-throw / config-guard pattern as notifyAwaitingApproval above.
 export async function notifyClassifierHold(params = {}) {
