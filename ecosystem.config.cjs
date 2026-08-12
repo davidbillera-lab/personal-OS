@@ -47,6 +47,23 @@ module.exports = {
       // residual inference-spend on the mounted token — do NOT relax it. Runbook:
       // docs/runbooks/go-live-autonomous-relay.md
       DISPATCHER_CLAIM_PLANNED: '1', // ENABLED 2026-08-06 (go-live). Rollback: '0' + pm2 restart.
+
+      // Repos a build may be given a working copy of, comma-separated `owner/repo`.
+      // UNSET = OFF, and off means every build gets an empty `git init` workspace —
+      // exactly how the sandbox behaved before cloning existed. Leave it unset unless you
+      // have a specific reason; enabling a repo is a security decision, not a convenience.
+      //
+      // WHAT ENABLING COSTS YOU: C6's red team found the mounted OAuth credential still
+      // authorizes plain /v1/messages inference, so a build can relay small payloads out
+      // as ordinary model text. With an empty workspace there was nothing worth taking.
+      // Naming a repo here puts that repo's source inside the box. The clone is shallow
+      // (no history) and credential-shaped files are stripped before the container starts,
+      // but the source itself is readable by the build. Add a repo only when the work
+      // genuinely requires seeing the code, and prefer removing it again afterwards.
+      //
+      // Reads projects.repo_url for the request's project; anything not matching an entry
+      // here fails closed to an empty workspace. Example:
+      //   DISPATCHER_CLONEABLE_REPOS: 'davidbillera-lab/personal-OS',
     },
   }],
 }

@@ -588,3 +588,32 @@ Also: executor timeout 10min → 30min (two builds were killed at exactly 600s, 
 **Verified live this session:** the plan nudge fired in production — `[nudge] plan needed 26d1849b (4841min) {"sent":true}` — closing the one thing the earlier entry listed as unproven. The 600s→1800s timeout was vindicated too: the `20d5c8af` rebuild ran 1379s and would have been SIGKILLed under the old wall.
 
 **Consequence:** Approval remains operator-only; an agent attempt to record one was refused this session and left refused. Rejections carry the real QC findings in `blocker` so a resubmit starts from the defect list. **Made by:** David ("go ahead and reject, I agree with your assessment") / Claude (QC recovery, diagnosis, scope finding).
+
+
+---
+
+### 2026-08-11 (later still) - The sandbox can see real code now, and a shebang had been hiding a broken security test
+
+**Decision:** Two changes, both on main (`aa6d9d6`, `cb9d844`). Suite 167 → **183 passing**.
+
+**1. The autonomous builder can now be given a working copy of a real repo — default OFF.**
+
+`gitInitRepo()` git-inits an *empty* directory, so every build started from zero and could only produce greenfield artifacts. That is why `e0afb33a` — commissioned as a gap analysis of *existing* REELFLOW code — was unsatisfiable by construction.
+
+`provisionWorkspace()` keeps that behaviour byte-for-byte when there is no clone target. With one, the **host** clones (the dispatcher already holds git credentials, so the container never receives a token and C6's zero-secrets `childEnv` invariant is untouched), `--depth 1 --single-branch` so committed history never enters the box, credential-shaped files are stripped from the working tree and the scrub is committed, and HEAD is detached so a build cannot fast-forward a real branch name.
+
+The scrub list comes **straight from the CodexQC finding on `e0afb33a`** — the one that caught an inspector advertising "never reads credential files" while missing `.npmrc`, `.netrc`, `secrets.yml`, `client_secret.json`, `id_ed25519`, `kubeconfig`, `.p8`. Committed `.env.example`/`.sample`/`.template` are deliberately **kept**, because the same review flagged treating templates as secrets as a false positive. A rejected build's QC directly hardened the thing that replaced it.
+
+`buildPrompt()` now states the true workspace shape. Telling a build the repo is empty when it is not is exactly the failure that produced `e0afb33a`, and the inverse would be worse. `runHostQc()` needed no change — it already bases on `sha^`, so it reviews only the build's own commit against the clone base.
+
+**Residual risk, on the record:** C6's red team found the mounted OAuth credential still authorizes plain `/v1/messages` inference, so a build can relay small payloads out as ordinary model text. With an empty workspace there was nothing worth taking; with a repo cloned in, that residual is material. This is why `DISPATCHER_CLONEABLE_REPOS` **starts empty and every ambiguity fails closed to an empty repo**. Enabling a repo is a security decision, documented as such in `ecosystem.config.cjs`.
+
+**2. A shebang had been silently breaking the C6-P5 test.**
+
+`tests/sanitize-dispatcher-path.test.ts` — the test proving secret scrubbing on the live return path — was failing with a bare `SyntaxError: Invalid or unexpected token` that named `dispatcher.mjs` but no cause. Root cause: `#!/usr/bin/env node` on line 1. **Node strips a shebang when it runs or imports a file; vitest's module evaluator inlines the source and hands it to `new Script()` verbatim, where `#!` is a hard parse error.** pm2 launches the dispatcher with an explicit node interpreter, so the shebang bought nothing and cost the security test that guards this file.
+
+Diagnosis cost far more than the fix, for a reason worth remembering: several probes appeared to *pass* because they caught the error in a `catch` whose `console.log` vitest hides for passing tests. **Vitest only shows console output for failing tests** — a diagnostic that swallows the error it is hunting will lie to you.
+
+Also removed the reason that test had to race module side effects at all. Importing the dispatcher **used to start it**, so an `import` ran the live dispatcher against production Mission Control. `main()` is now behind an entry-point check and the internals are exported, so the test calls `runAttempt()` directly. Verified: pm2 restarts clean, 0 unstable restarts.
+
+**Consequence:** the sandbox-never-clones limit is lifted but stays closed by default; the C6-P5 proof is live again; and importing the dispatcher is no longer dangerous. **Made by:** David ("start with the clone and then move on to C6, don't stop till done with both") / Claude.
