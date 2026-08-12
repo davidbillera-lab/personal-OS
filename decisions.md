@@ -566,3 +566,25 @@ Also: executor timeout 10min → 30min (two builds were killed at exactly 600s, 
 **Also decided:** approval remains operator-only. An attempt to record the two pending approvals from this session was correctly refused, and left refused — recording an approval is the one action this architecture reserves for a human, and an agent writing it would defeat the control regardless of intent.
 
 **Consequence:** Queue reconciled — 5 stale requests cancelled (one duplicate, one superseded by a shipped project, three rewordings of a single FlipRadar question that each tripped a different classifier rule), 4 dead tasks closed, 2 unpushable builds requeued and rebuilding. **Made by:** David (queue triage approvals, "fix the dispatcher... firm up its functionality") / Claude (diagnosis, fix, live verification).
+
+
+---
+
+### 2026-08-11 (later) - Three builds, three FIX-FIRST, and the sandbox can't see your code
+
+**Decision:** Rejected `e0afb33a` and `713f6980` after reading the CodexQC reports, and recorded the findings in each row's `blocker` rather than a generic label. Recommending rejection of `20d5c8af` on the same grounds.
+
+**The correction that mattered:** `e0afb33a`'s DB verdict read `UNKNOWN`, and the prior entry treated that as "QC never ran, review it manually." Wrong. **QC ran and returned FIX-FIRST**; only the verdict *parse* was lost along with the write-back. `parseVerdict()` returns `UNKNOWN` when it cannot find SHIP/FIX-FIRST/RECONSIDER in the output — it is a parse failure, not an absence. The full report was on disk at `.codex-qc/` the entire time. **Standing rule: a DB verdict of UNKNOWN means read the report on disk, never that QC was skipped.**
+
+**What the reports found — three for three, every blocker privacy or credentials:**
+- `e0afb33a` — `tools/inspect-reelflow.mjs` advertised "never reads credential files" while its denylist missed `.npmrc`, `.netrc`, `secrets.yml`, `client_secret.json`, `id_ed25519`, `kubeconfig`, `firebase-adminsdk*.json`, `.p8` — all opened by `readFileSync()` during content scans, in a tool built to run against the production REELFLOW repo. Direct Rule #10 violation. Its regression test only covered `.env`, which is how the safety claim passed.
+- `713f6980` — privacy guard runs at step 3 but optional context is collected at step 6 (later free text never scanned); telemetry logs raw `reason_text` against a "no learner data, ever" promise; the ingest-guard execution boundary is undefined, so an implementer could comply exactly and still POST a child's homework screenshot to a third-party vision API.
+- `20d5c8af` (rebuild) — the Gate C enforcement layer itself: `validateEvent()` only PII-scans top-level strings, so `page:{email:'child@example.com'}` persists; and child events are gated on `destination.kind==='first_party'`, a string *label* rather than identity, so a registry entry can route child data off the first-party store.
+
+**Reasoning:** CodexQC is the load-bearing control on this pipeline, not a formality. Every one of these would have shipped a privacy or credential defect into a product with paid child accounts, and each was invisible from the request text alone. The pattern across three independent builds is that autonomous output is *structurally* strong and *specifically* unsafe — good architecture, sound docs, and a concrete hole in exactly the boundary the task was about.
+
+**The scope finding:** `gitInitRepo()` runs `git init` on an empty directory. **The sandbox never clones anything.** Every autonomous build starts from zero. `e0afb33a` was commissioned as a gap analysis of *existing* REELFLOW code and was therefore unsatisfiable by construction — to the build agent's credit it inspected the empty workspace, documented the uniform negative, and refused to fabricate verdicts. But the request should never have been sent. **The autonomous builder produces standalone greenfield artifacts only; it cannot see, review, or modify any portfolio repo.** Anything phrased "analyze/fix/extend existing X" must go to a real session.
+
+**Verified live this session:** the plan nudge fired in production — `[nudge] plan needed 26d1849b (4841min) {"sent":true}` — closing the one thing the earlier entry listed as unproven. The 600s→1800s timeout was vindicated too: the `20d5c8af` rebuild ran 1379s and would have been SIGKILLed under the old wall.
+
+**Consequence:** Approval remains operator-only; an agent attempt to record one was refused this session and left refused. Rejections carry the real QC findings in `blocker` so a resubmit starts from the defect list. **Made by:** David ("go ahead and reject, I agree with your assessment") / Claude (QC recovery, diagnosis, scope finding).
