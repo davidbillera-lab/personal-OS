@@ -1,5 +1,11 @@
-#!/usr/bin/env node
 // Rig-side autonomous dispatcher — Claude-only v0 (minimal voice slice, Piece 4).
+//
+// NO SHEBANG, deliberately. Node strips `#!` when it runs or imports a file, but vitest's
+// module evaluator inlines the source and hands it to `new Script()` verbatim, where `#!`
+// is a hard SyntaxError. That broke the C6-P5 return-path test — the one that proves secret
+// scrubbing on the live path — with an error that pointed at the file but named no cause.
+// pm2 launches this with an explicit node interpreter (ecosystem.config.cjs), so the
+// shebang bought nothing and cost the security test that guards this file.
 //
 // Deterministic routing ONLY — no AI reasoning lives here. Each poll tick:
 //   Path B (resume push): an operator-approved row (status=in_progress, phase=pushing,
@@ -40,6 +46,7 @@ import { classifyOps } from './lib/ops-classifier.mjs'
 import { sanitizeForMC } from './lib/sanitize-result.mjs'
 import { isClaimablePlanned } from './lib/planned-claim.mjs'
 import { needsPlanNudge, planNudgeKey, PLAN_NUDGE_AFTER_MS } from './lib/plan-nudge.mjs'
+import { resolveCloneTarget, cloneAllowlist } from './lib/clone-target.mjs'
 import {
   withRetry, persistAttemptResult, clearAttemptResult, recoverFinishedBuild, isOurAttempt,
 } from './lib/attempt-recovery.mjs'
@@ -236,6 +243,21 @@ async function classifierGate(sb, row) {
   return true
 }
 
+// ---- Path A: which repo (if any) may this request's build see? ----
+// Default OFF: DISPATCHER_CLONEABLE_REPOS unset ⇒ cloneAllowlist() is empty ⇒
+// resolveCloneTarget() returns null ⇒ an empty git init, exactly as before. Every lookup
+// failure (no project, no repo_url, query error) also fails closed to null.
+async function cloneTargetFor(sb, row) {
+  const allowlist = cloneAllowlist()
+  if (allowlist.length === 0 || !row.project_id) return null
+  const { data, error } = await sb.from('projects').select('repo_url').eq('id', row.project_id).maybeSingle()
+  if (error) { console.log(`[clone] repo lookup failed for ${row.id}: ${error.message} — building empty`); return null }
+  const target = resolveCloneTarget(data?.repo_url, allowlist)
+  if (!target) return null
+  console.log(`[clone] ${row.id} → ${target.slug} (allowlisted)`)
+  return target
+}
+
 // ---- Path A: build attempt via adapter ----
 async function runAttempt(sb, row) {
   if (await classifierGate(sb, row)) return
@@ -243,11 +265,12 @@ async function runAttempt(sb, row) {
   const attemptId = row.attempt_id
   const workspace = resolve(BUILDS_DIR, row.id, attemptId)
   const started = Date.now()
-  console.log(`[build] start ${row.id} executor=${EXECUTOR} workspace=${workspace}`)
+  const cloneTarget = await cloneTargetFor(sb, row)
+  console.log(`[build] start ${row.id} executor=${EXECUTOR} workspace=${workspace} clone=${cloneTarget?.slug || 'none'}`)
 
   let result
   try {
-    result = await adapter.launch({ workspace, request: row, env: process.env, timeoutMs: TIMEOUT_MS, skipPermissions: SKIP_PERMISSIONS })
+    result = await adapter.launch({ workspace, request: row, env: process.env, timeoutMs: TIMEOUT_MS, skipPermissions: SKIP_PERMISSIONS, cloneTarget })
   } catch (e) {
     // Raw executor stderr — sanitize before it reaches the log OR mc_requests.blocker.
     console.log(`[build] FAILED ${row.id}: ${clip(e.message)}`)
@@ -631,4 +654,24 @@ async function main() {
   if (shuttingDown) console.log('[dispatcher] shutdown complete — exiting cleanly')
 }
 
-main().catch((e) => { console.error(`[dispatcher] fatal: ${e.message}`); process.exit(1) })
+// Exported so tests can drive the real code paths directly instead of importing this file
+// for its side effects. Importing the dispatcher USED to start it — which meant a test (or
+// a careless `import`) ran the live dispatcher against production Mission Control, and made
+// the C6-P5 return-path test depend on racing module-load side effects.
+export {
+  runAttempt, requestApproval, findPushable, gatedPush, reconcile, nudgeUnplanned,
+  classifierGate, claimOne, claimPlannedOne, cloneTargetFor, tick, main,
+  createAdminSupabaseClient,
+}
+
+// Only start when this file is the process entry point (`node scripts/dispatcher.mjs`,
+// which is how pm2 runs it). Under `import`, this is false and nothing starts.
+const isEntrypoint = (() => {
+  try {
+    return !!process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
+  } catch { return false }
+})()
+
+if (isEntrypoint) {
+  main().catch((e) => { console.error(`[dispatcher] fatal: ${e.message}`); process.exit(1) })
+}
