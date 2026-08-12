@@ -26,11 +26,36 @@ const short = (s: string | null | undefined, n = 70): string => {
   return t.length > n ? `${t.slice(0, n - 1)}…` : t
 }
 
-function isStalePlanned(r: StuckRequest, now: Date): boolean {
-  if (r.status !== 'submitted' || r.phase !== 'planned') return false
+function isStale(r: StuckRequest, now: Date): boolean {
   const t = Date.parse(r.updated_at)
   if (Number.isNaN(t)) return false // unparseable → not stale (fail safe, not noisy)
   return now.getTime() - t > STALE_PLANNED_MS
+}
+
+function isStalePlanned(r: StuckRequest, now: Date): boolean {
+  if (r.status !== 'submitted' || r.phase !== 'planned') return false
+  return isStale(r, now)
+}
+
+// A workflow sitting in 'submitted' with no plan yet is waiting on Hermes to PLAN it —
+// and nothing in the system consumes that state automatically, so it waits forever unless
+// someone assigns it by hand. It was invisible here too (the old filter required
+// phase==='planned'), which is how request 26d1849b sat silent for two days. The stall is
+// upstream of the dispatcher, so the fix is to make it loud, not to auto-claim it.
+function isStaleAwaitingPlan(r: StuckRequest, now: Date): boolean {
+  if (r.status !== 'submitted' || r.phase === 'planned') return false
+  return isStale(r, now)
+}
+
+// Approved for push but never pushed. A real push completes in seconds, so a row still
+// sitting in in_progress/pushing hours later is stuck, not slow. This bucket existed
+// nowhere before: alertBucket() returned null for every in_progress row, so when
+// findPushable()'s assigned_to filter made an approved row invisible to the pusher, the
+// sweep couldn't see it either — the operator's approval simply evaporated with no
+// failure and no alert. Both halves are fixed; this is the half that stays loud.
+function isStuckPushing(r: StuckRequest, now: Date): boolean {
+  if (r.status !== 'in_progress' || r.phase !== 'pushing') return false
+  return isStale(r, now)
 }
 
 const bullet = (r: StuckRequest): string => {
@@ -55,18 +80,23 @@ export function transitionKey(r: StuckRequest, now: Date = new Date()): string {
   // stale_planned is a property of time, not of a state change, so it keys on
   // the plan deposit alone -- one "never picked up" nudge per planned request.
   if (bucket === 'stale_planned') return `${r.id}:stale_planned`
+  if (bucket === 'stale_unplanned') return `${r.id}:stale_unplanned`
+  // Keyed on the approval, not the clock: one nudge per approved-but-unpushed row.
+  if (bucket === 'stuck_pushing') return `${r.id}:stuck_pushing`
   if (bucket === 'blocked') return `${r.id}:blocked:${oneLine(r.blocker)}`
   return `${r.id}:${bucket}`
 }
 
-export type AlertBucket = 'failed' | 'blocked' | 'awaiting' | 'stale_planned'
+export type AlertBucket = 'failed' | 'blocked' | 'awaiting' | 'stale_planned' | 'stale_unplanned' | 'stuck_pushing'
 
 /** Which bucket a row belongs to, or null when it is not actionable. */
 export function alertBucket(r: StuckRequest, now: Date = new Date()): AlertBucket | null {
   if (r.status === 'failed') return 'failed'
   if (r.status === 'blocked') return 'blocked'
   if (r.status === 'awaiting_approval') return 'awaiting'
+  if (isStuckPushing(r, now)) return 'stuck_pushing'
   if (isStalePlanned(r, now)) return 'stale_planned'
+  if (isStaleAwaitingPlan(r, now)) return 'stale_unplanned'
   return null
 }
 
@@ -95,6 +125,8 @@ export function suppressAlreadySent(
  * (all-clear → the route sends nothing, matching the daily digest). Buckets:
  *   🛑 failed        — build errored/timed out; run it interactively
  *   ⚠️ blocked       — classifier-held or parked; needs review/release
+ *   🚨 stuck_pushing — approved for push but never pushed; approval is stranded
+ *   📝 not planned   — submitted but Hermes never planned it (nothing auto-claims this)
  *   🕒 stale planned — deposited but never picked up (dispatcher may be down)
  *   🔔 awaiting      — built, waiting on your push approval
  */
@@ -106,10 +138,14 @@ export function buildStuckJobsDigest(
   const blocked = rows.filter((r) => r.status === 'blocked').map(bullet)
   const awaiting = rows.filter((r) => r.status === 'awaiting_approval').map(bullet)
   const stalePlanned = rows.filter((r) => isStalePlanned(r, now)).map(bullet)
+  const staleUnplanned = rows.filter((r) => isStaleAwaitingPlan(r, now)).map(bullet)
+  const stuckPushing = rows.filter((r) => isStuckPushing(r, now)).map(bullet)
 
   const sections: string[] = []
   if (failed.length) sections.push(`🛑 FAILED — too big / errored, run here:\n${failed.join('\n')}`)
   if (blocked.length) sections.push(`⚠️ HELD — need review/release:\n${blocked.join('\n')}`)
+  if (stuckPushing.length) sections.push(`🚨 APPROVED BUT NEVER PUSHED — your approval is stranded:\n${stuckPushing.join('\n')}`)
+  if (staleUnplanned.length) sections.push(`📝 NOT PLANNED — waiting on Hermes to plan it:\n${staleUnplanned.join('\n')}`)
   if (stalePlanned.length) sections.push(`🕒 NOT PICKED UP — dispatcher may be down:\n${stalePlanned.join('\n')}`)
   if (awaiting.length) sections.push(`🔔 AWAITING YOUR APPROVAL:\n${awaiting.join('\n')}`)
 

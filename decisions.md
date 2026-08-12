@@ -522,3 +522,69 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 **Reasoning:** C6 was finished on 2026-08-06, but three records still read as though it were mid-build — the spec header said "Ready for build window," and MC's status/next_action listed the whole P1–P6 sequence as the next action and claimed the dispatcher was stopped. That stale paperwork cost real operator attention twice: it made a working autonomous pipeline look broken, and it left the classifier relaxation sitting in the DoD looking like an unfinished task when it is in fact a thing we have decided never to do. Documentation that describes finished work as pending is worse than no documentation, because it manufactures phantom work.
 
 **Consequence:** C6 does not get reopened. The spec now carries six post-closure standing rules (no classifier relaxation; never introduce an npm token; the sanitizer is not a boundary; executor image integrity is an untested host-side assumption; `executor:net` must be up or the dispatcher fails closed; re-run both suites after any proxy/image/allowlist change). MC status and next_action rewritten to describe the live system instead of the finished build. The two Hermes requests that appeared "stuck" were never dispatcher failures — one was a correct classifier hold, the other a 600s build timeout. **Made by:** David ("seal this and put it to bed") / Claude (re-certification + record reconciliation).
+
+
+---
+
+### 2026-08-10 - The autonomous relay was finishing builds and throwing them away
+
+**Decision:** Fixed four defects on the path between "build finished" and "operator can see it," plus the alerting blind spot that hid them. Branch `fix/dispatcher-durable-attempts` (commits 0c7fd6a, ccffbfd). The 2026-08-07 entry recorded the two apparently-stuck Hermes requests as "never dispatcher failures — one a correct classifier hold, the other a 600s build timeout." The classifier half was right. **The timeout half was wrong, and the write-off cost us three days.** Request `e0afb33a` had built *cleanly* — 684s, real commit `43f49d6`, CodexQC FIX-FIRST — and the result was destroyed by a single `TypeError: fetch failed` on the Supabase write-back. The throw unwound the tick, and the row sat in `claimed`/`building` with a finished commit stranded on disk that nothing would ever look at again.
+
+**What was actually broken:**
+1. **No retry, and a throw, on the write-back.** One flaky HTTP call discarded 11 minutes of paid compute. Now retried with backoff; a final failure returns instead of throwing, so the tick survives.
+2. **No durable record of a finished build.** The adapter result is now written to a sidecar *next to* the workspace (never inside it — that directory is the untrusted build's rw mount) before any network call, and replayed until MC accepts it.
+3. **Recovery ran at startup only.** The dispatcher had been up since 08-06, so the 08-08 strandings were never re-examined. Now sweeps every 5 min, inside the tick gate so it can never overlap a build.
+4. **Recovery destroyed salvageable work.** Any mid-build row without `reviewed_sha` was marked failed. It now checks disk first — sidecar, else a commit in the workspace. The executor commits as its *last* step, so a container SIGKILLed at the wall usually still has the work: `268a0c76` did, commit `8b73b991`.
+
+Also: executor timeout 10min → 30min (two builds were killed at exactly 600s, a third survived at 684s — the timeout was running through the middle of normal work, not above it); and reconcile no longer filters on `assigned_to`, because `mc_assign_request` can rewrite it mid-build (`e0afb33a` was flipped to `hermes` while the dispatcher was building it, making the row invisible to its own recovery). Ownership is now proven by the build workspace on disk, which no external write can forge.
+
+**The blind spot:** a workflow awaiting Hermes planning sits in `submitted`/`phase=null` — the one state with no automatic consumer *and* the one state the stuck-jobs sweep could not see, since both the fetch filter and `isStalePlanned()` required `phase==='planned'`. That is how `26d1849b` stalled silently for two days. Added a `stale_unplanned` bucket with its own dedup key.
+
+**Reasoning:** Every one of these turned a recoverable situation into a permanent loss, and each was individually invisible — a row stuck in `claimed`/`building` looks identical whether the build died or finished, so the symptom read as a broken handoff. It was not. Hermes writes plans to MC fine (`mc_submit_plan`, actor `hermes`, twice on 08-06, ~30k chars each) and the dispatcher claims them fine (three `dispatcher.claim_planned` events). The failure was always downstream, in the last inch.
+
+**Consequence:** Proven live, not on paper. On restart the sweep salvaged `e0afb33a` (commit `43f49d6` → `awaiting_approval`), and the full loop closed end to end on `268a0c76`: salvage → operator approval via ChatGPT voice → gated push → `completed`. Zero rows now sit in `claimed`/`in_progress`. Suite 144 → 150 passing.
+
+**Deliberately NOT done:** auto-starting Hermes planning. Nothing consumes a `submitted` workflow automatically, and making the dispatcher wake Hermes is a trust-ladder step (`specs/2026-07-16-hermes-ambient-layer-design.md`), not a side effect of a bug fix. The stall is now loud; who closes it is the operator's call. **Made by:** David ("finish the job end to end") / Claude (diagnosis, fix, live verification).
+
+
+---
+
+### 2026-08-11 - The operator's approval was the last thing that could vanish silently
+
+**Decision:** Fixed the final gap on the autonomous relay — an approved build could never be pushed if the row had been reassigned — and shipped the Hermes planning wakeup that the 2026-08-10 entry deliberately left out. Branch `fix/dispatcher-durable-attempts`, commit `56ccc51`. Suite 150 → 167 passing.
+
+**What was broken:** `findPushable()` filtered `assigned_to='claude'`. That is the *same hole* the previous entry had just fixed in `reconcile()`, in the same file, for the same reason — and it was left in place. `mc_assign_request` rewrites `assigned_to` at any time, and both `e0afb33a` and `713f6980` were sitting at `assigned_to='hermes'` with a real reviewed commit on disk. The filter made them invisible to the only code that can push. Worse, `reconcile()` looked straight at them every sweep and logged *"approved+pushing → leaving for path B resume"* — handing off to a path that could not see them. The operator approves, nothing pushes, nothing fails, nothing alerts. Ownership now comes from disk evidence (`isOurAttempt`), which no external write can forge.
+
+**The blind spot that kept it quiet:** `alertBucket()` returned `null` for every `in_progress` row, and the stuck-jobs route never fetched `in_progress` at all. So the one state that meant "your approval is stranded" was the one state the sweep was structurally incapable of reporting. Added a `stuck_pushing` bucket *and* the missing status in the route query — either alone would have been dead code.
+
+**The pattern worth naming:** three consecutive sessions have now found the same class of bug — a filter that looks like a safety narrowing but is actually a blind spot (`assigned_to` in reconcile, `assigned_to` in findPushable, `phase==='planned'` in the alert sweep). Filtering by *who claims to own a row* is unsound in a system where ownership is externally mutable. Filter on evidence, not on labels.
+
+**Hermes planning wakeup (reversing the previous entry's deferral):** Both halves of the relay already worked — `mc_submit_plan` sets `phase='planned'`, `claimPlannedOne()` builds from `row.plan`, and `buildPrompt()` already prefers the plan over `request_text`. Nothing was missing except a signal. The dispatcher sweep now announces a `submitted`/`phase=null` row within ~30 min, deduped through `mc_alert_sends`, naming the exact `mc_submit_plan` call that unsticks it. This is a nudge over a shared channel, **not an ingress into Hermes** — the dispatcher still cannot call Hermes, and building an inbound path remains a trust-ladder step. What changed is the detection gap: ~14h (twice-daily serverless sweep) → minutes.
+
+**Verified:** dispatcher restarted on the new code and immediately claimed and rebuilt `20d5c8af`. Not yet observed live: the plan nudge fires from the reconcile sweep, which rides the same tick gate as an in-flight build, so it is unit-tested (10 cases) but has not yet been seen in production logs.
+
+**Also decided:** approval remains operator-only. An attempt to record the two pending approvals from this session was correctly refused, and left refused — recording an approval is the one action this architecture reserves for a human, and an agent writing it would defeat the control regardless of intent.
+
+**Consequence:** Queue reconciled — 5 stale requests cancelled (one duplicate, one superseded by a shipped project, three rewordings of a single FlipRadar question that each tripped a different classifier rule), 4 dead tasks closed, 2 unpushable builds requeued and rebuilding. **Made by:** David (queue triage approvals, "fix the dispatcher... firm up its functionality") / Claude (diagnosis, fix, live verification).
+
+
+---
+
+### 2026-08-11 (later) - Three builds, three FIX-FIRST, and the sandbox can't see your code
+
+**Decision:** Rejected `e0afb33a` and `713f6980` after reading the CodexQC reports, and recorded the findings in each row's `blocker` rather than a generic label. Recommending rejection of `20d5c8af` on the same grounds.
+
+**The correction that mattered:** `e0afb33a`'s DB verdict read `UNKNOWN`, and the prior entry treated that as "QC never ran, review it manually." Wrong. **QC ran and returned FIX-FIRST**; only the verdict *parse* was lost along with the write-back. `parseVerdict()` returns `UNKNOWN` when it cannot find SHIP/FIX-FIRST/RECONSIDER in the output — it is a parse failure, not an absence. The full report was on disk at `.codex-qc/` the entire time. **Standing rule: a DB verdict of UNKNOWN means read the report on disk, never that QC was skipped.**
+
+**What the reports found — three for three, every blocker privacy or credentials:**
+- `e0afb33a` — `tools/inspect-reelflow.mjs` advertised "never reads credential files" while its denylist missed `.npmrc`, `.netrc`, `secrets.yml`, `client_secret.json`, `id_ed25519`, `kubeconfig`, `firebase-adminsdk*.json`, `.p8` — all opened by `readFileSync()` during content scans, in a tool built to run against the production REELFLOW repo. Direct Rule #10 violation. Its regression test only covered `.env`, which is how the safety claim passed.
+- `713f6980` — privacy guard runs at step 3 but optional context is collected at step 6 (later free text never scanned); telemetry logs raw `reason_text` against a "no learner data, ever" promise; the ingest-guard execution boundary is undefined, so an implementer could comply exactly and still POST a child's homework screenshot to a third-party vision API.
+- `20d5c8af` (rebuild) — the Gate C enforcement layer itself: `validateEvent()` only PII-scans top-level strings, so `page:{email:'child@example.com'}` persists; and child events are gated on `destination.kind==='first_party'`, a string *label* rather than identity, so a registry entry can route child data off the first-party store.
+
+**Reasoning:** CodexQC is the load-bearing control on this pipeline, not a formality. Every one of these would have shipped a privacy or credential defect into a product with paid child accounts, and each was invisible from the request text alone. The pattern across three independent builds is that autonomous output is *structurally* strong and *specifically* unsafe — good architecture, sound docs, and a concrete hole in exactly the boundary the task was about.
+
+**The scope finding:** `gitInitRepo()` runs `git init` on an empty directory. **The sandbox never clones anything.** Every autonomous build starts from zero. `e0afb33a` was commissioned as a gap analysis of *existing* REELFLOW code and was therefore unsatisfiable by construction — to the build agent's credit it inspected the empty workspace, documented the uniform negative, and refused to fabricate verdicts. But the request should never have been sent. **The autonomous builder produces standalone greenfield artifacts only; it cannot see, review, or modify any portfolio repo.** Anything phrased "analyze/fix/extend existing X" must go to a real session.
+
+**Verified live this session:** the plan nudge fired in production — `[nudge] plan needed 26d1849b (4841min) {"sent":true}` — closing the one thing the earlier entry listed as unproven. The 600s→1800s timeout was vindicated too: the `20d5c8af` rebuild ran 1379s and would have been SIGKILLed under the old wall.
+
+**Consequence:** Approval remains operator-only; an agent attempt to record one was refused this session and left refused. Rejections carry the real QC findings in `blocker` so a resubmit starts from the defect list. **Made by:** David ("go ahead and reject, I agree with your assessment") / Claude (QC recovery, diagnosis, scope finding).

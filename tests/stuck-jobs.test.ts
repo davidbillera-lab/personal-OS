@@ -48,6 +48,80 @@ describe('buildStuckJobsDigest', () => {
     ], NOW)
     expect(msg).toBeNull()
   })
+
+  // Regression: request 26d1849b sat in submitted/phase=null for two days and never
+  // alerted, because a 'submitted' row was only ever considered when phase==='planned'.
+  // Nothing in the system auto-claims that state, so silence meant it waited forever.
+  it('surfaces a submitted workflow that Hermes never planned (phase null)', () => {
+    const msg = buildStuckJobsDigest([
+      row({ status: 'submitted', phase: null, updated_at: ago(3 * 60 * 60 * 1000) }),
+    ], NOW)!
+    expect(msg).toContain('📝 NOT PLANNED')
+    expect(msg).toContain('Homeroom Tutor')
+  })
+
+  it('does not alarm on a workflow submitted moments ago', () => {
+    expect(buildStuckJobsDigest([
+      row({ status: 'submitted', phase: null, updated_at: ago(5 * 60 * 1000) }),
+    ], NOW)).toBeNull()
+  })
+
+  it('keeps never-planned and never-picked-up in separate buckets', () => {
+    const msg = buildStuckJobsDigest([
+      row({ id: 'dddddddd-0000-0000-0000-000000000004', status: 'submitted', phase: null, updated_at: ago(3 * 60 * 60 * 1000) }),
+      row({ id: 'eeeeeeee-0000-0000-0000-000000000005', status: 'submitted', phase: 'planned', updated_at: ago(3 * 60 * 60 * 1000) }),
+    ], NOW)!
+    expect(msg).toContain('📝 NOT PLANNED')
+    expect(msg).toContain('🕒 NOT PICKED UP')
+  })
+})
+
+describe('alertBucket — never-planned workflows', () => {
+  it('classifies a stale unplanned submission as stale_unplanned', () => {
+    const r = row({ status: 'submitted', phase: null, updated_at: ago(3 * 60 * 60 * 1000) })
+    expect(alertBucket(r, NOW)).toBe('stale_unplanned')
+  })
+
+  it('gives it its own dedup key, so it nudges once rather than twice daily forever', () => {
+    const r = row({ status: 'submitted', phase: null, updated_at: ago(3 * 60 * 60 * 1000) })
+    expect(transitionKey(r, NOW)).toBe(`${r.id}:stale_unplanned`)
+  })
+
+  it('is not actionable while still fresh', () => {
+    expect(alertBucket(row({ status: 'submitted', phase: null, updated_at: ago(60_000) }), NOW)).toBeNull()
+  })
+})
+
+// The state findPushable()'s assigned_to filter used to create: the operator approved the
+// push, the pusher couldn't see the row, and alertBucket() returned null for every
+// in_progress row — so the approval evaporated with no failure and no alert.
+describe('alertBucket — approved but never pushed', () => {
+  const pushing = (o: Partial<StuckRequest> = {}) =>
+    row({ status: 'in_progress', phase: 'pushing', updated_at: ago(6 * 60 * 60 * 1000), ...o })
+
+  it('buckets a long-stranded approved push as stuck_pushing', () => {
+    expect(alertBucket(pushing(), NOW)).toBe('stuck_pushing')
+  })
+
+  it('stays quiet on a push that just started — a real push takes seconds', () => {
+    expect(alertBucket(pushing({ updated_at: ago(30_000) }), NOW)).toBeNull()
+  })
+
+  it('ignores in_progress rows that are not in the pushing phase', () => {
+    expect(alertBucket(pushing({ phase: 'building' }), NOW)).toBeNull()
+  })
+
+  it('surfaces it in the digest under its own heading', () => {
+    const out = buildStuckJobsDigest([pushing()], NOW)
+    expect(out).toContain('APPROVED BUT NEVER PUSHED')
+    expect(out).toContain('20d5c8af')
+  })
+
+  it('keys on the request so one stranded approval is announced once', () => {
+    expect(transitionKey(pushing(), NOW)).toBe('20d5c8af-46ff-4439-b893-73edf1847598:stuck_pushing')
+    expect(transitionKey(pushing({ updated_at: ago(9 * 60 * 60 * 1000) }), NOW))
+      .toBe(transitionKey(pushing(), NOW))
+  })
 })
 
 describe('alert dedup', () => {
