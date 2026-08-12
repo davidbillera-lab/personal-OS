@@ -13,8 +13,9 @@
 //     every dispatcher safety path (claim, gate, recovery) with a local bare remote.
 
 import { spawnSync } from 'child_process'
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs'
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs'
 import { join, dirname, resolve } from 'path'
+import { isCredentialPath } from './clone-target.mjs'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import { sanitizeForMC } from './sanitize-result.mjs'
@@ -45,15 +46,59 @@ function git(cwd, args) {
   return (r.stdout || '').trim()
 }
 
-function gitInitRepo(workspace) {
-  mkdirSync(workspace, { recursive: true })
-  const r = spawnSync('git', ['-C', workspace, 'init'], { encoding: 'utf8' })
-  if (r.status !== 0) throw new Error(`git init failed: ${(r.stderr || '').trim()}`)
+function gitIdentity(workspace) {
   // Local identity so commits work even on a machine with no global git config.
   git(workspace, ['config', 'user.email', 'dispatcher@local'])
   git(workspace, ['config', 'user.name', 'MC Dispatcher'])
   // Windows: nested per-request/per-attempt UUID dirs can exceed MAX_PATH (260).
   git(workspace, ['config', 'core.longpaths', 'true'])
+}
+
+function gitInitRepo(workspace) {
+  mkdirSync(workspace, { recursive: true })
+  const r = spawnSync('git', ['-C', workspace, 'init'], { encoding: 'utf8' })
+  if (r.status !== 0) throw new Error(`git init failed: ${(r.stderr || '').trim()}`)
+  gitIdentity(workspace)
+}
+
+// Remove credential-shaped files from a freshly cloned tree BEFORE the container starts.
+// Returns the list of removed repo-relative paths (logged, never their contents).
+// Uses git's own file list so it only ever considers tracked files.
+export function scrubClonedCredentials(workspace) {
+  let tracked = []
+  try { tracked = git(workspace, ['ls-files']).split('\n').filter(Boolean) } catch { return [] }
+  const removed = []
+  for (const rel of tracked) {
+    if (!isCredentialPath(rel)) continue
+    try { rmSync(resolve(workspace, rel), { force: true }); removed.push(rel) } catch { /* best effort */ }
+  }
+  return removed
+}
+
+// Provision the build workspace. With no clone target this is exactly the old
+// gitInitRepo() — an empty repo, byte-for-byte the prior behaviour. With one, the HOST
+// clones shallow + single-branch (no history in the box), scrubs credential files, and
+// commits the scrub so the build starts from a clean, reviewable base.
+// Returns { cloned, baseSha, removed }.
+export function provisionWorkspace(workspace, cloneTarget) {
+  if (!cloneTarget) { gitInitRepo(workspace); return { cloned: false, baseSha: null, removed: [] } }
+
+  mkdirSync(dirname(workspace), { recursive: true })
+  const r = spawnSync('git', ['clone', '--depth', '1', '--single-branch', cloneTarget.url, workspace], {
+    encoding: 'utf8', timeout: 300000,
+  })
+  if (r.status !== 0) throw new Error(`git clone ${cloneTarget.slug} failed: ${(r.stderr || '').trim().slice(0, 300)}`)
+  gitIdentity(workspace)
+
+  const removed = scrubClonedCredentials(workspace)
+  if (removed.length) {
+    git(workspace, ['add', '-A'])
+    git(workspace, ['commit', '-m', `chore: strip ${removed.length} credential-shaped file(s) before sandbox build`])
+  }
+  // Detach: the build must never be able to fast-forward a real branch name back anywhere.
+  const baseSha = git(workspace, ['rev-parse', 'HEAD'])
+  git(workspace, ['checkout', '--detach', baseSha])
+  return { cloned: true, baseSha, removed }
 }
 
 // ---- mock adapter ----
@@ -162,15 +207,23 @@ export function buildTaskSpec(request) {
 // Shared by both real adapters — the sandbox prompt is identical whether the child
 // runs on the host or in a container. Implement → git add -A → git commit. No QC
 // (that is host-side, post-exit) and no push (structurally impossible).
-export function buildPrompt(request) {
+// `cloned` must reflect the ACTUAL workspace state. Telling a build the repo is empty when
+// it is not (or vice versa) is the failure mode that produced e0afb33a: a request to analyse
+// existing code, run against an empty workspace, which could only ever come back "not present".
+export function buildPrompt(request, { cloned = false } = {}) {
   const task = buildTaskSpec(request)
   const shortMsg = (request?.title || task).slice(0, 60)
+  const opening = cloned
+    ? 'This git repo already contains the real project source, checked out at a detached HEAD. Read it before changing anything, make the smallest change that does the job, then commit.'
+    : 'Build this in the current empty git repo, then commit it.'
+  const steps = cloned
+    ? 'Steps: (1) read the existing code first; (2) make the minimal change; (3) `git add -A`;'
+    : 'Steps: (1) implement it as minimal working files; (2) `git add -A`;'
   return [
-    'Build this in the current empty git repo, then commit it.',
+    opening,
     `Task: ${task}.`,
-    'Steps: (1) implement it as minimal working files;',
-    '(2) `git add -A`;',
-    `(3) \`git commit -m "${shortMsg}"\`.`,
+    steps,
+    `then \`git commit -m "${shortMsg}"\` as a SINGLE commit (host-side review diffs HEAD against its parent).`,
     'Stay inside this workspace — do not read or write files outside it.',
     'DO NOT run git push or gh — you cannot, and must not try.',
   ].join(' ')
@@ -188,9 +241,10 @@ export function buildPrompt(request) {
 // running in your own shell, because it is.
 export const claudeExecutorAdapter = {
   name: 'claude',
-  async launch({ workspace, request, env, timeoutMs, skipPermissions }) {
-    // 1. Provision isolated, push-denied workspace.
-    gitInitRepo(workspace)
+  async launch({ workspace, request, env, timeoutMs, skipPermissions, cloneTarget = null }) {
+    // 1. Provision isolated, push-denied workspace (empty repo, or a scrubbed shallow clone).
+    const { cloned, removed } = provisionWorkspace(workspace, cloneTarget)
+    if (cloned) console.log(`[executor] cloned ${cloneTarget.slug} (scrubbed ${removed.length} credential file(s))`)
     mkdirSync(join(workspace, '.claude'), { recursive: true })
     writeFileSync(join(workspace, '.claude', 'settings.json'), JSON.stringify(WORKSPACE_SETTINGS, null, 2))
 
@@ -208,7 +262,7 @@ export const claudeExecutorAdapter = {
     // CLAUDECODE deliberately omitted (recursion guard must stay unset).
 
     // 4. Launch headless Claude with a hard timeout. Deny-list blocks push regardless.
-    const prompt = buildPrompt(request)
+    const prompt = buildPrompt(request, { cloned })
 
     // skipPermissions defaults OFF and must stay off here. On the host path the
     // deny-list + stripped env are the ONLY controls that exist; turning permissions
@@ -372,11 +426,14 @@ export function buildDockerArgs({ workspace, creds, image, containerName, prompt
 
 export const dockerClaudeExecutorAdapter = {
   name: 'docker',
-  async launch({ workspace, request, env, timeoutMs, skipPermissions }) {
+  async launch({ workspace, request, env, timeoutMs, skipPermissions, cloneTarget = null }) {
     const { image, creds } = preflight()
 
     // 1. Provision the workspace host-side (the container only ever sees the mount).
-    gitInitRepo(workspace)
+    // The HOST clones — the container never receives a git credential, so the zero-secrets
+    // childEnv invariant is unchanged. See lib/clone-target.mjs for the security shape.
+    const { cloned, removed } = provisionWorkspace(workspace, cloneTarget)
+    if (cloned) console.log(`[executor] cloned ${cloneTarget.slug} (scrubbed ${removed.length} credential file(s))`)
     mkdirSync(join(workspace, '.claude'), { recursive: true })
     writeFileSync(join(workspace, '.claude', 'settings.json'), JSON.stringify(WORKSPACE_SETTINGS, null, 2))
     // No stampTrust(): that mutates the HOST ~/.claude.json. The image pre-seeds
@@ -385,7 +442,7 @@ export const dockerClaudeExecutorAdapter = {
     const containerName = `mc-executor-${randomUUID().slice(0, 12)}`
     const args = buildDockerArgs({
       workspace, creds, image, containerName,
-      prompt: buildPrompt(request),
+      prompt: buildPrompt(request, { cloned }),
       skipPermissions,
     })
 
