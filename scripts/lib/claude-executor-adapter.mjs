@@ -90,15 +90,28 @@ export function provisionWorkspace(workspace, cloneTarget) {
   if (r.status !== 0) throw new Error(`git clone ${cloneTarget.slug} failed: ${(r.stderr || '').trim().slice(0, 300)}`)
   gitIdentity(workspace)
 
+  const originSha = git(workspace, ['rev-parse', 'HEAD'])
   const removed = scrubClonedCredentials(workspace)
-  if (removed.length) {
-    git(workspace, ['add', '-A'])
-    git(workspace, ['commit', '-m', `chore: strip ${removed.length} credential-shaped file(s) before sandbox build`])
-  }
-  // Detach: the build must never be able to fast-forward a real branch name back anywhere.
+
+  // HISTORY IS DISCARDED, and this is load-bearing — not tidiness.
+  // Deleting the files and committing the deletion is NOT enough: --depth 1 still ships the
+  // base commit's trees and blobs in .git/objects, so a build could read every "scrubbed"
+  // secret straight back out with `git show <base>:.env.local`. Verified: that command
+  // returned the plaintext before this was added. Re-initialising the repo is what actually
+  // removes the blobs, rather than just removing the paths that point at them.
+  //
+  // Nothing of value is lost — --depth 1 means there was only ever one commit of history.
+  // The new initial commit becomes the QC base, so runHostQc's `sha^` still resolves to
+  // exactly the pre-build tree.
+  rmSync(join(workspace, '.git'), { recursive: true, force: true })
+  const r2 = spawnSync('git', ['-C', workspace, 'init'], { encoding: 'utf8' })
+  if (r2.status !== 0) throw new Error(`git init after scrub failed: ${(r2.stderr || '').trim()}`)
+  gitIdentity(workspace)
+  git(workspace, ['add', '-A'])
+  git(workspace, ['commit', '-m', `base: ${cloneTarget.slug} @ ${originSha.slice(0, 12)} (${removed.length} credential file(s) stripped)`])
+
   const baseSha = git(workspace, ['rev-parse', 'HEAD'])
-  git(workspace, ['checkout', '--detach', baseSha])
-  return { cloned: true, baseSha, removed }
+  return { cloned: true, baseSha, originSha, removed }
 }
 
 // ---- mock adapter ----

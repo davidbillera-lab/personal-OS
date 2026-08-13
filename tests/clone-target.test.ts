@@ -139,8 +139,16 @@ describe('provisionWorkspace (integration)', () => {
     expect(existsSync(join(ws, 'index.js'))).toBe(true)
     expect(existsSync(join(ws, '.env.example'))).toBe(true)
     expect(res.removed.sort()).toEqual(['.env.local', 'id_rsa', 'secrets.yml'])
-    // shallow: history did not come along
-    expect(existsSync(join(ws, '.git', 'shallow'))).toBe(true)
+
+    // THE ONE THAT MATTERS: a scrubbed secret must not be recoverable from git history.
+    // Deleting the file and committing the deletion leaves the blob in .git/objects, and
+    // `git show <base>:.env.local` returned the plaintext until the repo was re-initialised.
+    const base = g(ws, ['rev-list', '--max-parents=0', 'HEAD']).stdout.trim().split('\n')[0]
+    const leak = g(ws, ['show', `${base}:.env.local`])
+    expect(leak.status, 'scrubbed secret is still readable from git history').not.toBe(0)
+    expect(`${leak.stdout}${leak.stderr}`).not.toContain('hunter2')
+    // and no dangling objects carry it either
+    expect(g(ws, ['log', '--all', '--oneline']).stdout.trim().split('\n')).toHaveLength(1)
 
     rmSync(root, { recursive: true, force: true })
   })
