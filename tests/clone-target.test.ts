@@ -163,3 +163,22 @@ describe('provisionWorkspace (integration)', () => {
     rmSync(root, { recursive: true, force: true })
   })
 })
+
+describe('repoSlug — host must be GitHub when one is present', () => {
+  it('rejects a non-GitHub host rather than silently cloning a same-named GitHub repo', () => {
+    // resolveCloneTarget always clones from github.com. Accepting a gitlab/bitbucket
+    // repo_url would resolve to an owner/repo that merely SHARES a name with the intended
+    // project — a different repo entirely, and one anyone could register.
+    expect(repoSlug('https://gitlab.com/davidbillera-lab/vzt')).toBeNull()
+    expect(repoSlug('https://bitbucket.org/davidbillera-lab/vzt')).toBeNull()
+    expect(repoSlug('git@gitlab.com:davidbillera-lab/vzt.git')).toBeNull()
+    expect(resolveCloneTarget('https://gitlab.com/davidbillera-lab/vzt', LIST)).toBeNull()
+  })
+
+  it('still accepts github.com and a bare slug', () => {
+    expect(repoSlug('https://github.com/davidbillera-lab/vzt')).toBe('davidbillera-lab/vzt')
+    expect(repoSlug('https://www.github.com/davidbillera-lab/vzt')).toBe('davidbillera-lab/vzt')
+    expect(repoSlug('git@github.com:davidbillera-lab/vzt.git')).toBe('davidbillera-lab/vzt')
+    expect(repoSlug('davidbillera-lab/vzt')).toBe('davidbillera-lab/vzt')
+  })
+})

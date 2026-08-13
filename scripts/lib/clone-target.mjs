@@ -36,16 +36,22 @@ export function cloneAllowlist(env = process.env) {
  * to a bare `owner/repo` slug. Returns null for anything it cannot confidently parse —
  * an unparseable target must fail closed, never fall through to "clone it anyway".
  */
+const isGitHubHost = (h) => /^(www\.)?github\.com$/i.test(h)
+
 export function repoSlug(repoUrl) {
   if (typeof repoUrl !== 'string') return null
   const s = repoUrl.trim().replace(/\.git$/, '').replace(/\/+$/, '')
   if (!s) return null
+  // Host must be GitHub when one is present. resolveCloneTarget() always clones from
+  // github.com, so accepting a gitlab/bitbucket repo_url here would silently clone a
+  // DIFFERENT repo that merely shares an owner/name — fail closed on the mismatch instead.
+  // A bare `owner/repo` (no host) is still fine: it carries no conflicting claim.
   // scp-style: git@github.com:owner/repo
-  const scp = s.match(/^[\w.-]+@[\w.-]+:([\w.-]+\/[\w.-]+)$/)
-  if (scp) return scp[1]
+  const scp = s.match(/^[\w.-]+@([\w.-]+):([\w.-]+\/[\w.-]+)$/)
+  if (scp) return isGitHubHost(scp[1]) ? scp[2] : null
   // url-style: https://github.com/owner/repo (ignores any deeper path)
-  const url = s.match(/^https?:\/\/[\w.-]+(?::\d+)?\/([\w.-]+\/[\w.-]+)$/)
-  if (url) return url[1]
+  const url = s.match(/^https?:\/\/([\w.-]+)(?::\d+)?\/([\w.-]+\/[\w.-]+)$/)
+  if (url) return isGitHubHost(url[1]) ? url[2] : null
   // bare slug
   const bare = s.match(/^([\w.-]+\/[\w.-]+)$/)
   if (bare) return bare[1]

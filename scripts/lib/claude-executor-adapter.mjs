@@ -439,6 +439,15 @@ export function buildDockerArgs({ workspace, creds, image, containerName, prompt
 
 export const dockerClaudeExecutorAdapter = {
   name: 'docker',
+  // Non-throwing preflight, so the dispatcher can check the sandbox BEFORE claiming work
+  // instead of discovering it mid-build. On 2026-08-11 Docker Desktop was down for hours:
+  // the dispatcher was online, Realtime subscribed, everything looked healthy, and every
+  // build would have failed one at a time with a "too big / errored" alert that pointed the
+  // operator at the wrong problem. Cheap (three local docker inspects) and read-only.
+  health() {
+    try { preflight(); return { ok: true, reason: null } }
+    catch (e) { return { ok: false, reason: e.message } }
+  },
   async launch({ workspace, request, env, timeoutMs, skipPermissions, cloneTarget = null }) {
     const { image, creds } = preflight()
 

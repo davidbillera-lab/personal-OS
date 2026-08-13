@@ -537,11 +537,38 @@ async function nudgeUnplanned(sb) {
   }
 }
 
+// ---- sandbox health gate ----
+// Queued work WAITS while the sandbox is down instead of being claimed and failed one row
+// at a time. Path B (pushing an already-approved, already-built commit) does not need the
+// container and is deliberately NOT gated — an outage must not strand a finished build.
+// Alerts on the down edge and logs the recovery edge, so an outage is announced once.
+let sandboxDown = false
+async function sandboxReady() {
+  if (typeof adapter.health !== 'function') return true // mock/legacy adapters: nothing to check
+  const { ok, reason } = adapter.health()
+  if (ok) {
+    if (sandboxDown) console.log('[sandbox] RECOVERED — resuming claims')
+    sandboxDown = false
+    return true
+  }
+  if (!sandboxDown) {
+    sandboxDown = true
+    console.log(`[sandbox] DOWN — not claiming any work: ${clip(reason, 200)}`)
+    const ping = await notifyBuildFailed({
+      id: 'sandbox', title: 'Executor sandbox unavailable — builds paused',
+      reason: clip(reason, 200),
+    }).catch((e) => ({ sent: false, reason: e?.message }))
+    console.log(`[sandbox] down ping ${JSON.stringify(ping)}`)
+  }
+  return false
+}
+
 // ---- one tick ----
 async function tick(sb) {
   if (isPaused()) return // skip every tick while paused; isPaused() logs the engage/release edge only
   const pushable = await findPushable(sb)
   if (pushable) { await gatedPush(sb, pushable); return } // path B before path A
+  if (!await sandboxReady()) return // claiming now would only manufacture failed rows
   let claimed = await claimOne(sb)
   // Gap A1, GATED OFF by default: claimOne() above is untouched, so queued rows are always
   // tried first, exactly as before this feature existed. Only when no queued row was found

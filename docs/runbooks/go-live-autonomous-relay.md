@@ -10,9 +10,20 @@ Enables the second half of the relay: the dispatcher claims a Hermes-deposited p
 
 ## Preflight (10 seconds)
 ```
+docker info                   # Docker Desktop must be RUNNING (everything below depends on it)
 npm run executor:net:status   # proxy + --internal network must be UP (fail-closed if down)
 pm2 status                    # mc-dispatcher online
 ```
+
+**Docker Desktop is the prerequisite behind the prerequisite.** On 2026-08-11 it was down for
+hours: `pm2 status` showed online, Realtime was subscribed, the queue looked healthy — and the
+network + proxy were simply gone, because they live in Docker. Every build would have failed.
+If `executor:net:status` says MISSING, start Docker Desktop first, then `npm run executor:net`.
+
+Since that day the dispatcher checks sandbox health **before claiming**: while the sandbox is
+down it claims nothing (queued work waits instead of being burned into failed rows) and sends
+one Telegram alert on the down edge. Path B — pushing an already-approved build — is
+deliberately NOT gated, so an outage can never strand a finished commit.
 
 ## The flip
 1. In `ecosystem.config.cjs`, set `DISPATCHER_CLAIM_PLANNED: '1'`.
@@ -34,8 +45,28 @@ Watch: `/queue` in the MC UI, or `pm2 logs mc-dispatcher`. You'll get a Telegram
 - **C6 sandbox** — every build runs in the certified container.
 - **Kill-switch** — `node scripts/rig-test.mjs pause` halts everything within one tick.
 
-## Not yet wired (needs a decision)
-- **Push target (gap D):** builds still push only to `davidbillera-lab/mc-spike-test` (approval-gated). Pushing to a real project repo needs the D build — decide which repos to allowlist and whether the build checks out the target repo vs. builds in the empty sandbox workspace.
+## Working on real code (gap D, half closed 2026-08-11)
+
+**The build can now check out a real repo** — `DISPATCHER_CLONEABLE_REPOS` in
+`ecosystem.config.cjs`, comma-separated `owner/repo`, **unset = off**. Unset means every build
+gets an empty `git init` workspace exactly as before, and every ambiguity (no `repo_url`,
+non-GitHub host, not on the list, lookup error) fails closed to that same empty workspace.
+
+When enabled, the **host** clones (the container never receives a git credential),
+`--depth 1 --single-branch`, credential-shaped files are stripped, and the cloned `.git` is
+discarded and re-initialised — deleting the files alone left the blobs recoverable via
+`git show <base>:.env.local`. Proven end to end 2026-08-11 against `mc-spike-test`: the build
+correctly named a pre-existing file, history came out exactly 2 commits, and CodexQC diffed
+only the build's own commit.
+
+**Enabling a repo is a security decision, not a convenience.** C6's red team found the mounted
+OAuth credential still authorizes plain `/v1/messages` inference, so a build can relay small
+payloads out as ordinary model text. An empty workspace has nothing worth taking; a cloned one
+does. Add a repo when the work genuinely needs to see the code, and remove it afterwards.
+
+**Still not wired:** the push target. Builds push only to `davidbillera-lab/mc-spike-test`
+(approval-gated) — never back to the repo they were cloned from. A cloned build therefore
+produces a reviewable branch in the sandbox, not a PR against the real project.
 
 ## Rollback
 Set `DISPATCHER_CLAIM_PLANNED: '0'` → `pm2 restart mc-dispatcher`. Back to queued-only, zero behavior change.
