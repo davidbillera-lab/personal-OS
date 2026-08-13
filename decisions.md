@@ -617,3 +617,27 @@ Diagnosis cost far more than the fix, for a reason worth remembering: several pr
 Also removed the reason that test had to race module side effects at all. Importing the dispatcher **used to start it**, so an `import` ran the live dispatcher against production Mission Control. `main()` is now behind an entry-point check and the internals are exported, so the test calls `runAttempt()` directly. Verified: pm2 restarts clean, 0 unstable restarts.
 
 **Consequence:** the sandbox-never-clones limit is lifted but stays closed by default; the C6-P5 proof is live again; and importing the dispatcher is no longer dangerous. **Made by:** David ("start with the clone and then move on to C6, don't stop till done with both") / Claude.
+
+
+---
+
+### 2026-08-11 (launch-confidence pass) - Four things stood between the relay and "trust it unattended"
+
+**Decision:** Verification pass over the autonomous relay before treating it as launched. Found and fixed three real defects — one of them mine, introduced hours earlier — plus one operational blind spot. Commits `1129cdd`, `f88c26c`. Suite 183 → **191 passing**.
+
+**1. My own clone scrub leaked the secrets it was scrubbing.** `provisionWorkspace()` deleted credential files from the working tree and committed the deletion. That removes the *paths*, not the *blobs* — `git clone --depth 1` still ships the base commit's trees and objects, so a build could read every "scrubbed" secret straight back with `git show <base>:.env.local`. Confirmed against a fixture: it returned the plaintext. This would have shipped a credential-exposure hole inside the feature whose only purpose is to prevent one, and only on the cloned path — the one path that has real source in it. The cloned `.git` is now discarded and re-initialised after the scrub. **The general lesson: "removed the file and committed" is not removal in a version-controlled tree.**
+
+**2. The clone target trusted a non-GitHub host.** `resolveCloneTarget()` always clones from github.com, so a `repo_url` of `gitlab.com/owner/repo` would have resolved to a slug and then cloned `github.com/owner/repo` — a different repo that merely shares a name, and one anyone can register. Non-GitHub hosts now fail closed.
+
+**3. Docker Desktop was down for hours and nothing said so.** `pm2 status` showed online, Realtime was subscribed, the queue looked healthy — and `executor:net:status` reported network and proxy MISSING, because both live in Docker. The relay was dead. Every claimed build would have failed individually with a "too big / errored" alert pointing at the wrong problem. The dispatcher now checks `adapter.health()` **before claiming**: while the sandbox is down it claims nothing (queued work waits rather than being burned into failed rows) and sends one alert on the down edge. Path B is deliberately not gated — an outage must never strand a finished commit.
+
+**4. The approval-stranding bug had no regression test.** It does now, and only because the dispatcher exports its internals after the shebang work: `findPushable()` must find an approved row whatever `assigned_to` says, and must ignore a row with no workspace on disk. That is the exact shape `e0afb33a` and `713f6980` were in.
+
+**Evidence gathered, not asserted:**
+- Both C6 red-team suites re-run after the executor change (the standing rule requires it): **CONTAINED**, no NOT-CONTAINED findings. Case 7 sinks all still blocked — `web_fetch`, `web_search`, `files`, `profile` all 403.
+- Clone path proven **end to end through the real docker executor** against `mc-spike-test`: the build was asked to name a file it found already present and wrote `calc.js` (it genuinely saw the source), history came out exactly 2 commits, and CodexQC diffed only the build's own commit — `CLONE-SELFTEST.md | 1 +` — so review stays correct and cost stays bounded on a real repo.
+- Dispatcher restarted clean, `pm2 save`, 0 unstable restarts.
+
+**Open, not closed:** one full-suite run failed a single test and I did not capture which; seven subsequent runs (three shuffled) are green and I cannot reproduce it. It landed on a cold-transform run while Docker Desktop was starting, so contention is the likely cause — recorded as unreproduced rather than fixed. Separately, `findPushable`'s fix is proven by unit test but has not yet pushed a real reassigned row, because recording an approval is operator-only.
+
+**Made by:** David ("take care of what needs to be done so we can be 100% confident in the launch") / Claude.
