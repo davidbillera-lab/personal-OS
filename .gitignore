@@ -94,3 +94,6 @@ builds/
 
 # Dispatcher kill-switch flag (local runtime toggle, never committed)
 .dispatcher-paused
+
+# rig boot recovery log (local operational artifact)
+rig-boot.log

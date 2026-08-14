@@ -136,3 +136,39 @@ missing dependency, etc.). Fix that, then `pm2 restart mc-dispatcher`.
 
 **Still stuck:** call David with the output of `pm2 status` and
 `pm2 logs mc-dispatcher --err` — don't guess further.
+
+---
+
+## If the dispatcher is missing entirely (not crashed — *gone*)
+
+**Symptom:** `npx pm2 list` is empty, or pm2 prints `[PM2] Spawning PM2 daemon` before it
+answers. That means the pm2 daemon itself died (reboot, logoff, or it was killed), taking
+every managed process with it. `pm2 save` writes `~/.pm2/dump.pm2`, but **nothing replays
+that dump on its own** — Windows has no `pm2 startup` equivalent.
+
+Observed 2026-08-13: the relay had been dead for hours and every surface that reports health
+looked fine, because the thing that reports is the thing that was down. Docker Desktop was
+also down (`AutoStart=false`), so a bare `pm2 resurrect` would have come up straight into
+`[sandbox] DOWN`.
+
+**One command fixes all of it — idempotent, safe to run any time:**
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\rig-boot.ps1
+```
+It starts Docker Desktop and waits for the daemon, brings up the executor egress network and
+proxy, runs `pm2 resurrect`, and logs whether `mc-dispatcher` actually came back to
+`rig-boot.log` (gitignored). Order is deliberate: the dispatcher starts last, into a working
+sandbox, instead of alerting and waiting.
+
+**It also runs automatically at logon**, as scheduled task `MC Rig Boot`.
+```
+# inspect / run / remove
+Get-ScheduledTask -TaskName 'MC Rig Boot'
+Start-ScheduledTask  -TaskName 'MC Rig Boot'
+Unregister-ScheduledTask -TaskName 'MC Rig Boot' -Confirm:$false
+```
+
+**Still true:** the rig only runs while David is logged in. This is a logon task, not a
+service, and deliberately so — the dispatcher needs the user session's Claude credentials
+(`~/.claude/.credentials.json`) and a user-session Docker Desktop. A SYSTEM-level service
+would have neither.

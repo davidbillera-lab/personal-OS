@@ -399,6 +399,29 @@ function preflight() {
   return { image, creds }
 }
 
+// Polling the request queue every five seconds must not also hammer Docker Desktop with
+// three CLI probes every five seconds. Cache the complete preflight result briefly; launch()
+// still runs a fresh preflight immediately before creating a container, so this changes
+// idle health-check load without weakening the build-time safety boundary.
+export function createCachedHealthChecker(probe, { ttlMs = 60_000, now = Date.now } = {}) {
+  let cached = null
+  let checkedAt = -Infinity
+  return () => {
+    const current = now()
+    if (cached && current - checkedAt < ttlMs) return cached
+    try {
+      probe()
+      cached = { ok: true, reason: null }
+    } catch (e) {
+      cached = { ok: false, reason: e.message }
+    }
+    checkedAt = current
+    return cached
+  }
+}
+
+const cachedDockerHealth = createCachedHealthChecker(preflight)
+
 export function buildDockerArgs({ workspace, creds, image, containerName, prompt, skipPermissions }) {
   const args = [
     'run', '--rm',
@@ -445,8 +468,7 @@ export const dockerClaudeExecutorAdapter = {
   // build would have failed one at a time with a "too big / errored" alert that pointed the
   // operator at the wrong problem. Cheap (three local docker inspects) and read-only.
   health() {
-    try { preflight(); return { ok: true, reason: null } }
-    catch (e) { return { ok: false, reason: e.message } }
+    return cachedDockerHealth()
   },
   async launch({ workspace, request, env, timeoutMs, skipPermissions, cloneTarget = null }) {
     const { image, creds } = preflight()
