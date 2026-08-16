@@ -35,7 +35,7 @@
 // Timeout is the spend-cap stand-in until Phase-2 spend tracking lands.
 
 import { createClient } from '@supabase/supabase-js'
-import { spawnSync } from 'child_process'
+import { spawnSync, spawn } from 'child_process'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve } from 'path'
@@ -47,6 +47,7 @@ import { sanitizeForMC } from './lib/sanitize-result.mjs'
 import { isClaimablePlanned } from './lib/planned-claim.mjs'
 import { needsPlanNudge, planNudgeKey, PLAN_NUDGE_AFTER_MS } from './lib/plan-nudge.mjs'
 import { resolveCloneTarget, cloneAllowlist } from './lib/clone-target.mjs'
+import { workSetEmpty, shouldSleep } from './lib/idle-sleep.mjs'
 import {
   withRetry, persistAttemptResult, clearAttemptResult, recoverFinishedBuild, isOurAttempt,
 } from './lib/attempt-recovery.mjs'
@@ -75,7 +76,13 @@ try {
 }
 
 // ---- config ----
-const EXECUTOR = process.env.DISPATCHER_EXECUTOR || 'claude'
+// Defaults to the SANDBOXED docker path. It used to default to 'claude' — the legacy host
+// adapter, which runs the untrusted build directly on this machine with no container, no
+// egress allowlist and no filesystem boundary. Only ecosystem.config.cjs set 'docker', so
+// anyone running `node scripts/dispatcher.mjs` by hand silently got the unsandboxed path
+// (observed while testing idle-sleep on 2026-08-16). The safe path is now the default and
+// the unsafe one is opt-in; with Docker down this fails closed instead of falling back.
+const EXECUTOR = process.env.DISPATCHER_EXECUTOR || 'docker'
 const POLL_MS = Number(process.env.DISPATCHER_POLL_MS || 5000)
 // 30min default. Was 600000 (10min), which real portfolio builds ran straight through:
 // measured 2026-08-06/08, two builds were SIGKILLed at exactly the 600s wall and a third
@@ -537,6 +544,53 @@ async function nudgeUnplanned(sb) {
   }
 }
 
+// ---- idle sleep (on-demand relay) ----
+// The rig is woken deliberately — Hermes asks over Telegram, the operator says yes — and
+// puts itself back to sleep once there is nothing left to do. An always-on poller with no
+// work is pure cost: while Docker is down each health probe pokes Docker Desktop into
+// showing its "cannot connect" UI, which is what made the operator kill Docker on
+// 2026-08-13 and took the relay down for three days.
+// OFF unless DISPATCHER_IDLE_SLEEP_MS is set, so the default stays exactly as before.
+const IDLE_SLEEP_MS = Number(process.env.DISPATCHER_IDLE_SLEEP_MS || 0)
+// Run the teardown (executor net down, Docker Desktop quit) on the way out. Without this
+// the dispatcher stops but Docker keeps running.
+const SLEEP_TEARDOWN = process.env.DISPATCHER_SLEEP_TEARDOWN !== '0'
+let idleSinceMs = null
+
+async function maybeSleep(sb) {
+  if (IDLE_SLEEP_MS <= 0) return false
+  const { data: rows, error } = await sb.from('mc_requests')
+    .select('id, status, phase, plan')
+    .in('status', ['queued', 'claimed', 'in_progress', 'awaiting_approval', 'submitted'])
+  // Unknown ⇒ stay awake. Never sleep off a failed query.
+  if (error) { console.log(`[idle] work-set query failed, staying awake: ${error.message}`); idleSinceMs = null; return false }
+
+  if (!workSetEmpty(rows)) {
+    if (idleSinceMs !== null) console.log('[idle] work appeared — idle timer reset')
+    idleSinceMs = null
+    return false
+  }
+  if (idleSinceMs === null) {
+    idleSinceMs = Date.now()
+    console.log(`[idle] work set empty — sleeping in ${Math.round(IDLE_SLEEP_MS / 60000)}min unless work arrives`)
+    return false
+  }
+  if (!shouldSleep({ idleSinceMs, now: Date.now(), thresholdMs: IDLE_SLEEP_MS, buildInFlight: activeRequestId !== null })) return false
+
+  console.log('[idle] nothing outstanding — going to sleep. Wake with: npm run rig:wake')
+  shuttingDown = true
+  if (SLEEP_TEARDOWN) {
+    // Detached: this script stops pm2's own process and Docker, so it must outlive us.
+    const script = join(__dirname, 'rig-sleep.ps1')
+    try {
+      spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', script],
+        { detached: true, stdio: 'ignore' }).unref()
+      console.log('[idle] teardown spawned (executor net down + Docker quit)')
+    } catch (e) { console.log(`[idle] teardown spawn failed (harmless, dispatcher still exiting): ${e.message}`) }
+  }
+  return true
+}
+
 // ---- sandbox health gate ----
 // Queued work WAITS while the sandbox is down instead of being claimed and failed one row
 // at a time. Path B (pushing an already-approved, already-built commit) does not need the
@@ -605,6 +659,9 @@ async function guardedTick(sb) {
       try { await nudgeUnplanned(sb) } catch (e) { console.error(`[nudge] error: ${e.message}`) }
     }
     await safeTick(sb)
+    // After the tick, so a row claimed this pass is already visible as outstanding.
+    // Sets shuttingDown when it decides to sleep; the main loop exits on the next check.
+    try { await maybeSleep(sb) } catch (e) { console.error(`[idle] error (staying awake): ${e.message}`) }
   } finally { ticking = false }
 }
 

@@ -17,7 +17,9 @@
     "executor:net:status": "node scripts/executor-net.mjs status",
     "executor:net:down": "node scripts/executor-net.mjs down",
     "redteam:c6": "node scripts/redteam/c6-redteam.mjs",
-    "redteam:c6:api": "node scripts/redteam/c6-redteam.mjs --with-api"
+    "redteam:c6:api": "node scripts/redteam/c6-redteam.mjs --with-api",
+    "rig:wake": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rig-boot.ps1",
+    "rig:sleep": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rig-sleep.ps1"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.1",

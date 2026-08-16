@@ -10,7 +10,12 @@ module.exports = {
     cwd: __dirname,
     exec_mode: 'fork',
     instances: 1,
-    autorestart: true,
+    // OFF, deliberately. The relay is on-demand: the dispatcher exits ON PURPOSE when the
+    // work set empties (DISPATCHER_IDLE_SLEEP_MS below), and pm2 must not undo that by
+    // restarting it into another idle poll loop. A genuine crash therefore also stays down
+    // — acceptable, because the wake path is one command and a crash-loop against a dead
+    // Docker is the exact behaviour that made the operator kill Docker on 2026-08-13.
+    autorestart: false,
     max_restarts: 20,
     restart_delay: 5000,   // 5s backoff between restarts
     min_uptime: 30000,     // must stay up 30s to count as a healthy start
@@ -64,6 +69,23 @@ module.exports = {
       // Reads projects.repo_url for the request's project; anything not matching an entry
       // here fails closed to an empty workspace. Example:
       //   DISPATCHER_CLONEABLE_REPOS: 'davidbillera-lab/personal-OS',
+
+      // ---- on-demand relay: sleep when there is nothing to do ----
+      // How long the work set must stay empty before the dispatcher exits. 0/unset = never
+      // sleep (the old always-on behaviour).
+      //
+      // It will NOT sleep on outstanding work, and awaiting_approval counts as outstanding:
+      // the operator approves later and the DISPATCHER performs the gated push, so sleeping
+      // through an approval would strand a finished build. A `submitted` row with no plan
+      // does NOT count — that is waiting on Hermes, not on us, and can sit for days.
+      //
+      // Why sleep at all: an idle dispatcher is not free. While Docker is down each health
+      // probe pokes Docker Desktop into showing its "cannot connect" UI — that nagging is
+      // what got Docker killed on 2026-08-13, taking the relay down for three days.
+      DISPATCHER_IDLE_SLEEP_MS: String(15 * 60 * 1000), // 15 min idle -> sleep
+      // On sleep, also drop the executor network and quit Docker Desktop (scripts/rig-sleep.ps1).
+      // Set '0' to just stop the dispatcher and leave Docker running.
+      DISPATCHER_SLEEP_TEARDOWN: '1',
     },
   }],
 }
