@@ -1571,6 +1571,11 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       })
       .eq('id', request_id)
       .eq('status', 'submitted')
+      // Write-once, enforced ATOMICALLY here and not just by the read-then-check above.
+      // Without this, two concurrent mc_submit_plan calls both read plan=null, both pass
+      // validatePlanPrecondition, and the second silently overwrites the first. With it,
+      // the loser matches 0 rows and is told to re-fetch.
+      .is('plan', null)
       .select('id, phase, plan_submitted_at')
       .maybeSingle()
     if (error) throw new Error(error.message)

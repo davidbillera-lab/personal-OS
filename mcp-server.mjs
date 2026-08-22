@@ -772,6 +772,10 @@ async function callTool(name, args) {
       })
       .eq('id', request_id)
       .eq('status', 'submitted')
+      // Write-once enforced atomically, not just by the read-then-check above — two
+      // concurrent submits would otherwise both pass the check and the second would
+      // overwrite the first. Mirrors lib/mcp-tools.ts.
+      .is('plan', null)
       .select('id, phase, plan_submitted_at')
       .maybeSingle()
     if (error) throw new Error(error.message)
