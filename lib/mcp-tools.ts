@@ -664,6 +664,16 @@ type ToolArgs = Record<string, string | undefined>
 // Worker state-machine transition: fetch current status, enforce the allowed
 // source states, apply updates + bump updated_at. Rejects invalid transitions so
 // a worker can't (e.g.) complete a request that was never claimed.
+//
+// The read-then-check below gives a GOOD ERROR MESSAGE; it is not the enforcement.
+// Enforcement is `.in('status', allowedFrom)` on the UPDATE, which re-asserts the exact
+// same from-states inside the write. Without it the row is unguarded between the SELECT
+// and the UPDATE, so two callers that both read a legal state both pass the check and
+// both write: two workers each "successfully" claim the same queued request, or a worker
+// completes a request the operator rejected in the gap. With it the database picks the
+// winner, the loser matches 0 rows, and the loser is told to re-fetch instead of being
+// silently applied. Same shape as the mc_submit_plan `.is('plan', null)` write-once guard
+// and the mc_respond_approval attempt/SHA binding.
 async function transitionRequest(
   supabase: ReturnType<typeof createAdminSupabaseClient>,
   requestId: string,
@@ -679,9 +689,16 @@ async function transitionRequest(
     .from('mc_requests')
     .update({ ...updates, updated_at: new Date().toISOString() })
     .eq('id', requestId)
+    .in('status', allowedFrom)
     .select('id, status, assigned_to')
-    .single()
-  if (uerr || !data) throw new Error(uerr?.message ?? 'Update failed')
+    .maybeSingle()
+  if (uerr) throw new Error(uerr.message)
+  if (!data) {
+    throw new Error(
+      `Request ${requestId} changed while the transition was in flight ` +
+        `(no longer one of: ${allowedFrom.join(', ')}); re-fetch and retry`,
+    )
+  }
   return data
 }
 
