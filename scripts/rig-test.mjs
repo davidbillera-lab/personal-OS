@@ -10,12 +10,8 @@ import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 // Same rules the real tool runs. This CLI holds the SERVICE-ROLE key, so an approve path
-// here that is weaker than mc_respond_approval is a real bypass of the approval gate, not a
-// test-only shortcut — hence one shared implementation rather than two similar ones.
-import { applyApprovalDecision } from './lib/approval-binding.mjs'
-// Same rules the real tool uses. This CLI holds the SERVICE-ROLE key, so approving here
-// with anything weaker than mc_respond_approval's attempt+SHA binding is a real bypass of
-// the push gate, not a test-only shortcut.
+// here that is weaker than mc_respond_approval's attempt+SHA binding is a real bypass of the
+// approval gate, not a test-only shortcut — hence one shared implementation, imported ONCE.
 import { applyApprovalDecision } from './lib/approval-binding.mjs'
 
 const __filename = fileURLToPath(import.meta.url)

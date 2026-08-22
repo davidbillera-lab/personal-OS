@@ -10,6 +10,7 @@
 // grown its own approval mutation again.
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
+import { execFileSync } from 'child_process'
 import { applyApprovalDecision } from '../scripts/lib/approval-binding.mjs'
 
 const SHA = 'a'.repeat(40)
@@ -99,5 +100,31 @@ describe('rig-test source — no second, weaker approval path', () => {
   it('exposes the attempt_id argument the operator needs to pin a review', () => {
     expect(RIG_TEST_SRC).toContain('attempt_id')
     expect(RIG_TEST_SRC).toMatch(/approve <id> \[attempt\]/)
+  })
+})
+
+// Every other test in this file reads rig-test.mjs as TEXT, so the file can be source-perfect
+// and still not run: a duplicate `import { applyApprovalDecision }` is an ESM early
+// SyntaxError, and the CLI dies before main(). That shipped. This is the cheap check that the
+// operator's emergency door actually opens.
+//
+// It must never IMPORT the module: rig-test.mjs calls main() at load, so an import in the
+// test process would run the real CLI against production Mission Control. `--check` parses
+// without executing; the no-arg run reaches usage() and returns before any Supabase client
+// is constructed.
+describe('rig-test CLI — actually loads and runs', () => {
+  it('parses as a module (catches duplicate imports and other early SyntaxErrors)', () => {
+    expect(() =>
+      execFileSync(process.execPath, ['--check', 'scripts/rig-test.mjs'], { timeout: 30_000 }),
+    ).not.toThrow()
+  })
+
+  it('runs with no arguments and prints usage instead of crashing', () => {
+    const out = execFileSync(process.execPath, ['scripts/rig-test.mjs'], {
+      encoding: 'utf8',
+      timeout: 30_000,
+    })
+    expect(out).toContain('rig-test — drive the dispatcher rig test')
+    expect(out).toContain('approve <id>')
   })
 })
