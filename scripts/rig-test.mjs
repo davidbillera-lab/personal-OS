@@ -9,6 +9,14 @@ import { createClient } from '@supabase/supabase-js'
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
+// Same rules the real tool runs. This CLI holds the SERVICE-ROLE key, so an approve path
+// here that is weaker than mc_respond_approval is a real bypass of the approval gate, not a
+// test-only shortcut — hence one shared implementation rather than two similar ones.
+import { applyApprovalDecision } from './lib/approval-binding.mjs'
+// Same rules the real tool uses. This CLI holds the SERVICE-ROLE key, so approving here
+// with anything weaker than mc_respond_approval's attempt+SHA binding is a real bypass of
+// the push gate, not a test-only shortcut.
+import { applyApprovalDecision } from './lib/approval-binding.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -64,8 +72,9 @@ Usage: node scripts/rig-test.mjs <command> [args]
 Commands:
   seed "<request text>"   Create a queued rig-test request. Prints the new id.
   status <id>              Show the current state of a request.
-  approve <id>             Simulate a voice approval (awaiting_approval → in_progress/pushing).
-  reject <id>              Simulate a voice rejection (awaiting_approval → blocked).
+  approve <id> [attempt]   Simulate a voice approval (awaiting_approval → in_progress/pushing).
+                           Pass the attempt_id from 'status' to pin the attempt you reviewed.
+  reject <id> [attempt]    Simulate a voice rejection (awaiting_approval → blocked).
   list                     List recent rig-test requests (newest first).
   cleanup                  Delete all rig-test requests.
   pause                    Engage the dispatcher kill-switch (writes .dispatcher-paused).
@@ -123,6 +132,7 @@ Request ${data.id}
   phase:            ${data.phase ?? '(none)'}
   attempt_id:       ${data.attempt_id ?? '(none)'}
   reviewed_sha:     ${data.reviewed_sha ? data.reviewed_sha.slice(0, 10) : '(none)'}
+  approved_sha:     ${data.approved_sha ? data.approved_sha.slice(0, 10) : '(none)'}
   workspace_ref:    ${data.workspace_ref ?? '(none)'}
   approved_by:      ${data.approved_by ?? '(none)'}
   blocker:          ${data.blocker ?? '(none)'}
@@ -130,67 +140,78 @@ Request ${data.id}
 `.trim())
 }
 
-async function cmdApprove(sb, args) {
+// Read the row, then write through the SHARED guarded decision. The old version issued a
+// bare `update ... where status='awaiting_approval'` with the service-role key: it bound to
+// no attempt and stamped no approved_sha, so it could land on an attempt the operator never
+// reviewed and left the push gate with nothing to check consent against.
+async function decide(sb, decision, args) {
   const id = args[0]
+  const expectedAttempt = args[1] // optional: pin the attempt the operator reviewed
   if (!id) {
-    console.log('Usage: node scripts/rig-test.mjs approve <id>')
+    console.log(`Usage: node scripts/rig-test.mjs ${decision === 'approve' ? 'approve' : 'reject'} <id> [attempt_id]`)
     process.exitCode = 1
     return
   }
-  const { data, error } = await sb
+  const { data: current, error: readErr } = await sb
     .from('mc_requests')
-    .update({
-      status: 'in_progress', phase: 'pushing', approval_required: false,
-      approved_by: 'rig-test', approved_at: nowISO(), updated_at: nowISO(),
-    })
-    .eq('id', id).eq('status', 'awaiting_approval')
-    .select('*')
+    .select('status, attempt_id, reviewed_sha')
+    .eq('id', id)
     .maybeSingle()
-  if (error) {
-    console.log(`Failed to approve request: ${error.message}`)
+  if (readErr) {
+    console.log(`Failed to read request: ${readErr.message}`)
     process.exitCode = 1
     return
   }
-  if (!data) {
-    const { data: current } = await sb.from('mc_requests').select('status').eq('id', id).maybeSingle()
-    const currentStatus = current ? current.status : '(request not found)'
-    console.log(`Cannot approve: request is not awaiting_approval (current status=${currentStatus}). Run a build first (Stage 2).`)
+  if (!current) {
+    console.log(`No request found with id ${id}`)
     process.exitCode = 1
     return
   }
-  console.log(`Approved ${data.id} — status=${data.status} phase=${data.phase}. Dispatcher will pick up the gated push on its next poll.`)
+  if (current.status !== 'awaiting_approval') {
+    console.log(`Cannot ${decision}: request is not awaiting_approval (current status=${current.status}). Run a build first (Stage 2).`)
+    process.exitCode = 1
+    return
+  }
+  if (expectedAttempt && expectedAttempt !== current.attempt_id) {
+    console.log(`Cannot ${decision}: attempt superseded — you passed ${expectedAttempt} but the current attempt is ${current.attempt_id ?? '(none)'}.`)
+    process.exitCode = 1
+    return
+  }
+
+  let result
+  try {
+    result = await applyApprovalDecision(sb, id, current, {
+      attemptId: current.attempt_id,
+      decision,
+      actor: 'rig-test',
+      note: decision === 'reject' ? 'rig-test reject' : null,
+      now: nowISO(),
+    })
+  } catch (e) {
+    console.log(`Cannot ${decision}: ${e.message}`)
+    process.exitCode = 1
+    return
+  }
+  if (result.error) {
+    console.log(`Failed to ${decision} request: ${result.error.message}`)
+    process.exitCode = 1
+    return
+  }
+  if (!result.data) {
+    console.log(`Cannot ${decision}: the request moved while the decision was being applied (attempt superseded, reviewed commit changed, or already resolved). Re-run status and try again.`)
+    process.exitCode = 1
+    return
+  }
+  const data = result.data
+  if (decision === 'approve') {
+    console.log(`Approved ${data.id} — status=${data.status} phase=${data.phase} approved_sha=${data.approved_sha}. Dispatcher will pick up the gated push on its next poll.`)
+  } else {
+    console.log(`Rejected ${data.id} — status=${data.status}.`)
+  }
 }
 
-async function cmdReject(sb, args) {
-  const id = args[0]
-  if (!id) {
-    console.log('Usage: node scripts/rig-test.mjs reject <id>')
-    process.exitCode = 1
-    return
-  }
-  const { data, error } = await sb
-    .from('mc_requests')
-    .update({
-      status: 'blocked', approval_required: false,
-      approved_by: 'rig-test', approved_at: nowISO(), blocker: 'rig-test reject', updated_at: nowISO(),
-    })
-    .eq('id', id).eq('status', 'awaiting_approval')
-    .select('*')
-    .maybeSingle()
-  if (error) {
-    console.log(`Failed to reject request: ${error.message}`)
-    process.exitCode = 1
-    return
-  }
-  if (!data) {
-    const { data: current } = await sb.from('mc_requests').select('status').eq('id', id).maybeSingle()
-    const currentStatus = current ? current.status : '(request not found)'
-    console.log(`Cannot reject: request is not awaiting_approval (current status=${currentStatus}). Run a build first (Stage 2).`)
-    process.exitCode = 1
-    return
-  }
-  console.log(`Rejected ${data.id} — status=${data.status}.`)
-}
+const cmdApprove = (sb, args) => decide(sb, 'approve', args)
+const cmdReject = (sb, args) => decide(sb, 'reject', args)
 
 async function cmdList(sb) {
   const { data, error } = await sb

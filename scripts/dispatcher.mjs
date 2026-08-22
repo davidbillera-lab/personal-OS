@@ -17,9 +17,11 @@
 //   - Atomic claim via conditional UPDATE ... WHERE status='queued' (0 rows = lost race).
 //   - The dispatcher NEVER calls mc_respond_approval. It requests approval and waits for
 //     the operator (ChatGPT voice → mc_respond_approval). Self-approve is impossible here.
-//   - Gated push verifies ALL before pushing (status/phase/approved_at, reviewed_sha +
-//     workspace present, repo on allowlist + branch = mc-build-<id>, no newer reject, and
-//     git HEAD === reviewed_sha). ANY failure ⇒ abort, no push, mark failed.
+//   - Gated push verifies ALL before pushing (status/phase/approved_at, approved_sha ===
+//     reviewed_sha === git HEAD, workspace_ref === builds/<request_id>/<attempt_id> and
+//     present on disk, repo on allowlist + branch = mc-build-<id>, no newer reject, and an
+//     authoritative re-read showing zero approval drift). It then pushes the LITERAL
+//     approved SHA, never HEAD. ANY failure ⇒ abort, no push, mark failed.
 //   - Sandbox target is ALWAYS davidbillera-lab/mc-spike-test @ mc-build-<id>. Never a
 //     portfolio repo.
 //
@@ -51,6 +53,8 @@ import { workSetEmpty, shouldSleep } from './lib/idle-sleep.mjs'
 import {
   withRetry, persistAttemptResult, clearAttemptResult, recoverFinishedBuild, isOurAttempt,
 } from './lib/attempt-recovery.mjs'
+import { consentDrift } from './lib/approval-binding.mjs'
+import { workspaceBindingError } from './lib/workspace-binding.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -324,6 +328,9 @@ async function requestApproval(sb, row, result) {
     .update({
       status: 'awaiting_approval', phase: 'review', approval_required: true,
       reviewed_sha: reviewedSha, workspace_ref: workspace,
+      // A new attempt means a new commit, so any consent recorded for a previous one is
+      // void. Clearing it here is what stops a rebuild inheriting an earlier approval.
+      approved_sha: null, approved_by: null, approved_at: null,
       latest_progress: clip(`built; CodexQC ${qcVerdict}; commit ${reviewedSha}`),
       blocker: clip(blocker), updated_at: nowISO(),
     })
@@ -404,9 +411,19 @@ async function gatedPush(sb, row) {
   }
   console.log(`[push] gate: approved-for-push OK (approved_by=${r.approved_by} at ${r.approved_at})`)
   if (!r.reviewed_sha) return fail('reviewed_sha missing')
-  if (!r.workspace_ref) return fail('workspace_ref missing')
+  // The commit the operator actually said yes to, frozen at decision time (migration 027).
+  // Without this the approval only recorded WHO and WHEN, so rewriting reviewed_sha after
+  // the fact silently moved a live approval onto a different commit.
+  if (!r.approved_sha) return fail('approved_sha missing — approval did not record which commit was approved')
+  if (r.approved_sha !== r.reviewed_sha) {
+    return fail(`approval retargeted: approved_sha ${r.approved_sha} != reviewed_sha ${r.reviewed_sha}`)
+  }
+  // workspace_ref is DERIVED, not trusted: it must be exactly builds/<request_id>/<attempt_id>.
+  // Otherwise a row rewrite could aim the push at any git repo on this machine.
+  const wsErr = workspaceBindingError(BUILDS_DIR, r)
+  if (wsErr) return fail(`workspace binding: ${wsErr}`)
   if (!existsSync(r.workspace_ref)) return fail(`workspace dir missing: ${r.workspace_ref}`)
-  console.log(`[push] gate: reviewed_sha + workspace present OK (${r.workspace_ref})`)
+  console.log(`[push] gate: approved_sha === reviewed_sha + workspace bound OK (${r.workspace_ref})`)
   // SANDBOX_REMOTE is mock-only (see config above), so in production the push target is
   // always SANDBOX_REPO — this allowlist check is a real gate, not redirectable via env var.
   if (!ALLOWED_REPOS.includes(SANDBOX_REPO)) return fail(`repo ${SANDBOX_REPO} not on allowlist [${ALLOWED_REPOS.join(', ')}]`)
@@ -416,17 +433,32 @@ async function gatedPush(sb, row) {
   // this is the explicit belt-and-suspenders assertion.
   if (r.status === 'blocked' || r.status === 'cancelled') return fail(`superseded by ${r.status}`)
 
-  // HEAD must be EXACTLY the reviewed+approved commit.
+  // HEAD must be EXACTLY the reviewed+approved commit. approved_sha === reviewed_sha is
+  // already asserted above, so this closes the three-way equality the push depends on.
   let head
   try { head = git(r.workspace_ref, ['rev-parse', 'HEAD']) } catch (e) { return fail(`rev-parse failed: ${e.message}`) }
-  if (head !== r.reviewed_sha) return fail(`SHA drift: HEAD ${head} != reviewed_sha ${r.reviewed_sha}`)
-  console.log(`[push] gate: HEAD === reviewed_sha OK (${head})`)
+  if (head !== r.approved_sha) return fail(`SHA drift: HEAD ${head} != approved_sha ${r.approved_sha}`)
+  console.log(`[push] gate: HEAD === approved_sha === reviewed_sha OK (${head})`)
+
+  // Authoritative re-read IMMEDIATELY before the push. Every gate above was checked against
+  // a row read before rev-parse and the filesystem checks ran; a reject, a resume or a
+  // rebuild landing inside that window would otherwise be pushed straight past. Any change
+  // to a consent-bearing field ⇒ abort, no push.
+  const { data: fresh, error: ferr } = await sb.from('mc_requests').select('*').eq('id', r.id).single()
+  if (ferr || !fresh) return fail(`pre-push re-read failed: ${ferr?.message ?? 'row not found'}`)
+  const drift = consentDrift(r, fresh)
+  if (drift) return fail(`pre-push drift: ${drift}`)
+  console.log('[push] gate: authoritative re-read clean (no approval drift)')
 
   // --- all gates passed: push (dispatcher is the ONLY push-cred holder) ---
+  // Push the LITERAL approved commit, never `HEAD`. HEAD was only verified a moment ago and
+  // is a moving target — anything that commits in the workspace between the check and the
+  // push would otherwise ship an unreviewed commit under a valid approval.
+  const sha = r.approved_sha
   const remote = SANDBOX_REMOTE || `https://github.com/${SANDBOX_REPO}.git`
-  console.log(`[push] pushing ${head} → ${remote} ${branch}`)
+  console.log(`[push] pushing ${sha} → ${remote} ${branch}`)
   try {
-    git(r.workspace_ref, ['push', remote, `HEAD:refs/heads/${branch}`])
+    git(r.workspace_ref, ['push', remote, `${sha}:refs/heads/${branch}`])
   } catch (e) {
     return fail(`git push failed: ${e.message}`)
   }
@@ -435,14 +467,14 @@ async function gatedPush(sb, row) {
   const { data: done, error: derr } = await sb.from('mc_requests')
     .update({
       status: 'completed', phase: null,
-      result_summary: `pushed ${head} to ${SANDBOX_REPO}@${branch}`,
-      artifact_refs: [repoURL, head], completed_at: nowISO(), updated_at: nowISO(),
+      result_summary: `pushed ${sha} to ${SANDBOX_REPO}@${branch}`,
+      artifact_refs: [repoURL, sha], completed_at: nowISO(), updated_at: nowISO(),
     })
     .eq('id', r.id).eq('status', 'in_progress') // guard: a newer state ⇒ don't double-complete
     .select('*').maybeSingle()
   if (derr) { console.log(`[push] complete update error ${r.id}: ${derr.message}`); return }
   if (!done) { console.log(`[push] complete guard failed for ${r.id} (a newer state won)`); return }
-  console.log(`[push] SUCCESS ${r.id} → completed (${head})`)
+  console.log(`[push] SUCCESS ${r.id} → completed (${sha})`)
   await logAudit(sb, 'dispatcher.push', true)
 }
 

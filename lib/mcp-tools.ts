@@ -3,6 +3,7 @@ import { decrypt, encrypt } from '@/lib/crypto'
 import { fetchGitHubDiff } from '@/lib/github'
 import { runCodexQC, rerunCodexQCOnSpec } from '@/app/(app)/projects/[id]/actions'
 import { captureToVault } from '@/lib/vault'
+import { applyApprovalDecision } from '@/scripts/lib/approval-binding.mjs'
 import {
   buildWorkflowRequestText,
   JARVIS_WORKFLOW_TYPE,
@@ -1259,7 +1260,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
     if (!workflow_id) throw new Error('workflow_id is required')
     const { data, error } = await supabase
       .from('mc_requests')
-      .select('id, project_id, title, request_text, status, phase, assigned_to, latest_progress, blocker, approval_required, attempt_id, reviewed_sha, approved_by, approved_at, updated_at')
+      .select('id, project_id, title, request_text, status, phase, assigned_to, latest_progress, blocker, approval_required, attempt_id, reviewed_sha, approved_sha, approved_by, approved_at, updated_at')
       .eq('id', workflow_id).single()
     if (error || !data) throw new Error(`Workflow not found: ${workflow_id}`)
     return JSON.stringify({
@@ -1267,7 +1268,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       title: data.title, status: data.status, phase: data.phase, assigned_to: data.assigned_to,
       latest_progress: data.latest_progress, blocker: data.blocker,
       approval_required: data.approval_required, attempt_id: data.attempt_id,
-      reviewed_sha: data.reviewed_sha, approved_by: data.approved_by,
+      reviewed_sha: data.reviewed_sha, approved_sha: data.approved_sha, approved_by: data.approved_by,
       approved_at: data.approved_at, updated_at: data.updated_at,
     })
   }
@@ -1524,6 +1525,9 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
         approved_at: null,
         attempt_id: null,
         reviewed_sha: null,
+        // Consent dies with the attempt it was bound to — a resumed request must be
+        // reviewed and approved again from scratch.
+        approved_sha: null,
         workspace_ref: null,
         latest_progress: `Resumed by ${actor}: ${reason}`,
         completed_at: null,
@@ -1638,7 +1642,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
 
     const { data: cur, error: curErr } = await supabase
       .from('mc_requests')
-      .select('status, attempt_id, approved_at')
+      .select('status, attempt_id, approved_at, reviewed_sha')
       .eq('id', request_id).single()
     if (curErr || !cur) throw new Error(`Request not found: ${request_id}`)
 
@@ -1665,26 +1669,26 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       throw new Error(`Request already resolved (status '${cur.status}'); conflicting '${decision}' refused`)
     }
 
-    // Fresh awaiting_approval → ATOMIC check-and-set. The UPDATE only lands if the row
-    // is still awaiting_approval AND still on the exact reviewed attempt. 0 rows ⇒ a
-    // superseded attempt, a stale/absent attempt_id (null never matches → fails safe),
-    // or a concurrent decision won the race → refuse.
-    const now = new Date().toISOString()
-    const updates = decision === 'approve'
-      ? { status: 'in_progress', phase: 'pushing', approval_required: false, approved_by: actor, approved_at: now, blocker: null, updated_at: now }
-      : { status: 'blocked', phase: null, approval_required: false, approved_by: actor, approved_at: now, blocker: note ?? 'rejected by operator', updated_at: now }
-    const { data, error: uerr } = await supabase
-      .from('mc_requests')
-      .update(updates)
-      .eq('id', request_id)
-      .eq('status', 'awaiting_approval')
-      .eq('attempt_id', attempt_id)
-      .select('id, status')
-      .single()
+    // Fresh awaiting_approval → ATOMIC check-and-set, via the rules shared with the
+    // operator CLI (scripts/lib/approval-binding.mjs). The UPDATE only lands if the row is
+    // still awaiting_approval, still on the exact reviewed attempt, AND — on approve —
+    // still on the exact commit this decision was computed against. 0 rows ⇒ a superseded
+    // attempt, a stale/absent attempt_id (null never matches → fails safe), a reviewed_sha
+    // rewritten under the approval, or a concurrent decision won the race → refuse.
+    //
+    // approved_sha is stamped from the server-read reviewed_sha, never from caller input:
+    // recording WHO approved without recording WHAT left consent pointing at a mutable
+    // column, so changing reviewed_sha afterwards retargeted a live approval.
+    const { data, error: uerr, updates } = await applyApprovalDecision(supabase, request_id, cur, {
+      attemptId: attempt_id, decision, actor, note, now: new Date().toISOString(),
+    })
     if (uerr || !data) {
-      throw new Error(`Approval did not apply: request superseded, attempt_id mismatch, or already resolved (attempt ${attempt_id})`)
+      throw new Error(`Approval did not apply: request superseded, attempt_id mismatch, reviewed commit changed under the approval, or already resolved (attempt ${attempt_id})`)
     }
-    return JSON.stringify({ request_id: data.id, status: data.status, decision, attempt_id })
+    return JSON.stringify({
+      request_id: data.id, status: data.status, decision, attempt_id,
+      approved_sha: updates.approved_sha,
+    })
   }
 
   if (name === 'mc_complete_request') {
