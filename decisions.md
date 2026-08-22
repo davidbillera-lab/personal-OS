@@ -641,3 +641,17 @@ Also removed the reason that test had to race module side effects at all. Import
 **Open, not closed:** one full-suite run failed a single test and I did not capture which; seven subsequent runs (three shuffled) are green and I cannot reproduce it. It landed on a cold-transform run while Docker Desktop was starting, so contention is the likely cause — recorded as unreproduced rather than fixed. Separately, `findPushable`'s fix is proven by unit test but has not yet pushed a real reassigned row, because recording an approval is operator-only.
 
 **Made by:** David ("take care of what needs to be done so we can be 100% confident in the launch") / Claude.
+
+---
+
+### 2026-08-22 — Bot Mode security hardening is migration-first; live profile migration remains separately gated
+
+**Decision:** The Bot Mode optimization branch hardens the existing Mission Control and dispatcher boundaries before any specialist roster is activated. Repository-side work adds a deny-by-default Chief MCP scope, atomic Hermes plan intake, exact-state request transitions, approval bound to attempt and immutable `approved_sha`, literal-SHA push with an immediate authoritative re-read, attempt-bound workspace validation, and a repaired on-demand wake path. GPT-5.6 Sol remains the intended Chief-of-Staff default; Terra/Luna aliases are a later local-profile migration, not part of this repository build.
+
+**Reasoning:** The audit found that client-side tool hiding, URL changes with a broad credential, mutable reviewed SHA, moving `HEAD` pushes, and saved-stopped PM2 state could each make the system appear safe or awake while violating the actual boundary. Independent Codex review found and closed additional P1 races and credential-precedence issues. Security must be enforced by server credential scope, database compare-and-swap, attempt/SHA binding, and verified process state—not by prompt instructions or UI state.
+
+**Deployment consequence:** `supabase/migrations/027_approval_sha_binding.sql` must be applied and the nullable `approved_sha` column verified **before** deploying code that selects/writes it. Migration approval, exact-SHA application deployment, and live Hermes profile migration are three separate gates. The rollout procedure is `docs/runbooks/bot-mode-security-rollout.md`. Safe rollback disables Hermes MC access; broad endpoint restoration is break-glass only.
+
+**Still open:** No live credential rotation, deployment, or Hermes profile edits have occurred. The dispatcher remains fixed to `mc-spike-test` with real-repository Gap D intentionally open. `DISPATCHER_TIMEOUT_MS` is not a spend ledger; true per-request monetary accounting remains future scope. OpenRouter/Nous inference and permanent specialist Bots remain unapproved until privacy, routing, and cost gates pass.
+
+**Made by:** David / Hermes planning / Claude Code implementation / Codex independent review.
