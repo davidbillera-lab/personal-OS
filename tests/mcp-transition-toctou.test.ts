@@ -3,18 +3,25 @@
 // The bug: transitionRequest() SELECTs `status`, checks it against `allowedFrom`, and then
 // UPDATEs filtered on `.eq('id', ...)` ALONE. Between the read and the write the row is
 // unguarded, so two callers that both read a legal from-state both pass the check and both
-// write. Concretely:
+// write: two workers each "successfully" claim the same queued request, or a worker
+// completes a request the operator resolved in the gap.
 //
-//   - two workers read status='queued', both pass, both claim -> the second silently steals
-//     a request the first already owns, and BOTH get a success response naming themselves
-//     as assigned_to. Nothing anywhere reports the collision.
-//   - a worker reads 'in_progress' and completes while the operator rejects to 'blocked' ->
-//     the completion lands on a rejected request, erasing the rejection.
+// The FIRST fix re-asserted the allowed SET (`.in('status', allowedFrom)`). That closed
+// drift out of the set but not drift WITHIN it, which is where the state machine actually
+// runs backwards:
 //
-// The fix re-asserts the EXACT allowedFrom set in the UPDATE's WHERE clause (`.in('status',
-// allowedFrom)`), so the database picks the winner and the loser matches 0 rows and is told
-// to re-fetch. Same shape as the mc_submit_plan `.is('plan', null)` fix (mcp-plan-write-once)
-// and the mc_respond_approval attempt binding (approval-sha-binding).
+//   - mc_post_progress is legal from claimed | in_progress | blocked. A worker reads
+//     'in_progress', the operator marks the request 'blocked' in the gap, and the progress
+//     post still matched (blocked is in the set) -- flipping status back to 'in_progress'
+//     and erasing the block, while telling the worker it succeeded.
+//   - mc_complete_request is legal from claimed | in_progress | awaiting_approval. A
+//     completion computed against 'in_progress' landed on a row that had moved to
+//     'awaiting_approval', burying a pending operator approval.
+//
+// The fix is a compare-and-swap on the exact value read: `.eq('status', cur.status)`. The
+// database picks the winner, the loser matches 0 rows and is told to re-fetch. Same shape as
+// the mc_submit_plan write-once fix (mcp-plan-write-once) and the mc_respond_approval
+// attempt binding (approval-sha-binding).
 //
 // NOTE: there is no stdio mirror to keep in step. mcp-server.mjs implements mc_submit_plan
 // only -- it carries none of the worker state-machine tools -- so lib/mcp-tools.ts is the
@@ -25,9 +32,15 @@ import { join } from 'path'
 
 type Filter = { op: string; col: string; values?: unknown }
 
-// Row the "read current state" step sees, and the row the guarded UPDATE resolves to
-// (empty = the guard matched 0 rows, i.e. this caller lost the race).
-const state: { current: any; updateResult: any[] } = { current: null, updateResult: [] }
+// `current` is the row the "read current state" step sees; `updateResult` is what the
+// guarded UPDATE resolves to (empty = the guard matched 0 rows, i.e. this caller lost).
+//
+// `serverStatus`, when set, switches the mock into faithful-CAS mode: the UPDATE resolves
+// only if its status guard actually matches the row's status ON THE SERVER at write time.
+// That is what makes a drift test meaningful instead of hand-asserted — under the old
+// `.in(allowedFrom)` guard these tests would pass the write through and fail.
+const state: { current: any; updateResult: any[]; serverStatus: string | null } =
+  { current: null, updateResult: [], serverStatus: null }
 let updateFilters: Filter[] = []
 let updatePayload: Record<string, unknown> | null = null
 
@@ -56,26 +69,32 @@ vi.mock('@/lib/supabase', () => ({
       }
       chain.single = async () =>
         state.current ? { data: state.current, error: null } : { data: null, error: { message: 'no rows' } }
-      chain.maybeSingle = async () => ({ data: state.updateResult[0] ?? null, error: null })
+      chain.maybeSingle = async () => {
+        if (state.serverStatus !== null) {
+          const g = updateFilters.find(f => f.col === 'status')
+          const matches = g?.op === 'eq'
+            ? g.values === state.serverStatus
+            : Array.isArray(g?.values) && (g!.values as string[]).includes(state.serverStatus)
+          return { data: matches ? state.updateResult[0] ?? null : null, error: null }
+        }
+        return { data: state.updateResult[0] ?? null, error: null }
+      }
       return chain
     },
   }),
 }))
 
 const statusGuard = () => updateFilters.find(f => f.col === 'status')
-const guardedStatuses = () => {
-  const g = statusGuard()
-  return Array.isArray(g?.values) ? [...(g!.values as string[])].sort() : g?.values
-}
 
 beforeEach(() => {
   updateFilters = []
   updatePayload = null
   state.current = { status: 'queued' }
   state.updateResult = [{ id: 'req-1', status: 'claimed', assigned_to: 'worker-a' }]
+  state.serverStatus = null
 })
 
-describe('transitionRequest — the UPDATE re-asserts the from-state', () => {
+describe('transitionRequest — the UPDATE compare-and-swaps the status it read', () => {
   it('guards mc_claim_request on status, not on id alone', async () => {
     const { callTool } = await import('@/lib/mcp-tools')
     await callTool('mc_claim_request', { request_id: 'req-1', worker: 'worker-a' })
@@ -87,19 +106,26 @@ describe('transitionRequest — the UPDATE re-asserts the from-state', () => {
     ).toBeDefined()
   })
 
-  it('guards on the EXACT allowedFrom set, so the window cannot be widened by accident', async () => {
+  it('queued -> claimed swaps on exactly the value read, not on the allowed set', async () => {
     const { callTool } = await import('@/lib/mcp-tools')
-
-    // A claim is legal only from 'queued'.
     await callTool('mc_claim_request', { request_id: 'req-1', worker: 'worker-a' })
-    expect(guardedStatuses()).toEqual(['queued'])
+    expect(statusGuard()).toEqual({ op: 'eq', col: 'status', values: 'queued' })
+  })
 
-    // A completion is legal from exactly these three.
-    updateFilters = []
+  it('a multi-state transition pins the ONE state it read, not all three it allows', async () => {
+    const { callTool } = await import('@/lib/mcp-tools')
+    // mc_complete_request allows claimed | in_progress | awaiting_approval. Read as
+    // 'in_progress' => the write must be conditional on 'in_progress' alone. Guarding the
+    // whole set would let the completion land on a row that had since moved to
+    // 'awaiting_approval', burying a pending operator approval.
     state.current = { status: 'in_progress' }
     state.updateResult = [{ id: 'req-1', status: 'completed', assigned_to: 'worker-a' }]
     await callTool('mc_complete_request', { request_id: 'req-1', result_summary: 'done' })
-    expect(guardedStatuses()).toEqual(['awaiting_approval', 'claimed', 'in_progress'])
+    expect(statusGuard()).toEqual({ op: 'eq', col: 'status', values: 'in_progress' })
+    expect(
+      updateFilters.some(f => f.op === 'in'),
+      'a set guard is what allowed drift within the allowed states',
+    ).toBe(false)
   })
 
   it('carries the guard on every transitioning tool, not just the one that was fixed', async () => {
@@ -118,11 +144,9 @@ describe('transitionRequest — the UPDATE re-asserts the from-state', () => {
       state.current = { status: from }
       state.updateResult = [{ id: 'r', status: 'x', assigned_to: 'w' }]
       await callTool(tool, args)
-      expect(statusGuard(), `${tool} must re-assert its from-state on the UPDATE`).toBeDefined()
-      expect(
-        (statusGuard()!.values as string[]).includes(from),
-        `${tool} guard must admit the state it was read in`,
-      ).toBe(true)
+      expect(statusGuard(), `${tool} must re-assert its from-state on the UPDATE`).toEqual({
+        op: 'eq', col: 'status', values: from,
+      })
     }
   })
 })
@@ -153,7 +177,82 @@ describe('transitionRequest — the concurrent loser is refused, never silently 
     ).rejects.toThrow(/re-fetch and retry/)
   })
 
-  it('names the request and the states it expected, so the loser can act on the error', async () => {
+  // THE DRIFT THE SET GUARD MISSED. mc_post_progress is legal from claimed | in_progress |
+  // 'blocked', so `.in(allowedFrom)` matched a blocked row and the progress payload
+  // (status: 'in_progress') un-blocked it. The operator's block was erased and the worker
+  // was told the post succeeded. Faithful-CAS mode: the write is offered to a server row
+  // that is genuinely 'blocked'.
+  it('a progress post cannot un-block a request the operator just blocked', async () => {
+    const { callTool } = await import('@/lib/mcp-tools')
+    state.current = { status: 'in_progress' }   // what the worker read
+    state.serverStatus = 'blocked'              // what the row is by write time
+    state.updateResult = [{ id: 'req-1', status: 'in_progress', assigned_to: 'worker-a' }]
+
+    await expect(
+      callTool('mc_post_progress', { request_id: 'req-1', progress: 'still working' }),
+    ).rejects.toThrow(/re-fetch and retry/)
+    expect(statusGuard()).toEqual({ op: 'eq', col: 'status', values: 'in_progress' })
+  })
+
+  it('the same post still lands when the row has NOT drifted', async () => {
+    const { callTool } = await import('@/lib/mcp-tools')
+    state.current = { status: 'in_progress' }
+    state.serverStatus = 'in_progress'
+    state.updateResult = [{ id: 'req-1', status: 'in_progress', assigned_to: 'worker-a' }]
+
+    const out = JSON.parse(await callTool('mc_post_progress', { request_id: 'req-1', progress: 'ok' }))
+    expect(out).toEqual({ request_id: 'req-1', status: 'in_progress' })
+  })
+
+  // mc_mark_failed is legal from claimed | in_progress | blocked | awaiting_approval — the
+  // widest set on the state machine, so it drifts the most ways.
+  it('a failure computed against in_progress cannot bury a pending approval', async () => {
+    const { callTool } = await import('@/lib/mcp-tools')
+    state.current = { status: 'in_progress' }
+    state.serverStatus = 'awaiting_approval'
+    state.updateResult = [{ id: 'req-1', status: 'failed', assigned_to: 'worker-a' }]
+
+    await expect(
+      callTool('mc_mark_failed', { request_id: 'req-1', reason: 'boom' }),
+    ).rejects.toThrow(/re-fetch and retry/)
+  })
+
+  // queued -> claimed is the transition with a single allowed from-state, so the set guard
+  // and the CAS agree here. Pinned against the faithful mock anyway: it is the hottest race
+  // on the queue (every worker poll) and the one place a regression would be quietest.
+  it('queued -> claimed: the second worker loses against the real server state', async () => {
+    const { callTool } = await import('@/lib/mcp-tools')
+    state.current = { status: 'queued' }        // worker B's stale snapshot
+    state.serverStatus = 'claimed'              // worker A already won
+    await expect(
+      callTool('mc_claim_request', { request_id: 'req-1', worker: 'worker-b' }),
+    ).rejects.toThrow(/no longer in status 'queued'/)
+  })
+
+  // mc_complete_request is legal from claimed | in_progress | awaiting_approval, so a
+  // completion computed against 'in_progress' used to land on a row the dispatcher had
+  // already moved to 'awaiting_approval' — burying an approval the operator had not answered.
+  it('a completion cannot bury an approval requested in the gap', async () => {
+    const { callTool } = await import('@/lib/mcp-tools')
+    state.current = { status: 'in_progress' }
+    state.serverStatus = 'awaiting_approval'
+    state.updateResult = [{ id: 'req-1', status: 'completed', assigned_to: 'worker-a' }]
+    await expect(
+      callTool('mc_complete_request', { request_id: 'req-1', result_summary: 'done' }),
+    ).rejects.toThrow(/re-fetch and retry/)
+  })
+
+  it('names the exact status it swapped against, so the loser knows what moved', async () => {
+    const { callTool } = await import('@/lib/mcp-tools')
+    state.current = { status: 'in_progress' }
+    state.serverStatus = 'blocked'
+    state.updateResult = [{ id: 'req-1', status: 'in_progress', assigned_to: 'w' }]
+    await expect(
+      callTool('mc_post_progress', { request_id: 'req-1', progress: 'p' }),
+    ).rejects.toThrow(/no longer in status 'in_progress'/)
+  })
+
+  it('names the request and the state it expected, so the loser can act on the error', async () => {
     const { callTool } = await import('@/lib/mcp-tools')
     state.updateResult = []
     await expect(
@@ -161,6 +260,7 @@ describe('transitionRequest — the concurrent loser is refused, never silently 
     ).rejects.toThrow(/req-42/)
   })
 })
+
 
 describe('transitionRequest — existing semantics preserved', () => {
   it('still rejects an illegal from-state before attempting any UPDATE', async () => {

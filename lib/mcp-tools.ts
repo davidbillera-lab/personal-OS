@@ -666,14 +666,21 @@ type ToolArgs = Record<string, string | undefined>
 // a worker can't (e.g.) complete a request that was never claimed.
 //
 // The read-then-check below gives a GOOD ERROR MESSAGE; it is not the enforcement.
-// Enforcement is `.in('status', allowedFrom)` on the UPDATE, which re-asserts the exact
-// same from-states inside the write. Without it the row is unguarded between the SELECT
-// and the UPDATE, so two callers that both read a legal state both pass the check and
-// both write: two workers each "successfully" claim the same queued request, or a worker
-// completes a request the operator rejected in the gap. With it the database picks the
-// winner, the loser matches 0 rows, and the loser is told to re-fetch instead of being
-// silently applied. Same shape as the mc_submit_plan `.is('plan', null)` write-once guard
-// and the mc_respond_approval attempt/SHA binding.
+// Enforcement is a compare-and-swap: the UPDATE re-asserts `status = the exact value this
+// call read`, so the write only lands on the snapshot the decision was made against.
+//
+// `.in('status', allowedFrom)` was not enough. It re-asserted the SET, not the VALUE, so any
+// drift WITHIN the allowed set slipped through and the state machine went backwards:
+//   - mc_post_progress is legal from claimed | in_progress | blocked. A worker reads
+//     'in_progress'; the operator marks the request 'blocked' in the gap; the progress post
+//     still matched (blocked ∈ allowed) and flipped status back to 'in_progress' — silently
+//     erasing the block, with the worker told it succeeded.
+//   - mc_complete_request is legal from claimed | in_progress | awaiting_approval. A worker
+//     reads 'in_progress' and completes while the dispatcher moves the row to
+//     'awaiting_approval'; the completion landed on top of a pending operator approval.
+// With `.eq('status', cur.status)` the database picks the winner, the loser matches 0 rows,
+// and the loser is told to re-fetch instead of being silently applied. Same shape as the
+// mc_submit_plan write-once guard and the mc_respond_approval attempt/SHA binding.
 async function transitionRequest(
   supabase: ReturnType<typeof createAdminSupabaseClient>,
   requestId: string,
@@ -689,14 +696,14 @@ async function transitionRequest(
     .from('mc_requests')
     .update({ ...updates, updated_at: new Date().toISOString() })
     .eq('id', requestId)
-    .in('status', allowedFrom)
+    .eq('status', cur.status)
     .select('id, status, assigned_to')
     .maybeSingle()
   if (uerr) throw new Error(uerr.message)
   if (!data) {
     throw new Error(
       `Request ${requestId} changed while the transition was in flight ` +
-        `(no longer one of: ${allowedFrom.join(', ')}); re-fetch and retry`,
+        `(no longer in status '${cur.status}'); re-fetch and retry`,
     )
   }
   return data
