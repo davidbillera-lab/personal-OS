@@ -145,10 +145,19 @@ function resolveAuth(req: NextRequest): ResolvedAuth | null {
   for (const [actor, key] of Object.entries(READONLY_KEYS)) {
     if (bearerMatches(req, key)) readActor = actor
   }
-  if (isFull) return { scope: 'full', actor: 'full' }
-  // Chief is checked before orchestrator on purpose: if the same key is ever listed
-  // in both maps by mistake, the NARROWER scope wins (fail safe, not fail open).
+  // Resolution order is NARROWEST FIRST, and that includes beating the full key. A token
+  // present in two maps is a configuration mistake, and the only safe way to resolve a
+  // mistake is downward: grant the least the config can be read as meaning.
+  //
+  // Chief before full specifically: if MCP_API_KEY is ever pasted into MCP_CHIEF_KEYS (the
+  // obvious shortcut when wiring a new agent — "it already works, reuse it"), full-first
+  // would silently hand that agent every tool including mc_get_credential, and nothing
+  // would look wrong. Chief-first instead breaks the full-token callers loudly on their
+  // next write. Loud and narrow beats silent and wide.
+  //
+  // So: never reuse MCP_API_KEY as an agent key. Mint a separate one per agent.
   if (chiefActor) return { scope: 'chief', actor: chiefActor }
+  if (isFull) return { scope: 'full', actor: 'full' }
   if (orchestratorActor) return { scope: 'orchestrator', actor: orchestratorActor }
   if (liaisonActor) return { scope: 'liaison', actor: liaisonActor }
   if (readActor) return { scope: 'read', actor: readActor }
