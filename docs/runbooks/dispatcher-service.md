@@ -156,9 +156,17 @@ also down (`AutoStart=false`), so a bare `pm2 resurrect` would have come up stra
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\rig-boot.ps1
 ```
 It starts Docker Desktop and waits for the daemon, brings up the executor egress network and
-proxy, runs `pm2 resurrect`, and logs whether `mc-dispatcher` actually came back to
-`rig-boot.log` (gitignored). Order is deliberate: the dispatcher starts last, into a working
-sandbox, instead of alerting and waiting.
+proxy, and runs `pm2 resurrect`. Order is deliberate: the dispatcher starts last, into a
+working sandbox, instead of alerting and waiting.
+
+**Resurrect is not a start.** It restores the *saved* state, and after an idle sleep that
+state is `stopped` — `rig-sleep.ps1` stops the entry and `autorestart` is `false` on purpose.
+So the wake path then reads the real pm2 state and acts on it: restarts a saved-stopped or
+errored `mc-dispatcher`, starts it from `ecosystem.config.cjs` if there is no entry at all,
+and leaves it alone if it is already online (it may be mid-build). It then **verifies**, and
+**exits non-zero** unless `mc-dispatcher` is genuinely `online` — a wake that reports success
+over a dead relay is what an operator stops checking. Everything lands in `rig-boot.log`
+(gitignored).
 
 **It also runs automatically at logon**, as scheduled task `MC Rig Boot`.
 ```
