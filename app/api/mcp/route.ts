@@ -41,6 +41,10 @@ const MCP_LIAISON_KEYS = process.env.MCP_LIAISON_KEYS
 // key grants the 'orchestrator' scope — every read tool plus exactly the two
 // routing writes (claim + reassign). Hermes's dispatcher role. Same shape.
 const MCP_ORCHESTRATOR_KEYS = process.env.MCP_ORCHESTRATOR_KEYS
+// Per-agent chief-of-staff keys as a JSON object of { actor: key }. A chief key
+// grants the 'chief' scope — the explicit CHIEF_TOOLS allowlist (reads + only
+// mc_submit_plan), with NO routing writes. Narrower than 'orchestrator'. Same shape.
+const MCP_CHIEF_KEYS = process.env.MCP_CHIEF_KEYS
 
 // Parse a JSON { actor: key } env var into a map, once at module load. Must be a
 // plain object: a bare string or array would make Object.entries() emit
@@ -70,6 +74,7 @@ function parseKeyMap(raw: string | undefined, envName: string): Record<string, s
 const READONLY_KEYS = parseKeyMap(MCP_READONLY_KEYS, 'MCP_READONLY_KEYS')
 const LIAISON_KEYS = parseKeyMap(MCP_LIAISON_KEYS, 'MCP_LIAISON_KEYS')
 const ORCHESTRATOR_KEYS = parseKeyMap(MCP_ORCHESTRATOR_KEYS, 'MCP_ORCHESTRATOR_KEYS')
+const CHIEF_KEYS = parseKeyMap(MCP_CHIEF_KEYS, 'MCP_CHIEF_KEYS')
 
 // What a resolved token grants: a scope plus the actor name for the audit trail.
 // Full-token callers (Claude Code, the dashboard) share one identity: "full".
@@ -121,6 +126,11 @@ function resolveAuth(req: NextRequest): ResolvedAuth | null {
   for (const [actor, key] of Object.entries(ORCHESTRATOR_KEYS)) {
     if (bearerMatches(req, key)) orchestratorActor = actor
   }
+  // Chief keys — narrow 'chief' scope (CHIEF_TOOLS allowlist; no routing writes).
+  let chiefActor: string | null = null
+  for (const [actor, key] of Object.entries(CHIEF_KEYS)) {
+    if (bearerMatches(req, key)) chiefActor = actor
+  }
   // Liaison keys — narrow 'liaison' scope (request-queue tools only).
   let liaisonActor: string | null = null
   for (const [actor, key] of Object.entries(LIAISON_KEYS)) {
@@ -136,6 +146,9 @@ function resolveAuth(req: NextRequest): ResolvedAuth | null {
     if (bearerMatches(req, key)) readActor = actor
   }
   if (isFull) return { scope: 'full', actor: 'full' }
+  // Chief is checked before orchestrator on purpose: if the same key is ever listed
+  // in both maps by mistake, the NARROWER scope wins (fail safe, not fail open).
+  if (chiefActor) return { scope: 'chief', actor: chiefActor }
   if (orchestratorActor) return { scope: 'orchestrator', actor: orchestratorActor }
   if (liaisonActor) return { scope: 'liaison', actor: liaisonActor }
   if (readActor) return { scope: 'read', actor: readActor }

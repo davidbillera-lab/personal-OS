@@ -25,8 +25,9 @@ export type McpScope = 'read' | 'write'
 // (claim + reassign + submit-plan) — it can pick up and route a request, and
 // deposit a planning artifact on its own submitted work, but never execute,
 // complete, fail, promote to queued, or touch the vault/credentials. Execution
-// stays with real workers.
-export type McpTokenScope = 'full' | 'read' | 'liaison' | 'orchestrator'
+// stays with real workers. 'chief' is the Hermes chief-of-staff surface: read +
+// exactly mc_submit_plan, with NO routing writes at all (see CHIEF_TOOLS).
+export type McpTokenScope = 'full' | 'read' | 'liaison' | 'orchestrator' | 'chief'
 
 // The only write tools an 'orchestrator' token adds on top of the read set.
 // Widen ONLY by adding a name here — never by loosening the checks below.
@@ -57,6 +58,43 @@ export const LIAISON_TOOLS = new Set<string>([
   'mc_get_workflow_result',
   'mc_assign_request',
   'mc_resume_request',
+])
+
+// The exact tool set a 'chief' token may see and call — the Hermes chief-of-staff
+// surface. It is 'orchestrator' MINUS the routing writes: every read tool the role
+// actually needs, plus mc_submit_plan as the single bounded transport exception.
+// mc_claim_request and mc_reassign_request are deliberately ABSENT: routing is done
+// server-side by /api/queue/dispatch (CRON_SECRET-gated), so the chief role never
+// needs them.
+//
+// Deliberately an explicit name list, NOT `scope === 'read' || extras`. A tool newly
+// added to MCP_TOOLS — even a read one — stays denied to 'chief' until someone adds
+// its name here on purpose. Widen only by adding a name; never by loosening the check.
+export const CHIEF_TOOLS = new Set<string>([
+  // reads
+  'mc_browse_vault',
+  'mc_get_agent',
+  'mc_get_pending_tasks',
+  'mc_get_project_context',
+  'mc_get_project_summary',
+  'mc_get_request',
+  'mc_get_request_status',
+  'mc_get_result',
+  'mc_get_skill',
+  'mc_get_vault_context',
+  'mc_get_vault_item',
+  'mc_get_workflow_result',
+  'mc_get_workflow_status',
+  'mc_list_agents',
+  'mc_list_pending_approvals',
+  'mc_list_projects',
+  'mc_list_recent_requests',
+  'mc_list_skills',
+  'mc_list_workers',
+  'mc_queue_status',
+  'mc_whats_stalled',
+  // the one bounded write: deposit a plan on its own submitted request
+  'mc_submit_plan',
 ])
 
 export interface McpTool {
@@ -605,6 +643,7 @@ export const MCP_TOOLS: McpTool[] = [
 export function toolsForScope(tokenScope: McpTokenScope): McpTool[] {
   if (tokenScope === 'full') return MCP_TOOLS
   if (tokenScope === 'liaison') return MCP_TOOLS.filter(t => LIAISON_TOOLS.has(t.name))
+  if (tokenScope === 'chief') return MCP_TOOLS.filter(t => CHIEF_TOOLS.has(t.name))
   if (tokenScope === 'orchestrator') return MCP_TOOLS.filter(t => t.scope === 'read' || ORCHESTRATOR_EXTRA_TOOLS.has(t.name))
   return MCP_TOOLS.filter(t => t.scope === 'read')
 }
@@ -613,6 +652,7 @@ export function toolsForScope(tokenScope: McpTokenScope): McpTool[] {
 export function isToolAllowed(name: string, tokenScope: McpTokenScope): boolean {
   if (tokenScope === 'full') return true
   if (tokenScope === 'liaison') return LIAISON_TOOLS.has(name)
+  if (tokenScope === 'chief') return CHIEF_TOOLS.has(name)
   const tool = MCP_TOOLS.find(t => t.name === name)
   if (tokenScope === 'orchestrator') return tool?.scope === 'read' || ORCHESTRATOR_EXTRA_TOOLS.has(name)
   return tool?.scope === 'read'
