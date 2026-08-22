@@ -772,6 +772,9 @@ async function callTool(name, args) {
       })
       .eq('id', request_id)
       .eq('status', 'submitted')
+      // Assignment re-asserted atomically too: a reassignment landing between the read and
+      // the write would otherwise take delivery of a plan written for hermes.
+      .eq('assigned_to', 'hermes')
       // Write-once enforced atomically, not just by the read-then-check above — two
       // concurrent submits would otherwise both pass the check and the second would
       // overwrite the first. Mirrors lib/mcp-tools.ts.

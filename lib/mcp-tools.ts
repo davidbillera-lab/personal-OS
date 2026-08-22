@@ -1599,10 +1599,13 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       })
       .eq('id', request_id)
       .eq('status', 'submitted')
-      // Write-once, enforced ATOMICALLY here and not just by the read-then-check above.
-      // Without this, two concurrent mc_submit_plan calls both read plan=null, both pass
-      // validatePlanPrecondition, and the second silently overwrites the first. With it,
-      // the loser matches 0 rows and is told to re-fetch.
+      // Both halves of the precondition are re-asserted ATOMICALLY, not just read-then-checked
+      // above. `assigned_to` matters as much as `status`: a reassignment landing between the
+      // read and the write would otherwise take delivery of a plan written for hermes.
+      .eq('assigned_to', 'hermes')
+      // Write-once, same reasoning. Without this, two concurrent mc_submit_plan calls both
+      // read plan=null, both pass validatePlanPrecondition, and the second silently overwrites
+      // the first. With it, the loser matches 0 rows and is told to re-fetch.
       .is('plan', null)
       .select('id, phase, plan_submitted_at')
       .maybeSingle()
