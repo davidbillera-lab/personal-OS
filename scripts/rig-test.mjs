@@ -66,11 +66,14 @@ rig-test — drive the dispatcher rig test without hand-writing SQL
 Usage: node scripts/rig-test.mjs <command> [args]
 
 Commands:
-  seed "<request text>"   Create a queued rig-test request. Prints the new id.
+  seed "<request text>"    Create a queued rig-test request. Prints the new id.
   status <id>              Show the current state of a request.
-  approve <id> [attempt]   Simulate a voice approval (awaiting_approval → in_progress/pushing).
-                           Pass the attempt_id from 'status' to pin the attempt you reviewed.
-  reject <id> [attempt]    Simulate a voice rejection (awaiting_approval → blocked).
+  approve <id> <attempt>   Simulate a voice approval (awaiting_approval → in_progress/pushing).
+                           attempt_id is REQUIRED — copy it from 'status'. It names the
+                           attempt you actually reviewed, so an approval can never land on
+                           a rebuild that replaced it while you were looking.
+  reject <id> <attempt>    Simulate a voice rejection (awaiting_approval → blocked).
+                           attempt_id is REQUIRED here too, matching mc_respond_approval.
   list                     List recent rig-test requests (newest first).
   cleanup                  Delete all rig-test requests.
   pause                    Engage the dispatcher kill-switch (writes .dispatcher-paused).
@@ -140,11 +143,19 @@ Request ${data.id}
 // bare `update ... where status='awaiting_approval'` with the service-role key: it bound to
 // no attempt and stamped no approved_sha, so it could land on an attempt the operator never
 // reviewed and left the push gate with nothing to check consent against.
+//
+// attempt_id is REQUIRED, exactly as in mc_respond_approval. It used to be optional, and
+// when omitted this CLI passed `current.attempt_id` — the attempt as it stands on the
+// SERVER — into the decision. That defeats the binding entirely: the guard then re-asserts
+// whatever the row already says, so a rebuild that replaced the reviewed attempt between the
+// operator's look and their `approve` was approved as if it had been reviewed. The operator
+// must name the attempt; this CLI never fills it in for them.
 async function decide(sb, decision, args) {
   const id = args[0]
-  const expectedAttempt = args[1] // optional: pin the attempt the operator reviewed
-  if (!id) {
-    console.log(`Usage: node scripts/rig-test.mjs ${decision === 'approve' ? 'approve' : 'reject'} <id> [attempt_id]`)
+  const expectedAttempt = args[1] // REQUIRED: the attempt the operator reviewed
+  if (!id || !expectedAttempt) {
+    console.log(`Usage: node scripts/rig-test.mjs ${decision} <id> <attempt_id>`)
+    console.log("attempt_id is required — run 'status <id>' and copy the attempt_id you reviewed.")
     process.exitCode = 1
     return
   }
@@ -168,7 +179,7 @@ async function decide(sb, decision, args) {
     process.exitCode = 1
     return
   }
-  if (expectedAttempt && expectedAttempt !== current.attempt_id) {
+  if (expectedAttempt !== current.attempt_id) {
     console.log(`Cannot ${decision}: attempt superseded — you passed ${expectedAttempt} but the current attempt is ${current.attempt_id ?? '(none)'}.`)
     process.exitCode = 1
     return
@@ -177,7 +188,8 @@ async function decide(sb, decision, args) {
   let result
   try {
     result = await applyApprovalDecision(sb, id, current, {
-      attemptId: current.attempt_id,
+      // The OPERATOR's attempt, never current.attempt_id — see the note above.
+      attemptId: expectedAttempt,
       decision,
       actor: 'rig-test',
       note: decision === 'reject' ? 'rig-test reject' : null,

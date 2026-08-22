@@ -97,9 +97,46 @@ describe('rig-test source — no second, weaker approval path', () => {
     }
   })
 
-  it('exposes the attempt_id argument the operator needs to pin a review', () => {
+  it('documents attempt_id as required, not optional', () => {
     expect(RIG_TEST_SRC).toContain('attempt_id')
-    expect(RIG_TEST_SRC).toMatch(/approve <id> \[attempt\]/)
+    expect(RIG_TEST_SRC).toMatch(/approve <id> <attempt>/)
+    expect(RIG_TEST_SRC, 'an optional attempt is the bug').not.toMatch(/approve <id> \[attempt\]/)
+  })
+
+  // THE BYPASS: when the attempt was omitted, this CLI passed `current.attempt_id` — the
+  // attempt as it stands on the SERVER — into the decision. The binding then re-asserts what
+  // the row already says, which is no binding at all: a rebuild that replaced the reviewed
+  // attempt between the operator's look and their `approve` got approved as reviewed.
+  it('never substitutes the server\'s current attempt for the one the operator named', () => {
+    expect(RIG_TEST_SRC).toMatch(/attemptId:\s*expectedAttempt/)
+    expect(RIG_TEST_SRC, 'the server-read attempt must never be the approval target')
+      .not.toMatch(/attemptId:\s*current\.attempt_id/)
+  })
+
+  it('refuses both decisions when the attempt is missing, before any write', () => {
+    // Both commands land in the same guard, so neither can drift looser than the other.
+    expect(RIG_TEST_SRC).toMatch(/if \(!id \|\| !expectedAttempt\)/)
+    expect(RIG_TEST_SRC).toMatch(/attempt_id is required/)
+  })
+})
+
+describe('the shared rules refuse an unbound decision on their own', () => {
+  // Belt and braces: even if a caller forgets the CLI-level guard, the helper both call
+  // sites share will not build a decision that is bound to nothing.
+  it('rejects approve with no attempt_id', async () => {
+    const { client } = stubClient()
+    await expect(applyApprovalDecision(client, REQ,
+      { status: 'awaiting_approval', attempt_id: ATTEMPT, reviewed_sha: SHA },
+      { attemptId: undefined, decision: 'approve', actor: 'rig-test', now: NOW },
+    )).rejects.toThrow(/attempt_id is required/)
+  })
+
+  it('rejects reject with no attempt_id', async () => {
+    const { client } = stubClient()
+    await expect(applyApprovalDecision(client, REQ,
+      { status: 'awaiting_approval', attempt_id: ATTEMPT, reviewed_sha: SHA },
+      { attemptId: undefined, decision: 'reject', actor: 'rig-test', now: NOW },
+    )).rejects.toThrow(/attempt_id is required/)
   })
 })
 
@@ -125,6 +162,7 @@ describe('rig-test CLI — actually loads and runs', () => {
       timeout: 30_000,
     })
     expect(out).toContain('rig-test — drive the dispatcher rig test')
-    expect(out).toContain('approve <id>')
+    expect(out, 'the usage the operator reads must show attempt_id as required')
+      .toContain('approve <id> <attempt>')
   })
 })
