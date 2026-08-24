@@ -1,0 +1,16 @@
+#!/bin/sh
+# Blocks commits containing credential literals. Bypass (rare, deliberate): SKIP_SECRET_SCAN=1 git commit
+[ -n "$SKIP_SECRET_SCAN" ] && exit 0
+
+PATTERNS='sk-ant-[A-Za-z0-9_-]{16,}|sbp_[a-f0-9]{40}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{50,}|xoxb-[0-9]{10,}|AKIA[0-9A-Z]{16}|eyJhbGciOi[A-Za-z0-9_-]{20,}|mc-api-key-[A-Za-z0-9_-]{20,}|(api[_-]?key|token|secret|password)["'"'"' :=]+[A-Za-z0-9_-]{32,}'
+
+HITS=$(git diff --cached --no-color -U0 | grep -E '^\+' | grep -nEi "$PATTERNS" | head -5)
+if [ -n "$HITS" ]; then
+  echo "BLOCKED: staged changes look like they contain a credential." >&2
+  echo "$HITS" | sed -E 's/[A-Za-z0-9_-]{16,}/<REDACTED>/g' >&2
+  echo "" >&2
+  echo "Move the value to .env.local (gitignored) and reference it by name." >&2
+  echo "If this is a false positive: SKIP_SECRET_SCAN=1 git commit ..." >&2
+  exit 1
+fi
+exit 0

@@ -159,7 +159,7 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 **Decision:** Mission Control exposes a Model Context Protocol server at `/api/mcp` (deployed on Vercel). Agents authenticate via `Bearer MCP_API_KEY`. On Windows, the token must live in `.claude/settings.local.json` as an `env` entry — not as a Windows environment variable. OS env propagation on Windows is unreliable and silently fails.
 **Reasoning:** Direct Supabase REST calls from agents required passing service role keys across sessions, which is a security exposure. The MCP server proxies all agent-to-MC communication behind a single bearer token and a controlled API surface. The token can be rotated without touching Supabase credentials.
-**Consequence:** If `mc_*` tools fail to connect, check `settings.local.json` before anything else. Token is `mc-api-key-personal-os-2026`. Do not move it to Windows env vars.
+**Consequence:** If `mc_*` tools fail to connect, check `settings.local.json` before anything else. Token is `[REDACTED — credential rotated 2026-08-23, see security incident entry]`. Do not move it to Windows env vars.
 **Made by:** operator + agent
 
 ---
