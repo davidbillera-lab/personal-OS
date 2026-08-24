@@ -2,7 +2,7 @@
 # Blocks commits containing credential literals. Bypass (rare, deliberate): SKIP_SECRET_SCAN=1 git commit
 [ -n "$SKIP_SECRET_SCAN" ] && exit 0
 
-PATTERNS='sk-ant-[A-Za-z0-9_-]{16,}|sbp_[a-f0-9]{40}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{50,}|xoxb-[0-9]{10,}|AKIA[0-9A-Z]{16}|eyJhbGciOi[A-Za-z0-9_-]{20,}|mc-api-key-[A-Za-z0-9_-]{20,}|(api[_-]?key|token|secret|password)["'"'"' :=]+[A-Za-z0-9_-]{32,}'
+PATTERNS='sk-[A-Za-z0-9_-]{20,}|sk_live_[A-Za-z0-9]{20,}|sk_test_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,}|sbp_[a-f0-9]{40}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{50,}|xoxb-[0-9]{10,}|AKIA[0-9A-Z]{16}|eyJhbGciOi[A-Za-z0-9_-]{20,}|mc-api-key-[A-Za-z0-9_-]{20,}|(api[_-]?key|token|secret|password)["'"'"' :=]+[A-Za-z0-9_-]{32,}'
 
 HITS=$(git diff --cached --no-color -U0 | grep -E '^\+' | grep -nEi "$PATTERNS" | head -5)
 if [ -n "$HITS" ]; then

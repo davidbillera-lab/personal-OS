@@ -11,7 +11,12 @@ export const runtime = 'nodejs' // needs Node crypto for the timing-safe token c
 async function logAudit(actor: string, tool: string, ok: boolean, error?: string, requestId?: string | null) {
   try {
     const supabase = createAdminSupabaseClient()
-    await supabase.from('mcp_audit_log').insert({ actor, tool, ok, error: error ?? null, request_id: requestId ?? null })
+    const { error: auditError } = await supabase
+      .from('mcp_audit_log')
+      .insert({ actor, tool, ok, error: error ?? null, request_id: requestId ?? null })
+    // PostgREST reports failures in the response rather than throwing, so a bare await
+    // would drop audit rows silently while the route still claims a complete trail.
+    if (auditError) console.error('[mcp] audit log write rejected (non-fatal):', auditError.message)
   } catch (err) {
     console.error('[mcp] audit log write failed (non-fatal):', err)
   }
@@ -103,6 +108,40 @@ function forbidden(id: unknown, message: string) {
 }
 
 // Constant-time bearer comparison (avoids leaking the token via response timing).
+// Startup guard: the same secret pasted into two scope env vars silently grants the
+// higher scope on every request. Detect and report it. Resolution behavior is
+// deliberately unchanged — a misconfiguration must not be able to take MC down.
+;(() => {
+  const seen = new Map<string, string[]>()
+  const note = (scope: string, value?: string | null) => {
+    if (!value) return
+    const fp = crypto.createHash('sha256').update(value).digest('hex').slice(0, 10)
+    seen.set(fp, [...(seen.get(fp) ?? []), scope])
+  }
+  note('MCP_API_KEY', MCP_API_KEY)
+  note('MCP_READONLY_API_KEY', MCP_READONLY_API_KEY)
+  const maps: Array<[string, string | undefined]> = [
+    ['MCP_READONLY_KEYS', MCP_READONLY_KEYS],
+    ['MCP_LIAISON_KEYS', MCP_LIAISON_KEYS],
+    ['MCP_ORCHESTRATOR_KEYS', MCP_ORCHESTRATOR_KEYS],
+  ]
+  for (const [name, raw] of maps) {
+    if (!raw) continue
+    try {
+      for (const [actor, key] of Object.entries(JSON.parse(raw) as Record<string, string>)) {
+        note(name + ':' + actor, key)
+      }
+    } catch {
+      // malformed JSON is surfaced by the existing parser
+    }
+  }
+  for (const [fp, scopes] of seen) {
+    if (scopes.length > 1) {
+      console.error('[mcp] SCOPE COLLISION: one key is configured in ' + scopes.length + ' scopes (' + scopes.join(', ') + ') fingerprint ' + fp + ' — the highest scope wins on every request')
+    }
+  }
+})()
+
 function bearerMatches(req: NextRequest, key: string): boolean {
   const presented = Buffer.from(req.headers.get('authorization') ?? '')
   const expected = Buffer.from(`Bearer ${key}`)
