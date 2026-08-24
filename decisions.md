@@ -641,3 +641,30 @@ Also removed the reason that test had to race module side effects at all. Import
 **Open, not closed:** one full-suite run failed a single test and I did not capture which; seven subsequent runs (three shuffled) are green and I cannot reproduce it. It landed on a cold-transform run while Docker Desktop was starting, so contention is the likely cause — recorded as unreproduced rather than fixed. Separately, `findPushable`'s fix is proven by unit test but has not yet pushed a real reassigned row, because recording an approval is operator-only.
 
 **Made by:** David ("take care of what needs to be done so we can be 100% confident in the launch") / Claude.
+
+---
+
+## 2026-08-23 — Public credential leak: MCP_API_KEY rotated, deployment surface contained
+
+**Decision:** Treat the full-scope `MCP_API_KEY` as compromised and rotate it end to end, then delete the historical deployment surface that made rotation ineffective.
+
+**What happened:** The live full-scope `MCP_API_KEY` was committed as a literal in this file on 2026-05-06 (`a6e373e`) and sat in a PUBLIC GitHub repo for 109 days. Hermes detected it; Claude Code executed the rotation under David's approval.
+
+**Why rotation alone was not enough:** `app/api/mcp/route.ts` compares the bearer to a build-time `process.env.MCP_API_KEY`. Vercel freezes env vars into immutable deployments, so every historical production deployment kept accepting the old key at its permanent URL. Verified live: the leaked key returned HTTP 200 on every deployment tested. Changing the env var closes nothing already built — 58 stale production deployments had to be deleted to actually contain it.
+
+**Actions taken:**
+- Rotated `MCP_API_KEY`; it is now stored **Encrypted** in Vercel (it was previously **plaintext**).
+- Deployed `personal-t0g6t94h1` with `--skip-domain` and repointed the pinned `git-main` alias, which had been stuck on an 18-day-old deployment and was NOT following production.
+- Deleted 58 stale production deployments.
+- Gated `/api/route-task` and `/api/classify`, which ran on the service role with **no authentication** — `/api/route-task` was an open LLM proxy billable to our own API keys.
+- Added a pre-commit secret scanner and CI secret scanning; `.codex/` held the same key and was untracked but NOT gitignored.
+
+**Forensics:** `mcp_audit_log` only starts 2026-07-29, leaving 84 of the 109 exposure days unlogged. Within the logged window all six actors are known and legitimate, and the `full` actor made **zero** `mc_get_credential` calls. `credential_access_log` reaches back to 2026-05-23 and shows only recognized internal accessors. No evidence of compromise; absence of evidence is not proof, because an attacker using the leaked key would have been logged as the same `full` actor.
+
+**Residual risk / still open:**
+- The old value remains in git history. History was NOT rewritten; rotation is the remediation.
+- `personal-9thzhq3ae` (apex) still accepts the old key and needs the new deployment promoted before it can be deleted.
+- `/api/kill-criteria` is still unauthenticated; it has a browser caller, so it needs session auth plus a click-test.
+- `credentials` and `credential_access_log` use `authenticated_full_access FOR ALL`, so any authenticated user could read ciphertext and erase the access trail. Only 1 user exists today.
+- Auth remains a static shared secret. The durable fix is datastore-backed key validation with instant global revocation — designed in `specs/2026-08-23-mc-security-hardening.md`.
+
