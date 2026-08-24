@@ -31,6 +31,19 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 
 type Filter = { op: string; col: string; values?: unknown }
+type Row = Record<string, unknown>
+type QueryResult = { data: Row | null; error: { message: string } | null }
+
+// Only the slice of the supabase builder transitionRequest actually reaches.
+interface Chain {
+  update: (payload: Row) => Chain
+  select: () => Chain
+  eq: (col: string, value: unknown) => Chain
+  in: (col: string, values: unknown) => Chain
+  is: (col: string, values: unknown) => Chain
+  single: () => Promise<QueryResult>
+  maybeSingle: () => Promise<QueryResult>
+}
 
 // `current` is the row the "read current state" step sees; `updateResult` is what the
 // guarded UPDATE resolves to (empty = the guard matched 0 rows, i.e. this caller lost).
@@ -39,45 +52,46 @@ type Filter = { op: string; col: string; values?: unknown }
 // only if its status guard actually matches the row's status ON THE SERVER at write time.
 // That is what makes a drift test meaningful instead of hand-asserted — under the old
 // `.in(allowedFrom)` guard these tests would pass the write through and fail.
-const state: { current: any; updateResult: any[]; serverStatus: string | null } =
+const state: { current: Row | null; updateResult: Row[]; serverStatus: string | null } =
   { current: null, updateResult: [], serverStatus: null }
 let updateFilters: Filter[] = []
-let updatePayload: Record<string, unknown> | null = null
+let updatePayload: Row | null = null
 
 vi.mock('@/lib/supabase', () => ({
   createAdminSupabaseClient: () => ({
     from: () => {
       let isUpdate = false
-      const chain: any = {}
-      chain.update = (payload: Record<string, unknown>) => {
-        isUpdate = true
-        updatePayload = payload
-        return chain
-      }
-      chain.select = () => chain
-      chain.eq = (col: string, value: unknown) => {
-        if (isUpdate) updateFilters.push({ op: 'eq', col, values: value })
-        return chain
-      }
-      chain.in = (col: string, values: unknown) => {
-        if (isUpdate) updateFilters.push({ op: 'in', col, values })
-        return chain
-      }
-      chain.is = (col: string, values: unknown) => {
-        if (isUpdate) updateFilters.push({ op: 'is', col, values })
-        return chain
-      }
-      chain.single = async () =>
-        state.current ? { data: state.current, error: null } : { data: null, error: { message: 'no rows' } }
-      chain.maybeSingle = async () => {
-        if (state.serverStatus !== null) {
-          const g = updateFilters.find(f => f.col === 'status')
-          const matches = g?.op === 'eq'
-            ? g.values === state.serverStatus
-            : Array.isArray(g?.values) && (g!.values as string[]).includes(state.serverStatus)
-          return { data: matches ? state.updateResult[0] ?? null : null, error: null }
-        }
-        return { data: state.updateResult[0] ?? null, error: null }
+      const chain: Chain = {
+        update: (payload: Row) => {
+          isUpdate = true
+          updatePayload = payload
+          return chain
+        },
+        select: () => chain,
+        eq: (col: string, value: unknown) => {
+          if (isUpdate) updateFilters.push({ op: 'eq', col, values: value })
+          return chain
+        },
+        in: (col: string, values: unknown) => {
+          if (isUpdate) updateFilters.push({ op: 'in', col, values })
+          return chain
+        },
+        is: (col: string, values: unknown) => {
+          if (isUpdate) updateFilters.push({ op: 'is', col, values })
+          return chain
+        },
+        single: async () =>
+          state.current ? { data: state.current, error: null } : { data: null, error: { message: 'no rows' } },
+        maybeSingle: async () => {
+          if (state.serverStatus !== null) {
+            const g = updateFilters.find(f => f.col === 'status')
+            const matches = g?.op === 'eq'
+              ? g.values === state.serverStatus
+              : Array.isArray(g?.values) && (g!.values as string[]).includes(state.serverStatus)
+            return { data: matches ? state.updateResult[0] ?? null : null, error: null }
+          }
+          return { data: state.updateResult[0] ?? null, error: null }
+        },
       }
       return chain
     },

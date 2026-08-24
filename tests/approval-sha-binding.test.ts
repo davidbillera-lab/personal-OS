@@ -26,7 +26,9 @@ const NOW = '2026-08-21T00:00:00.000Z'
 // The shared rules (scripts/lib/approval-binding.mjs)
 // ---------------------------------------------------------------------------
 
-const awaiting = (over: any = {}) => ({
+type Row = Record<string, unknown>
+
+const awaiting = (over: Row = {}) => ({
   status: 'awaiting_approval', attempt_id: ATTEMPT, reviewed_sha: SHA_A, ...over,
 })
 
@@ -112,7 +114,7 @@ describe('buildApprovalDecision — an approval names exactly one commit', () =>
   it('isSha accepts only a full 40-hex lowercase sha', () => {
     expect(isSha(SHA_A)).toBe(true)
     for (const bad of [null, undefined, 42, SHA_A + 'a', SHA_A.slice(0, 39), SHA_A.toUpperCase()]) {
-      expect(isSha(bad as any), String(bad)).toBe(false)
+      expect(isSha(bad), String(bad)).toBe(false)
     }
   })
 })
@@ -154,25 +156,38 @@ describe('consentDrift — what counts as the approval moving underneath us', ()
 // The MCP tool (lib/mcp-tools.ts) — same rules, applied through supabase
 // ---------------------------------------------------------------------------
 
-const state: { current: any; updateResult: any } = { current: null, updateResult: null }
+type QueryResult = { data: Row | null; error: { message: string } | null }
+
+// Only the slice of the supabase builder the approval tools actually reach.
+interface Chain {
+  update: (payload: Row) => Chain
+  select: () => Chain
+  eq: (col: string, value: unknown) => Chain
+  is: (col: string) => Chain
+  single: () => Promise<QueryResult>
+  maybeSingle: () => Promise<QueryResult>
+}
+
+const state: { current: Row | null; updateResult: Row | null } = { current: null, updateResult: null }
 let updateFilters: string[] = []
-let updatePayload: any = null
+let updatePayload: Row | null = null
 
 vi.mock('@/lib/supabase', () => ({
   createAdminSupabaseClient: () => ({
     from: () => {
       let isUpdate = false
-      const chain: any = {}
-      chain.update = (p: any) => { isUpdate = true; updatePayload = p; return chain }
-      chain.select = () => chain
-      chain.eq = (col: string, val: any) => {
-        if (isUpdate) updateFilters.push(`eq:${col}=${val}`)
-        return chain
+      const chain: Chain = {
+        update: (p: Row) => { isUpdate = true; updatePayload = p; return chain },
+        select: () => chain,
+        eq: (col: string, val: unknown) => {
+          if (isUpdate) updateFilters.push(`eq:${col}=${val}`)
+          return chain
+        },
+        is: (col: string) => { if (isUpdate) updateFilters.push(`is:${col}`); return chain },
+        single: async () =>
+          state.current ? { data: state.current, error: null } : { data: null, error: { message: 'no rows' } },
+        maybeSingle: async () => ({ data: state.updateResult, error: null }),
       }
-      chain.is = (col: string) => { if (isUpdate) updateFilters.push(`is:${col}`); return chain }
-      chain.single = async () =>
-        state.current ? { data: state.current, error: null } : { data: null, error: { message: 'no rows' } }
-      chain.maybeSingle = async () => ({ data: state.updateResult, error: null })
       return chain
     },
   }),
@@ -193,8 +208,8 @@ describe('mc_respond_approval — stamps and guards the approved commit', () => 
     const out = await callTool('mc_respond_approval',
       { request_id: REQ, decision: 'approve', attempt_id: ATTEMPT }, 'david')
 
-    expect(updatePayload.approved_sha).toBe(SHA_A)
-    expect(updatePayload.approved_by).toBe('david')
+    expect(updatePayload!.approved_sha).toBe(SHA_A)
+    expect(updatePayload!.approved_by).toBe('david')
     expect(JSON.parse(out).approved_sha).toBe(SHA_A)
   })
 
@@ -214,10 +229,10 @@ describe('mc_respond_approval — stamps and guards the approved commit', () => 
     const { callTool } = await import('@/lib/mcp-tools')
     // A caller-supplied reviewed_sha/approved_sha must be ignored entirely.
     await callTool('mc_respond_approval',
-      { request_id: REQ, decision: 'approve', attempt_id: ATTEMPT, reviewed_sha: SHA_B, approved_sha: SHA_B } as any,
+      { request_id: REQ, decision: 'approve', attempt_id: ATTEMPT, reviewed_sha: SHA_B, approved_sha: SHA_B },
       'david')
 
-    expect(updatePayload.approved_sha).toBe(SHA_A)
+    expect(updatePayload!.approved_sha).toBe(SHA_A)
     expect(updateFilters).toContain(`eq:reviewed_sha=${SHA_A}`)
   })
 
@@ -257,8 +272,8 @@ describe('mc_respond_approval — stamps and guards the approved commit', () => 
     await callTool('mc_respond_approval',
       { request_id: REQ, decision: 'reject', attempt_id: ATTEMPT, note: 'not this one' }, 'david')
 
-    expect(updatePayload.approved_sha).toBeNull()
-    expect(updatePayload.blocker).toBe('not this one')
+    expect(updatePayload!.approved_sha).toBeNull()
+    expect(updatePayload!.blocker).toBe('not this one')
     expect(updateFilters).toContain(`eq:attempt_id=${ATTEMPT}`)
     expect(updateFilters.some((f) => f.startsWith('eq:reviewed_sha'))).toBe(false)
   })
@@ -272,10 +287,10 @@ describe('mc_resume_request — consent dies with the attempt', () => {
 
     await callTool('mc_resume_request', { request_id: REQ, reason: 'unblocked' }, 'david')
 
-    expect(updatePayload.approved_sha).toBeNull()
-    expect(updatePayload.reviewed_sha).toBeNull()
-    expect(updatePayload.attempt_id).toBeNull()
-    expect(updatePayload.approved_at).toBeNull()
-    expect(updatePayload.workspace_ref).toBeNull()
+    expect(updatePayload!.approved_sha).toBeNull()
+    expect(updatePayload!.reviewed_sha).toBeNull()
+    expect(updatePayload!.attempt_id).toBeNull()
+    expect(updatePayload!.approved_at).toBeNull()
+    expect(updatePayload!.workspace_ref).toBeNull()
   })
 })

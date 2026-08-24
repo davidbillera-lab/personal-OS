@@ -15,34 +15,48 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 
 type Filter = { op: 'eq' | 'is'; col: string; val: unknown }
+type Row = Record<string, unknown>
+type QueryResult = { data: Row | null; error: { message: string } | null }
+
+// Only the slice of the supabase builder this handler actually reaches.
+interface Chain {
+  from: () => Chain
+  update: (p: Row) => Chain
+  select: () => Chain
+  eq: (col: string, val: unknown) => Chain
+  is: (col: string, val: unknown) => Chain
+  single: () => Promise<QueryResult>
+  maybeSingle: () => Promise<QueryResult>
+}
 
 // `read` is what the pre-read sees; `atWrite` is the committed row the UPDATE is evaluated
 // against. Divergence between the two IS the race.
-const state: { read: any; atWrite: any } = { read: null, atWrite: null }
+const state: { read: Row | null; atWrite: Row | null } = { read: null, atWrite: null }
 let filters: Filter[] = []
-let payload: Record<string, unknown> | null = null
+let payload: Row | null = null
 let landed = false
 
-const matches = (row: any, f: Filter) =>
-  f.op === 'is' ? (row[f.col] ?? null) === f.val : row[f.col] === f.val
+const matches = (row: Row | null, f: Filter) =>
+  f.op === 'is' ? (row?.[f.col] ?? null) === f.val : row?.[f.col] === f.val
 
 vi.mock('@/lib/supabase', () => ({
   createAdminSupabaseClient: () => {
     let isUpdate = false
-    const chain: any = {}
-    chain.from = () => chain
-    chain.update = (p: Record<string, unknown>) => { isUpdate = true; payload = p; return chain }
-    chain.select = () => chain
-    chain.eq = (col: string, val: unknown) => { if (isUpdate) filters.push({ op: 'eq', col, val }); return chain }
-    chain.is = (col: string, val: unknown) => { if (isUpdate) filters.push({ op: 'is', col, val }); return chain }
-    chain.single = async () =>
-      state.read ? { data: state.read, error: null } : { data: null, error: { message: 'no rows' } }
-    // The UPDATE resolves against the committed row: all filters must match, exactly as
-    // Postgres would. No match -> 0 rows -> maybeSingle returns null.
-    chain.maybeSingle = async () => {
-      if (!filters.every(f => matches(state.atWrite, f))) return { data: null, error: null }
-      landed = true
-      return { data: { id: 'req-1', phase: 'planned', plan_submitted_at: '2026-08-21T00:00:00Z' }, error: null }
+    const chain: Chain = {
+      from: () => chain,
+      update: (p: Row) => { isUpdate = true; payload = p; return chain },
+      select: () => chain,
+      eq: (col: string, val: unknown) => { if (isUpdate) filters.push({ op: 'eq', col, val }); return chain },
+      is: (col: string, val: unknown) => { if (isUpdate) filters.push({ op: 'is', col, val }); return chain },
+      single: async () =>
+        state.read ? { data: state.read, error: null } : { data: null, error: { message: 'no rows' } },
+      // The UPDATE resolves against the committed row: all filters must match, exactly as
+      // Postgres would. No match -> 0 rows -> maybeSingle returns null.
+      maybeSingle: async () => {
+        if (!filters.every(f => matches(state.atWrite, f))) return { data: null, error: null }
+        landed = true
+        return { data: { id: 'req-1', phase: 'planned', plan_submitted_at: '2026-08-21T00:00:00Z' }, error: null }
+      },
     }
     return { from: chain.from }
   },

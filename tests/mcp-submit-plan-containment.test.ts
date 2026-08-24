@@ -16,33 +16,47 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 
-const state: { current: any; updateResult: any[] } = { current: null, updateResult: [] }
-let updatePayload: Record<string, unknown> | null = null
+type Row = Record<string, unknown>
+type QueryResult = { data: Row | null; error: { message: string } | null }
+
+// Only the slice of the supabase builder this handler actually reaches. Anything it
+// reaches for that is NOT here would blow up rather than pass silently.
+interface Chain {
+  update: (payload: Row) => Chain
+  insert: (payload: Row) => Chain
+  select: () => Chain
+  eq: () => Chain
+  is: () => Chain
+  in: () => Chain
+  single: () => Promise<QueryResult>
+  maybeSingle: () => Promise<QueryResult>
+}
+
+const state: { current: Row | null; updateResult: Row[] } = { current: null, updateResult: [] }
+let updatePayload: Row | null = null
 let tablesTouched: string[] = []
 
 vi.mock('@/lib/supabase', () => ({
   createAdminSupabaseClient: () => ({
     from: (table: string) => {
       tablesTouched.push(table)
-      let isUpdate = false
-      const chain: any = {}
-      chain.update = (payload: Record<string, unknown>) => {
-        isUpdate = true
-        updatePayload = payload
-        return chain
+      const chain: Chain = {
+        update: (payload: Row) => {
+          updatePayload = payload
+          return chain
+        },
+        insert: (payload: Row) => {
+          updatePayload = payload
+          return chain
+        },
+        select: () => chain,
+        eq: () => chain,
+        is: () => chain,
+        in: () => chain,
+        single: async () =>
+          state.current ? { data: state.current, error: null } : { data: null, error: { message: 'no rows' } },
+        maybeSingle: async () => ({ data: state.updateResult[0] ?? null, error: null }),
       }
-      chain.insert = (payload: Record<string, unknown>) => {
-        isUpdate = true
-        updatePayload = payload
-        return chain
-      }
-      chain.select = () => chain
-      chain.eq = () => chain
-      chain.is = () => chain
-      chain.in = () => chain
-      chain.single = async () =>
-        state.current ? { data: state.current, error: null } : { data: null, error: { message: 'no rows' } }
-      chain.maybeSingle = async () => ({ data: state.updateResult[0] ?? null, error: null })
       return chain
     },
   }),
@@ -109,7 +123,7 @@ describe('mc_submit_plan containment — what it writes', () => {
 
   it('stamps the server-side actor, so plan_by cannot be spoofed by the caller', async () => {
     const { callTool } = await import('@/lib/mcp-tools')
-    await callTool('mc_submit_plan', { request_id: 'req-1', plan: 'p', plan_by: 'operator' } as any, 'hermes')
+    await callTool('mc_submit_plan', { request_id: 'req-1', plan: 'p', plan_by: 'operator' }, 'hermes')
     expect(updatePayload!.plan_by).toBe('hermes')
   })
 
@@ -123,7 +137,7 @@ describe('mc_submit_plan containment — what its interface exposes', () => {
   it('declares exactly two inputs, so no extra column can be smuggled in', async () => {
     const { MCP_TOOLS } = await import('@/lib/mcp-tools')
     const tool = MCP_TOOLS.find(t => t.name === 'mc_submit_plan')!
-    const props = Object.keys((tool.inputSchema as any).properties)
+    const props = Object.keys(tool.inputSchema.properties)
     expect(props.sort()).toEqual(['plan', 'request_id'])
     for (const col of FORBIDDEN_COLUMNS) {
       expect(props, `'${col}' must not be an accepted argument`).not.toContain(col)
@@ -134,7 +148,7 @@ describe('mc_submit_plan containment — what its interface exposes', () => {
     const { callTool } = await import('@/lib/mcp-tools')
     await callTool(
       'mc_submit_plan',
-      { request_id: 'req-1', plan: 'p', status: 'queued', assigned_to: 'dispatcher' } as any,
+      { request_id: 'req-1', plan: 'p', status: 'queued', assigned_to: 'dispatcher' },
       'hermes',
     )
     expect(updatePayload).not.toHaveProperty('status')

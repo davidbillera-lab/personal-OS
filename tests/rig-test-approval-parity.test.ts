@@ -20,16 +20,27 @@ const NOW = '2026-08-21T00:00:00.000Z'
 
 const RIG_TEST_SRC = readFileSync('scripts/rig-test.mjs', 'utf8')
 
+type Row = Record<string, unknown>
+
+// Only the slice of the supabase builder applyApprovalDecision actually reaches.
+interface Chain {
+  update: (p: Row) => Chain
+  eq: (col: string, val: unknown) => Chain
+  select: () => Chain
+  maybeSingle: () => Promise<{ data: Row; error: null }>
+}
+
 // Records exactly what the shared helper sends to supabase.
 function stubClient() {
-  const seen: { updates: any; filters: string[] } = { updates: null, filters: [] }
+  const seen: { updates: Row | null; filters: string[] } = { updates: null, filters: [] }
   const client = {
     from: () => {
-      const c: any = {}
-      c.update = (p: any) => { seen.updates = p; return c }
-      c.eq = (col: string, val: any) => { seen.filters.push(`${col}=${val}`); return c }
-      c.select = () => c
-      c.maybeSingle = async () => ({ data: { id: REQ, ...seen.updates }, error: null })
+      const c: Chain = {
+        update: (p: Row) => { seen.updates = p; return c },
+        eq: (col: string, val: unknown) => { seen.filters.push(`${col}=${String(val)}`); return c },
+        select: () => c,
+        maybeSingle: async () => ({ data: { id: REQ, ...seen.updates }, error: null }),
+      }
       return c
     },
   }
