@@ -663,8 +663,8 @@ Also removed the reason that test had to race module side effects at all. Import
 
 **Residual risk / still open:**
 - The old value remains in git history. History was NOT rewritten; rotation is the remediation.
-- `personal-9thzhq3ae` (apex) still accepts the old key and needs the new deployment promoted before it can be deleted.
-- `/api/kill-criteria` is still unauthenticated; it has a browser caller, so it needs session auth plus a click-test.
+- ~~`personal-9thzhq3ae` (apex) still accepts the old key~~ CLOSED — `personal-pe2b16jb8` promoted to apex and all superseded deployments deleted. Exactly one production deployment now exists, and it rejects the leaked key.
+- ~~`/api/kill-criteria` is still unauthenticated~~ CLOSED — gated with the same bearer check. Its dashboard button is dormant by design: `kill_criteria_checks` holds 2 rows ever and none in ten weeks, so session auth was not worth building for an unused feature. Revisit when the feature is actually wanted.
 - `credentials` and `credential_access_log` use `authenticated_full_access FOR ALL`, so any authenticated user could read ciphertext and erase the access trail. Only 1 user exists today.
 - Auth remains a static shared secret. The durable fix is datastore-backed key validation with instant global revocation — designed in `specs/2026-08-23-mc-security-hardening.md`.
 
