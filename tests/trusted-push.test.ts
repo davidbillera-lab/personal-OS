@@ -276,12 +276,20 @@ describe('trustedPush — the builder workspace is off the git path entirely', (
   // build the sandbox packed (or the operator ran `git gc` on) has to copy just as cleanly as
   // one that never left loose objects.
   it('pushes successfully when the objects live only in a pack (post gc/repack)', () => {
-    rawGit(workspace, ['repack', '-a', '-d', '--quiet'])
+    rawGit(workspace, ['-c', 'pack.writeReverseIndex=true', 'repack', '-a', '-d', '--quiet'])
     const packDir = join(workspace, '.git', 'objects', 'pack')
+    const packFiles = existsSync(packDir) ? readdirSync(packDir) : []
     expect(
-      existsSync(packDir) && readdirSync(packDir).some((f) => f.endsWith('.pack')),
+      packFiles.some((f) => f.endsWith('.pack')),
       'fixture did not actually produce a pack — repack failed silently',
     ).toBe(true)
+    const reverseIndex = packFiles.find((f) => f.endsWith('.rev'))
+    expect(reverseIndex, 'fixture did not produce the .rev sidecar this test promises to cover').toBeTruthy()
+
+    const trusted = createTrustedPushRepo(workspace)
+    try {
+      expect(existsSync(join(trusted.repo, '.git', 'objects', 'pack', reverseIndex!))).toBe(true)
+    } finally { trusted.cleanup() }
 
     push({ workspaceRef: workspace, sha, remote: honest, ref: REF })
     expect(refsOf(honest)).toBe(`${sha} ${REF}`)
@@ -420,6 +428,20 @@ describe('trustedPush — a hostile GIT_* environment cannot reach git', () => {
 })
 
 describe('trustedPush — the destination is not negotiable', () => {
+  it('rejects executable or unknown remote-helper transports before Git starts', () => {
+    for (const bad of [
+      'ext::node attacker.cjs',
+      'helper::payload',
+      'evil+exec://attacker.invalid/repo',
+      '--upload-pack=attacker',
+    ]) {
+      expect(() => trustedPush({ workspaceRef: workspace, sha, remote: bad, ref: REF }))
+        .toThrow(/remote-helper|unrecognised remote scheme|looks like an option/)
+    }
+    expect(refsOf(honest)).toBe('')
+    expect(refsOf(attacker)).toBe('')
+  })
+
   it('refuses a source that is not a literal 40-hex sha', () => {
     for (const bad of ['HEAD', 'refs/heads/main', `${sha}^`, 'HEAD~1', '', null, `${sha}\n${sha}`]) {
       expect(() => push({ workspaceRef: workspace, sha: bad as string, remote: honest, ref: REF }))
