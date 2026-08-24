@@ -18,18 +18,28 @@
 // release. So don't neutralise — don't read it at all.
 //
 // THE DESIGN: build a throwaway repository under the host's temp dir, owned entirely by this
-// process, containing exactly one thing the builder contributed — the object store, reachable
-// read-only through objects/info/alternates. Objects are content-addressed, so the approved
-// sha names exactly the commit the operator reviewed and nothing else can be substituted for
-// it. No builder config is on the lookup path, no builder hooks directory exists, and the
-// push runs from a repo whose only refs are the ones we just wrote.
+// process, containing exactly the objects the builder actually wrote — copied in, one
+// validated file at a time, never chained in through objects/info/alternates. Alternates were
+// tried first and rejected: git follows an object store's alternates chain recursively, so
+// pointing the trusted repo at the builder's store would also silently follow any alternates
+// file the builder planted INSIDE that store, pulling in objects from a second, unreviewed
+// repository the sandbox never built and workspaceObjectStore() never bound. Copying means the
+// builder's own objects/info is never opened at all — only physically-present loose objects
+// and pack/idx files, name- and type-checked, make it into the trusted repo. Objects are
+// content-addressed, so the approved sha names exactly the commit the operator reviewed and
+// nothing else can be substituted for it. No builder config is on the lookup path, no builder
+// hooks directory exists, and the push runs from a repo whose only refs are the ones we just
+// wrote.
 //
 // The workspace's own HEAD still has to be checked for drift, and that check must not become
 // the hole the push no longer is: resolveWorkspaceHead() reads HEAD, the loose ref and
 // packed-refs as plain files. No git process is ever started inside the builder workspace.
 
 import { spawnSync } from 'child_process'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, realpathSync } from 'fs'
+import {
+  mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync, realpathSync, readdirSync,
+  lstatSync, copyFileSync,
+} from 'fs'
 import { tmpdir } from 'os'
 import { join, resolve, sep } from 'path'
 
@@ -117,6 +127,81 @@ export function resolveWorkspaceHead(workspaceRef) {
   throw new Error(`ref ${ref} is unresolved (no loose ref, not in packed-refs)`)
 }
 
+// A loose object shard directory (`objects/<xx>/`) and the sha-1 (38 hex) or sha-256 (62 hex)
+// remainder git names the file after inside it.
+const LOOSE_DIR_RE = /^[0-9a-f]{2}$/
+const LOOSE_FILE_RE = /^(?:[0-9a-f]{38}|[0-9a-f]{62})$/
+// Normal Git maintenance may emit sidecars alongside .pack/.idx. Accept only documented,
+// hash-bound pack names; unknown files still fail closed.
+const PACK_FILE_RE = /^pack-[0-9a-f]{40,64}\.(?:pack|idx|rev|bitmap|mtimes|promisor|keep)$/i
+// Generous but finite: real build objects are source files and packs, not multi-gigabyte
+// blobs. Caps exist so a planted object can't be used to exhaust disk on the host running the
+// dispatcher; they are not tuned to a specific attack, just to "this cannot be legitimate".
+const MAX_LOOSE_OBJECT_BYTES = 200 * 1024 * 1024
+const MAX_PACK_BYTES = 2 * 1024 * 1024 * 1024
+const MAX_PACK_SIDECAR_BYTES = 200 * 1024 * 1024
+const MAX_PACK_MARKER_BYTES = 1024 * 1024
+
+function maxPackEntryBytes(name) {
+  if (/\.pack$/i.test(name)) return MAX_PACK_BYTES
+  if (/\.(?:keep|promisor)$/i.test(name)) return MAX_PACK_MARKER_BYTES
+  return MAX_PACK_SIDECAR_BYTES
+}
+
+// Copy one object-store file after checking, with `lstat` (never `stat`), that what's on disk
+// is actually a regular file of a sane size. `lstat` is required here specifically: `stat`
+// follows symlinks/junctions and would happily report a redirect target as "a regular file",
+// which is exactly the escape this function exists to close.
+function copyValidatedObjectFile(srcPath, destPath, label, maxBytes) {
+  const st = lstatSync(srcPath)
+  if (!st.isFile()) throw new Error(`refusing non-regular-file object store entry: ${label}`)
+  if (st.size > maxBytes) throw new Error(`refusing oversized object store entry: ${label} (${st.size} bytes)`)
+  copyFileSync(srcPath, destPath)
+}
+
+// Populate a fresh repo's object store from the builder's, without ever reading the builder's
+// objects/info — that directory is where alternates (and commit-graph pointers) live, and
+// alternates chain recursively, so reading it is exactly how a nested, builder-planted pointer
+// to a second repository would get followed. Every other entry is name- and type-checked
+// before being copied; anything that doesn't look like a loose object or a pack/idx file fails
+// closed rather than being silently skipped.
+export function importTrustedObjects(sourceObjects, destObjects) {
+  for (const top of readdirSync(sourceObjects)) {
+    if (top === 'info') continue // never opened — see the module header.
+
+    const topPath = join(sourceObjects, top)
+    const topStat = lstatSync(topPath) // lstat: a symlinked/junctioned `pack` or `xx` dir must not pass as real.
+
+    if (top === 'pack') {
+      if (!topStat.isDirectory()) throw new Error('objects/pack is not a directory')
+      const destDir = join(destObjects, 'pack')
+      mkdirSync(destDir, { recursive: true })
+      for (const name of readdirSync(topPath)) {
+        if (!PACK_FILE_RE.test(name)) throw new Error(`unexpected entry in objects/pack: ${name}`)
+        copyValidatedObjectFile(
+          join(topPath, name), join(destDir, name), `pack/${name}`, maxPackEntryBytes(name),
+        )
+      }
+      continue
+    }
+
+    if (LOOSE_DIR_RE.test(top)) {
+      if (!topStat.isDirectory()) throw new Error(`objects/${top} is not a directory`)
+      const destDir = join(destObjects, top)
+      mkdirSync(destDir, { recursive: true })
+      for (const name of readdirSync(topPath)) {
+        if (!LOOSE_FILE_RE.test(name)) throw new Error(`unexpected entry in objects/${top}: ${name}`)
+        copyValidatedObjectFile(join(topPath, name), join(destDir, name), `${top}/${name}`, MAX_LOOSE_OBJECT_BYTES)
+      }
+      continue
+    }
+
+    // Not `info`, not `pack`, not a two-hex-digit shard: a real git object store never has
+    // this entry. Could be a decoy, a traversal attempt, or just corruption — refuse either way.
+    throw new Error(`unexpected top-level object store entry: ${top}`)
+  }
+}
+
 // A fresh repository the builder has never written to. `--template` points at an empty
 // directory so git installs no hooks at all (not even the inert .sample set), and
 // core.hooksPath is additionally pinned at an empty directory on every command below, so a
@@ -134,9 +219,7 @@ export function createTrustedPushRepo(workspaceRef, { git = runGit } = {}) {
     git(root, ['init', '--quiet', `--template=${template}`, repo])
     // Belt and braces: if a host init.templateDir did materialise one anyway, it goes now.
     rmSync(join(repo, '.git', 'hooks'), { recursive: true, force: true })
-    const info = join(repo, '.git', 'objects', 'info')
-    mkdirSync(info, { recursive: true })
-    writeFileSync(join(info, 'alternates'), `${objects}\n`, 'utf8')
+    importTrustedObjects(objects, join(repo, '.git', 'objects'))
     return { root, repo, hooks, cleanup: () => rmSync(root, { recursive: true, force: true }) }
   } catch (e) {
     rmSync(root, { recursive: true, force: true })
@@ -144,12 +227,34 @@ export function createTrustedPushRepo(workspaceRef, { git = runGit } = {}) {
   }
 }
 
+// A remote string is not just an address to git — two syntaxes turn it into a program to run.
+// `<transport>::<address>` invokes `git-remote-<transport>` directly (this is how
+// `ext::sh -c '...'` runs an arbitrary shell command), and any `<scheme>://` git doesn't
+// implement natively triggers the same PATH lookup for `git-remote-<scheme>`. A leading `-`
+// is the separate, older class of bug where the "remote" is parsed as a command-line option
+// instead. None of this is reachable today — SANDBOX_REMOTE is an operator env var, never
+// builder input — but trustedPush is the credentialed choke point, so it validates its own
+// argument rather than trusting every caller to have done so.
+const REMOTE_SCHEME_RE = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//
+const ALLOWED_REMOTE_SCHEMES = new Set(['https', 'ssh', 'git'])
+
+export function assertSafeRemote(remote) {
+  if (typeof remote !== 'string' || remote === '') throw new Error('no push remote')
+  if (remote.includes('::')) throw new Error(`refusing a remote-helper transport: ${remote}`)
+  if (remote.startsWith('-')) throw new Error(`refusing a remote that looks like an option: ${remote}`)
+  const scheme = REMOTE_SCHEME_RE.exec(remote)
+  if (scheme && !ALLOWED_REMOTE_SCHEMES.has(scheme[1].toLowerCase())) {
+    throw new Error(`refusing an unrecognised remote scheme: ${scheme[1]}`)
+  }
+  return remote
+}
+
 // Push exactly `sha` to exactly `ref` on exactly `remote`, from a repository the builder has
 // never touched. Returns the trusted repo path that was used (for logging).
 export function trustedPush({ workspaceRef, sha, remote, ref, git = runGit }) {
   if (!SHA_RE.test(sha ?? '')) throw new Error(`refusing to push a source that is not a literal sha: ${sha}`)
   if (!/^refs\/heads\/[A-Za-z0-9._-]+$/.test(ref ?? '')) throw new Error(`refusing an unexpected destination ref: ${ref}`)
-  if (typeof remote !== 'string' || remote === '') throw new Error('no push remote')
+  assertSafeRemote(remote)
 
   const trusted = createTrustedPushRepo(workspaceRef, { git })
   const harden = ['-c', `core.hooksPath=${trusted.hooks}`]

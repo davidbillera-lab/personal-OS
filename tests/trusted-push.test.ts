@@ -179,6 +179,43 @@ describe('BASELINE — the traps are real (this is what the old push path did)',
     expect(existsSync(join(witness, 'pre-push')), 'hook did not run').toBe(true)
     expect(refsOf(honest), 'hook blocked the push, as designed for this fixture').toBe('')
   })
+
+  // Positive control for the credential trap specifically. The combined boobyTrap() test only
+  // asserts the trap did NOT fire under trustedPush; without this, that assertion could be
+  // vacuously true because credential.helper never fires for a local push at all. `git
+  // credential fill` invokes the helper chain directly — no network, no push — proving the
+  // planted helper really does hand over whatever git asks it for.
+  it('credential.helper alone hands the push credential to an attacker-supplied program', () => {
+    const marker = join(witness, 'credential-helper')
+    const helper = join(witness, 'credential-helper.cjs')
+    writeFileSync(helper, `require('fs').writeFileSync(${JSON.stringify(marker)}, 'ran')\n`)
+    rawGit(workspace, [
+      'config', '--add', 'credential.helper',
+      `!'${fwd(process.execPath)}' '${fwd(helper)}'`,
+    ])
+
+    spawnSync('git', ['-C', workspace, 'credential', 'fill'], {
+      encoding: 'utf8',
+      input: 'protocol=https\nhost=example.invalid\n\n',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    })
+    expect(existsSync(marker), 'credential helper did not run').toBe(true)
+  })
+
+  // Positive control for the remote-helper class of executable remote: `ext::` runs its
+  // argument directly (no shell, no network), which is why trustedPush refuses any remote
+  // containing "::" before git ever sees it (see the "not negotiable" suite below).
+  const gitExecPath = spawnSync('git', ['--exec-path'], { encoding: 'utf8' }).stdout.trim()
+  const hasRemoteExt = ['git-remote-ext', 'git-remote-ext.exe']
+    .some((name) => existsSync(join(gitExecPath, name)))
+  const remoteExtTest = hasRemoteExt ? it : it.skip
+  remoteExtTest('an ext:: remote runs an arbitrary program instead of talking to a remote', () => {
+    const marker = join(witness, 'ext-helper')
+    const helper = join(witness, 'ext-helper.cjs')
+    writeFileSync(helper, `require('fs').writeFileSync(${JSON.stringify(marker)}, 'ran'); process.exit(1)\n`)
+    rawGit(workspace, ['push', `ext::node ${fwd(helper)}`, `${sha}:${REF}`])
+    expect(existsSync(join(witness, 'ext-helper')), 'ext:: helper did not run — fixture is wrong').toBe(true)
+  })
 })
 
 describe('trustedPush — the builder workspace is off the git path entirely', () => {
@@ -216,7 +253,7 @@ describe('trustedPush — the builder workspace is off the git path entirely', (
     expect(refsOf(honest)).toBe(`${sha} ${REF}`)
   })
 
-  it('the trusted repo has no hooks directory and no builder config', () => {
+  it('the trusted repo has no hooks directory, no builder config, and no alternates', () => {
     boobyTrap()
     const trusted = createTrustedPushRepo(workspace)
     try {
@@ -226,10 +263,29 @@ describe('trustedPush — the builder workspace is off the git path entirely', (
       expect(config).not.toContain('insteadOf')
       expect(config).not.toContain('pushurl')
       expect(config).not.toContain('helper')
-      // the ONE thing the builder contributes
-      const alternates = readFileSync(join(trusted.repo, '.git', 'objects', 'info', 'alternates'), 'utf8')
-      expect(alternates.trim()).toContain('.git')
+      // objects are copied in, never chained through alternates — see the module header.
+      expect(existsSync(join(trusted.repo, '.git', 'objects', 'info', 'alternates'))).toBe(false)
+      const check = spawnSync('git', ['-C', trusted.repo, 'cat-file', '-e', `${sha}^{commit}`], {
+        encoding: 'utf8', env: sanitizeGitEnv(),
+      })
+      expect(check.status, `approved commit missing from the copied object store: ${check.stderr}`).toBe(0)
     } finally { trusted.cleanup() }
+  })
+
+  // importTrustedObjects() copies objects/pack by filename, not by re-deriving them, so a
+  // build the sandbox packed (or the operator ran `git gc` on) has to copy just as cleanly as
+  // one that never left loose objects.
+  it('pushes successfully when the objects live only in a pack (post gc/repack)', () => {
+    rawGit(workspace, ['repack', '-a', '-d', '--quiet'])
+    const packDir = join(workspace, '.git', 'objects', 'pack')
+    expect(
+      existsSync(packDir) && readdirSync(packDir).some((f) => f.endsWith('.pack')),
+      'fixture did not actually produce a pack — repack failed silently',
+    ).toBe(true)
+
+    push({ workspaceRef: workspace, sha, remote: honest, ref: REF })
+    expect(refsOf(honest)).toBe(`${sha} ${REF}`)
+    expect(refsOf(attacker)).toBe('')
   })
 
   it('leaves no trusted repo behind, on success or on failure', () => {
@@ -241,6 +297,74 @@ describe('trustedPush — the builder workspace is off the git path entirely', (
     push({ workspaceRef: workspace, sha, remote: honest, ref: REF })
     expect(() => push({ workspaceRef: workspace, sha, remote: join(root, 'nope.git'), ref: REF })).toThrow()
     expect(leftovers().filter((d) => !before.has(d))).toEqual([])
+  })
+})
+
+describe('importTrustedObjects — the builder cannot smuggle objects in via nested alternates', () => {
+  it('a commit reachable only through a builder-planted objects/info/alternates never reaches the trusted repo, and the push fails closed', () => {
+    // A second repository the sandbox never built and workspaceObjectStore() never bound —
+    // stands in for whatever an attacker-controlled alternates target would be.
+    const external = join(root, 'external')
+    rawGit(root, ['init', '--quiet', external])
+    writeFileSync(join(external, 'nested.txt'), 'reachable only via a nested alternates chain\n')
+    rawGit(external, ['add', 'nested.txt'])
+    rawGit(external, [
+      '-c', 'user.email=build@sandbox', '-c', 'user.name=sandbox', '-c', 'commit.gpgsign=false',
+      'commit', '--quiet', '-m', 'planted via nested alternates',
+    ])
+    const nestedSha = rawGit(external, ['rev-parse', 'HEAD']).stdout.trim()
+    expect(nestedSha).toMatch(/^[0-9a-f]{40}$/)
+
+    // Planted exactly where a legitimate alternates chain would live — inside the BUILDER'S
+    // OWN object store's objects/info — pointing at `external`. importTrustedObjects() never
+    // opens objects/info (see the module header), so this must not make nestedSha reachable
+    // from the trusted repo.
+    const alternatesDir = join(workspace, '.git', 'objects', 'info')
+    mkdirSync(alternatesDir, { recursive: true })
+    writeFileSync(join(alternatesDir, 'alternates'), `${fwd(join(external, '.git', 'objects'))}\n`)
+
+    // Fixture sanity check: raw git in the workspace DOES resolve nestedSha through the
+    // alternates file, so the assertion below is about the copy path refusing it, not about
+    // the fixture failing to wire the trap up.
+    const sanity = spawnSync('git', ['-C', workspace, 'cat-file', '-e', `${nestedSha}^{commit}`], {
+      encoding: 'utf8', env: sanitizeGitEnv(),
+    })
+    expect(sanity.status, `fixture is wrong — nestedSha is not reachable via alternates: ${sanity.stderr}`).toBe(0)
+
+    expect(() => push({ workspaceRef: workspace, sha: nestedSha, remote: honest, ref: REF })).toThrow()
+    expect(refsOf(honest), 'nested-alternates commit must not land on the intended remote').toBe('')
+    expect(refsOf(attacker)).toBe('')
+  })
+})
+
+describe('importTrustedObjects — a symlinked/junctioned shard or pack directory does not pass as real', () => {
+  it('refuses a loose-object shard directory that is a symlink/junction', () => {
+    const decoy = join(root, 'decoy-shard')
+    mkdirSync(decoy, { recursive: true })
+    const objectsDir = join(workspace, '.git', 'objects')
+    const shard = ['ff', 'ee', 'dd', 'cc'].find((h) => !existsSync(join(objectsDir, h)))
+    try {
+      symlinkSync(decoy, join(objectsDir, shard!), 'junction')
+    } catch {
+      return // symlink/junction creation not permitted in this environment — skip
+    }
+    expect(() => push({ workspaceRef: workspace, sha, remote: honest, ref: REF })).toThrow(/not a directory/)
+    expect(refsOf(honest)).toBe('')
+    expect(refsOf(attacker)).toBe('')
+  })
+
+  it('refuses an objects/pack directory that is a symlink/junction', () => {
+    const decoy = join(root, 'decoy-pack')
+    mkdirSync(decoy, { recursive: true })
+    const packPath = join(workspace, '.git', 'objects', 'pack')
+    try {
+      symlinkSync(decoy, packPath, 'junction')
+    } catch {
+      return // symlink/junction creation not permitted in this environment — skip
+    }
+    expect(() => push({ workspaceRef: workspace, sha, remote: honest, ref: REF })).toThrow(/not a directory/)
+    expect(refsOf(honest)).toBe('')
+    expect(refsOf(attacker)).toBe('')
   })
 })
 
