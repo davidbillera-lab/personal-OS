@@ -11,6 +11,12 @@
 //
 // Plus the workspace binding: workspace_ref was trusted as given, so a row rewrite could aim
 // the push at any git repo on the rig. It must now BE builds/<request_id>/<attempt_id>.
+//
+// The push itself no longer runs here at all: the dispatcher hands the bound workspace to
+// scripts/lib/trusted-push.mjs, which reads HEAD as plain files and runs the credentialed
+// push from a repo it builds under the host temp dir. That module is mocked below — proving
+// it survives a real hostile workspace is tests/trusted-push.test.ts's job. This file's job
+// is what the GATES decide, and that the dispatcher never touches git itself.
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest'
 import { mkdtempSync, mkdirSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -25,44 +31,82 @@ const BRANCH = `mc-build-${REQ}`
 let BUILDS: string
 let WORKSPACE: string
 
+type Row = Record<string, unknown>
+type QueryResult = { data: Row | null; error: { message: string } | null }
+
+// Only the slice of the supabase builder the dispatcher actually reaches. The filter methods
+// (select/eq/in/...) all just return the chain, so one index signature covers them.
+interface Chain {
+  [method: string]: unknown
+  update: (payload: Row) => Chain
+  insert: () => Chain
+  upsert: () => Chain
+  single: () => Promise<QueryResult>
+  maybeSingle: () => Promise<QueryResult>
+  then: (res: (value: QueryResult) => unknown, rej: (reason: unknown) => unknown) => Promise<unknown>
+}
+
+// What the dispatcher asked trusted-push to send, captured verbatim.
+type Push = { workspaceRef: string; sha: string; remote: string; ref: string }
+
+// `reads` is the queue of rows the authoritative SELECTs see, in order; an `undefined` entry
+// stands for a read that found no row at all.
 const state: {
-  reads: any[]
-  updates: any[]
-  git: string[][]
+  reads: Array<Row | undefined>
+  updates: Row[]
+  pushes: Push[]
+  subprocesses: unknown[][]
   head: string
-} = { reads: [], updates: [], git: [], head: APPROVED }
+} = { reads: [], updates: [], pushes: [], subprocesses: [], head: APPROVED }
 
 vi.mock('@supabase/supabase-js', () => ({
   createClient: () => ({
     from: (table: string) => {
-      const ops: any = { method: null, payload: null }
-      const c: any = {}
+      const ops: { method: string | null; payload: Row | null } = { method: null, payload: null }
+      const c: Chain = {
+        update: (p: Row) => {
+          ops.method = 'update'
+          ops.payload = p
+          if (table === 'mc_requests') state.updates.push(p)
+          return c
+        },
+        insert: () => c,
+        upsert: () => c,
+        single: async () => {
+          const row = state.reads.shift()
+          return row ? { data: row, error: null } : { data: null, error: { message: 'no rows' } }
+        },
+        maybeSingle: async () =>
+          ops.method === 'update' ? { data: { id: REQ, ...ops.payload }, error: null } : { data: null, error: null },
+        then: (res, rej) => Promise.resolve({ data: null, error: null }).then(res, rej),
+      }
       for (const m of ['select', 'eq', 'in', 'not', 'is', 'order', 'limit']) c[m] = () => c
-      c.update = (p: any) => {
-        ops.method = 'update'
-        ops.payload = p
-        if (table === 'mc_requests') state.updates.push(p)
-        return c
-      }
-      c.insert = () => c
-      c.upsert = () => c
-      c.single = async () => {
-        const row = state.reads.shift()
-        return row ? { data: row, error: null } : { data: null, error: { message: 'no rows' } }
-      }
-      c.maybeSingle = async () =>
-        ops.method === 'update' ? { data: { id: REQ, ...ops.payload }, error: null } : { data: null, error: null }
-      c.then = (res: any, rej: any) => Promise.resolve({ data: null, error: null }).then(res, rej)
       return c
     },
   }),
 }))
 
-// git is stubbed, but the WORKSPACE PATH is real — the binding check resolves it on disk.
+// A path outside BUILDS, standing in for the throwaway repo trusted-push builds under the
+// host temp dir. Never created on disk — nothing here reads it; it exists to prove the
+// dispatcher accepts a push origin that is not the builder's workspace.
+const TRUSTED_REPO = join(tmpdir(), 'mc-trusted-push-stub', 'repo')
+
+// The push path is a module boundary now, so mock the module, not the subprocess: git never
+// runs from this test. The WORKSPACE PATH stays real — the binding check resolves it on disk.
+vi.mock('../scripts/lib/trusted-push.mjs', () => ({
+  resolveWorkspaceHead: () => state.head,
+  trustedPush: ({ workspaceRef, sha, remote, ref }: Push) => {
+    state.pushes.push({ workspaceRef, sha, remote, ref })
+    return TRUSTED_REPO
+  },
+}))
+
+// Tripwire, not a git stub: every git invocation on the push path belongs behind
+// trusted-push. If the dispatcher ever shells out again, it lands here and the assertions
+// below fail instead of the regression passing quietly.
 vi.mock('child_process', () => ({
-  spawnSync: (_cmd: string, args: string[]) => {
-    state.git.push(args)
-    if (args.includes('rev-parse')) return { status: 0, stdout: `${state.head}\n`, stderr: '' }
+  spawnSync: (...args: unknown[]) => {
+    state.subprocesses.push(args)
     return { status: 0, stdout: '', stderr: '' }
   },
   spawn: () => ({ on: () => {}, unref: () => {}, kill: () => {} }),
@@ -84,11 +128,12 @@ afterAll(() => rmSync(BUILDS, { recursive: true, force: true }))
 beforeEach(() => {
   state.reads = []
   state.updates = []
-  state.git = []
+  state.pushes = []
+  state.subprocesses = []
   state.head = APPROVED
 })
 
-const approvedRow = (over: any = {}) => ({
+const approvedRow = (over: Row = {}) => ({
   id: REQ,
   attempt_id: ATTEMPT,
   status: 'in_progress',
@@ -103,13 +148,13 @@ const approvedRow = (over: any = {}) => ({
 
 // Drive gatedPush with an explicit sequence of authoritative reads: [gate read, pre-push
 // re-read]. Passing one row means both reads see the same state (nothing drifted).
-async function runGatedPush(rows: any[]) {
+async function runGatedPush(rows: Array<Row | undefined>) {
   state.reads = rows.length === 1 ? [rows[0], { ...rows[0] }] : [...rows]
   const { gatedPush, createAdminSupabaseClient } = await import('../scripts/dispatcher.mjs')
   await gatedPush(createAdminSupabaseClient(), { id: REQ })
 }
 
-const pushes = () => state.git.filter((args) => args.includes('push'))
+const pushes = () => state.pushes
 const failure = () => state.updates.find((u) => u.status === 'failed')
 const completion = () => state.updates.find((u) => u.status === 'completed')
 
@@ -118,11 +163,11 @@ describe('gatedPush — pushes the literal approved commit, never HEAD', () => {
     await runGatedPush([approvedRow()])
 
     expect(pushes()).toHaveLength(1)
-    const args = pushes()[0]
-    expect(args[args.length - 1]).toBe(`${APPROVED}:refs/heads/${BRANCH}`)
-    expect(args.join(' '), 'HEAD must never appear in the refspec').not.toContain('HEAD:refs/heads/')
+    const p = pushes()[0]
+    expect(`${p.sha}:${p.ref}`).toBe(`${APPROVED}:refs/heads/${BRANCH}`)
+    expect(p.sha, 'HEAD must never be handed over as the source').not.toContain('HEAD')
     // ...and to the fixed sandbox target only.
-    expect(args).toContain('https://github.com/davidbillera-lab/mc-spike-test.git')
+    expect(p.remote).toBe('https://github.com/davidbillera-lab/mc-spike-test.git')
   })
 
   it('records the approved sha (not a re-read of HEAD) as the completed artifact', async () => {
@@ -132,11 +177,19 @@ describe('gatedPush — pushes the literal approved commit, never HEAD', () => {
     expect(done.artifact_refs).toContain(APPROVED)
   })
 
-  it('runs the push from the bound workspace', async () => {
+  it('gives trusted-push the bound workspace as an object source, and nothing more', async () => {
     await runGatedPush([approvedRow()])
-    const args = pushes()[0]
-    expect(args[0]).toBe('-C')
-    expect(args[1]).toBe(WORKSPACE)
+    // The bound workspace is still what the commit comes FROM...
+    expect(pushes()[0].workspaceRef).toBe(WORKSPACE)
+    // ...but the dispatcher no longer runs git in it — or anywhere. It used to be
+    // `git -C <workspace> push`, which handed the push credential to whatever hooks and
+    // config the untrusted build had planted in that .git.
+    expect(state.subprocesses, 'the push path must not shell out to git').toEqual([])
+    // The credentialed push runs from a repo trusted-push builds outside the builds tree,
+    // and the dispatcher completes on that origin. (The real boundary — objects only, no
+    // builder config, no hooks — is proven in tests/trusted-push.test.ts.)
+    expect(TRUSTED_REPO.startsWith(BUILDS), 'push origin must be outside the builds tree').toBe(false)
+    expect(completion(), 'the run completes through the trusted repo').toBeTruthy()
   })
 })
 
@@ -197,7 +250,7 @@ describe('gatedPush — workspace_ref is derived, not trusted', () => {
       resolve(BUILDS, '..'),
     ]) {
       state.updates = []
-      state.git = []
+      state.pushes = []
       await runGatedPush([approvedRow({ workspace_ref: evil })])
       expect(pushes(), `workspace_ref=${evil}`).toHaveLength(0)
       expect(failure().blocker).toContain('workspace binding')

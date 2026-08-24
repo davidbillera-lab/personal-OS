@@ -1,0 +1,393 @@
+// Adversarial coverage for the credentialed push.
+//
+// These tests run REAL git against a REAL hostile workspace and REAL local remotes. Nothing
+// here is stubbed, because the claim being tested is about what git itself honours — a mock
+// would only prove that the mock agrees with me.
+//
+// The workspace is booby-trapped with every mechanism git offers for running a program or
+// re-pointing a remote from inside a repository:
+//   .git/hooks/pre-push, core.hooksPath, include.path, includeIf, url.*.insteadOf,
+//   url.*.pushInsteadOf, remote.*.pushurl, credential.helper
+// plus a hostile GIT_* environment. Each trap writes a witness file and/or aims the push at
+// an "attacker" bare repo, so a breach is visible rather than inferred.
+//
+// A baseline test first pushes the OLD way (`git -C <workspace> push`) and asserts the traps
+// DO fire — otherwise a green suite would only prove the traps were built wrong.
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { spawnSync } from 'child_process'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync, symlinkSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import {
+  trustedPush, sanitizeGitEnv, resolveWorkspaceHead, workspaceObjectStore, createTrustedPushRepo,
+} from '../scripts/lib/trusted-push.mjs'
+
+const REQ = '11111111-1111-1111-1111-111111111111'
+const BRANCH = `mc-build-${REQ}`
+const REF = `refs/heads/${BRANCH}`
+
+let root: string
+let workspace: string
+let honest: string // the remote the push is SUPPOSED to reach
+let attacker: string // the remote every trap tries to reach instead
+let ghost: string // a target that does not exist — stands in for the real github URL, so the
+//                   redirect traps have something to rewrite without any network being involved
+let witness: string // traps that execute drop a file here
+let sha: string
+
+// EVERY push in this file stays on the local filesystem. An earlier draft aimed two tests at
+// the real https://github.com/davidbillera-lab/mc-spike-test — the baseline through raw git,
+// the redirect test through trustedPush — and created a live branch on it. Both git entry
+// points now share this guard, so a network remote is a loud test failure rather than a
+// silent live operation.
+function assertLocalRemote(remote: string) {
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(remote) || remote.startsWith('git@')) {
+    throw new Error(`REFUSED: this test tried to reach a network remote (${remote})`)
+  }
+}
+
+/** Raw git, no sanitizing — used to build fixtures and to run the vulnerable baseline. */
+function rawGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv) {
+  if (args[0] === 'push') assertLocalRemote(args[1] ?? '')
+  return spawnSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, ...(env ?? {}) },
+  })
+}
+
+/** trustedPush behind the same guard — every trustedPush in this file goes through here. */
+function push(opts: { workspaceRef: string; sha: string; remote: string; ref: string }) {
+  assertLocalRemote(opts.remote)
+  return trustedPush(opts)
+}
+
+/** A shell script git will execute, portable enough for git-for-windows' bundled sh. */
+function trap(path: string, marker: string) {
+  writeFileSync(path, `#!/bin/sh\necho pwned > "${witness}/${marker}"\nexit 1\n`, { mode: 0o755 })
+}
+
+const breached = () => (existsSync(witness) ? readdirSync(witness).join(', ') : '')
+/** Inspect a repo with the GIT_ namespace stripped, so a hostile parent env cannot skew a read. */
+const refsOf = (repo: string) =>
+  spawnSync('git', ['-C', repo, 'for-each-ref', '--format=%(objectname) %(refname)'], {
+    encoding: 'utf8', env: sanitizeGitEnv(),
+  }).stdout.trim()
+
+const fwd = (p: string) => p.replace(/\\/g, '/')
+
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), 'mc-trusted-push-test-'))
+  workspace = join(root, 'ws')
+  honest = join(root, 'honest.git')
+  attacker = join(root, 'attacker.git')
+  // Deliberately never created. Forward-slashed at birth because git matches url.*.insteadOf
+  // as a literal string: the config below and every push that targets it must spell it the
+  // same way, or the redirect silently cannot fire and the tests below prove nothing.
+  ghost = fwd(join(root, 'ghost.git'))
+  witness = join(root, 'witness')
+  mkdirSync(witness)
+
+  rawGit(root, ['init', '--quiet', '--bare', honest])
+  rawGit(root, ['init', '--quiet', '--bare', attacker])
+  rawGit(root, ['init', '--quiet', workspace])
+  writeFileSync(join(workspace, 'built.txt'), 'the approved build output\n')
+  rawGit(workspace, ['add', 'built.txt'])
+  rawGit(workspace, [
+    '-c', 'user.email=build@sandbox', '-c', 'user.name=sandbox', '-c', 'commit.gpgsign=false',
+    'commit', '--quiet', '-m', 'approved build',
+  ])
+  sha = rawGit(workspace, ['rev-parse', 'HEAD']).stdout.trim()
+  expect(sha).toMatch(/^[0-9a-f]{40}$/)
+})
+
+afterEach(() => rmSync(root, { recursive: true, force: true }))
+
+/** Plant every trap the sandbox could plant in a workspace it owns. */
+function boobyTrap() {
+  const gitDir = join(workspace, '.git')
+
+  // 1. the classic: a pre-push hook in the default location
+  trap(join(gitDir, 'hooks', 'pre-push'), 'pre-push')
+
+  // 2. core.hooksPath — hooks from a directory nothing is watching
+  const elsewhere = join(workspace, '.sneaky-hooks')
+  mkdirSync(elsewhere)
+  trap(join(elsewhere, 'pre-push'), 'hookspath')
+
+  // 3. an included config file, so the dangerous keys are not even in .git/config
+  const included = join(gitDir, 'extra.config')
+  writeFileSync(included, [
+    '[core]',
+    `\thooksPath = ${fwd(elsewhere)}`,
+    `[url "${fwd(attacker)}"]`,
+    // 4 + 5: redirect the credentialed push at the attacker's remote, both spellings.
+    // `ghost` stands in for the production https://github.com/... target: it is a path that
+    // does not exist, so an un-redirected push fails locally instead of reaching a real host.
+    `\tinsteadOf = ${fwd(ghost)}`,
+    `\tpushInsteadOf = ${fwd(ghost)}`,
+    '[credential]',
+    // 6: hand the push credential to an attacker-supplied program
+    `\thelper = !${fwd(join(witness, 'cred.sh'))}`,
+  ].join('\n') + '\n')
+  trap(join(witness, 'cred.sh'), 'credential-helper')
+
+  writeFileSync(join(gitDir, 'config'), readFileSync(join(gitDir, 'config'), 'utf8') + [
+    '[include]',
+    `\tpath = ${fwd(included)}`,
+    '[includeIf "gitdir:**"]',
+    `\tpath = ${fwd(included)}`,
+    // 7: a named remote whose pushurl points at the attacker
+    '[remote "origin"]',
+    `\turl = ${fwd(honest)}`,
+    `\tpushurl = ${fwd(attacker)}`,
+  ].join('\n') + '\n')
+}
+
+describe('BASELINE — the traps are real (this is what the old push path did)', () => {
+  it('pushing from the builder workspace executes its hooks and honours its config', () => {
+    boobyTrap()
+    // `ghost` stands in for the production github URL: same role in the fixture (it is what
+    // the planted url.*.insteadOf rewrites), but it is a local path that was never created,
+    // so nothing here can leave this machine.
+    const r = rawGit(workspace, ['push', ghost, `${sha}:${REF}`], { GIT_TERMINAL_PROMPT: '0' })
+
+    // A hook fired (exit 1 from the trap) and/or the URL was rewritten to the attacker.
+    const output = `${r.stdout}${r.stderr}`
+    const hookRan = existsSync(join(witness, 'pre-push')) || existsSync(join(witness, 'hookspath'))
+    const redirected = output.includes('attacker.git')
+    expect(hookRan || redirected, `neither trap fired — fixture is wrong:\n${output}`).toBe(true)
+  })
+
+  // Positive control for the redirect trap specifically. Without this, the trustedPush
+  // redirect test below could pass vacuously: a push to `ghost` fails whether or not the
+  // rewrite config was ever loaded. Here — no hooks to abort first — the rewrite must fire
+  // and the commit must actually land in the attacker's repo.
+  it('url.*.pushInsteadOf alone silently redirects the push to the attacker', () => {
+    const gitDir = join(workspace, '.git')
+    writeFileSync(join(gitDir, 'config'), readFileSync(join(gitDir, 'config'), 'utf8') + [
+      `[url "${fwd(attacker)}"]`,
+      `\tpushInsteadOf = ${fwd(ghost)}`,
+    ].join('\n') + '\n')
+
+    rawGit(workspace, ['push', ghost, `${sha}:${REF}`])
+    expect(refsOf(attacker), 'the rewrite did not fire — fixture is wrong').toBe(`${sha} ${REF}`)
+  })
+
+  it('a pre-push hook alone can block or subvert the push', () => {
+    trap(join(workspace, '.git', 'hooks', 'pre-push'), 'pre-push')
+    rawGit(workspace, ['push', honest, `${sha}:${REF}`])
+    expect(existsSync(join(witness, 'pre-push')), 'hook did not run').toBe(true)
+    expect(refsOf(honest), 'hook blocked the push, as designed for this fixture').toBe('')
+  })
+})
+
+describe('trustedPush — the builder workspace is off the git path entirely', () => {
+  it('THE FIX: pushes the approved sha to the intended remote with every trap armed', () => {
+    boobyTrap()
+    push({ workspaceRef: workspace, sha, remote: honest, ref: REF })
+
+    expect(refsOf(honest)).toBe(`${sha} ${REF}`)
+    expect(refsOf(attacker), 'nothing may reach the attacker remote').toBe('')
+  })
+
+  it('no planted hook executes — pre-push, core.hooksPath, or included config', () => {
+    boobyTrap()
+    push({ workspaceRef: workspace, sha, remote: honest, ref: REF })
+
+    for (const marker of ['pre-push', 'hookspath', 'credential-helper']) {
+      expect(existsSync(join(witness, marker)), `${marker} trap executed: ${breached()}`).toBe(false)
+    }
+  })
+
+  it('url.*.insteadOf / pushInsteadOf cannot redirect the target', () => {
+    boobyTrap()
+    // Push at `ghost` — the exact path the builder's config rewrites to the attacker, proven
+    // one describe up to land there when git honours that config. The trusted repo never
+    // reads it, so the rewrite cannot happen and the push must instead fail to resolve a
+    // path that does not exist. The assertion that matters is WHERE it did not go.
+    expect(() => push({ workspaceRef: workspace, sha, ref: REF, remote: ghost })).toThrow()
+    expect(refsOf(attacker), 'redirect landed on the attacker remote').toBe('')
+  })
+
+  it('remote.origin.pushurl cannot redirect the target', () => {
+    boobyTrap()
+    push({ workspaceRef: workspace, sha, remote: honest, ref: REF })
+    expect(refsOf(attacker)).toBe('')
+    expect(refsOf(honest)).toBe(`${sha} ${REF}`)
+  })
+
+  it('the trusted repo has no hooks directory and no builder config', () => {
+    boobyTrap()
+    const trusted = createTrustedPushRepo(workspace)
+    try {
+      expect(existsSync(join(trusted.repo, '.git', 'hooks'))).toBe(false)
+      const config = readFileSync(join(trusted.repo, '.git', 'config'), 'utf8')
+      expect(config).not.toContain('hooksPath')
+      expect(config).not.toContain('insteadOf')
+      expect(config).not.toContain('pushurl')
+      expect(config).not.toContain('helper')
+      // the ONE thing the builder contributes
+      const alternates = readFileSync(join(trusted.repo, '.git', 'objects', 'info', 'alternates'), 'utf8')
+      expect(alternates.trim()).toContain('.git')
+    } finally { trusted.cleanup() }
+  })
+
+  it('leaves no trusted repo behind, on success or on failure', () => {
+    // Exclude this suite's own fixture roots (`mc-trusted-push-test-*`); only the
+    // implementation-created `mc-trusted-push-<random>` directories are relevant.
+    const leftovers = () => readdirSync(tmpdir())
+      .filter((d) => d.startsWith('mc-trusted-push-') && !d.startsWith('mc-trusted-push-test-'))
+    const before = new Set(leftovers())
+    push({ workspaceRef: workspace, sha, remote: honest, ref: REF })
+    expect(() => push({ workspaceRef: workspace, sha, remote: join(root, 'nope.git'), ref: REF })).toThrow()
+    expect(leftovers().filter((d) => !before.has(d))).toEqual([])
+  })
+})
+
+describe('trustedPush — a hostile GIT_* environment cannot reach git', () => {
+  const hostile = {
+    GIT_DIR: 'C:/nope/.git',
+    GIT_WORK_TREE: 'C:/nope',
+    GIT_OBJECT_DIRECTORY: 'C:/nope/objects',
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: 'C:/nope/objects',
+    GIT_INDEX_FILE: 'C:/nope/index',
+    GIT_SSH_COMMAND: 'pwn',
+    GIT_PROXY_COMMAND: 'pwn',
+    GIT_ASKPASS: 'pwn',
+    GIT_EXTERNAL_DIFF: 'pwn',
+    GIT_CONFIG_GLOBAL: 'C:/nope/gitconfig',
+    GIT_CONFIG_SYSTEM: 'C:/nope/gitconfig',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.hooksPath',
+    GIT_CONFIG_VALUE_0: 'C:/nope/hooks',
+    SSH_ASKPASS: 'pwn',
+  }
+
+  it('sanitizeGitEnv drops the whole GIT_ namespace and the askpass hooks', () => {
+    const cleaned = sanitizeGitEnv({ ...process.env, ...hostile })
+    for (const key of Object.keys(hostile)) {
+      expect(cleaned[key], `${key} survived sanitizing`).toBeUndefined()
+    }
+    expect(cleaned.GIT_TERMINAL_PROMPT, 'a push must fail rather than hang on a prompt').toBe('0')
+    expect(cleaned.PATH ?? cleaned.Path, 'PATH must survive or git cannot be found').toBeTruthy()
+  })
+
+  it('is case-insensitive — Git_Dir is as dangerous as GIT_DIR', () => {
+    const cleaned = sanitizeGitEnv({ Git_Dir: 'C:/nope', git_config_count: '1' })
+    expect(cleaned.Git_Dir).toBeUndefined()
+    expect(cleaned.git_config_count).toBeUndefined()
+  })
+
+  it('the push still succeeds with that environment set on the parent process', () => {
+    boobyTrap()
+    const saved: Record<string, string | undefined> = {}
+    for (const [k, v] of Object.entries(hostile)) { saved[k] = process.env[k]; process.env[k] = v }
+    try {
+      push({ workspaceRef: workspace, sha, remote: honest, ref: REF })
+      expect(refsOf(honest)).toBe(`${sha} ${REF}`)
+      expect(refsOf(attacker)).toBe('')
+      expect(existsSync(join(witness, 'hookspath')), 'GIT_CONFIG_KEY_0 hooksPath fired').toBe(false)
+    } finally {
+      for (const k of Object.keys(hostile)) {
+        if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]
+      }
+    }
+  })
+})
+
+describe('trustedPush — the destination is not negotiable', () => {
+  it('refuses a source that is not a literal 40-hex sha', () => {
+    for (const bad of ['HEAD', 'refs/heads/main', `${sha}^`, 'HEAD~1', '', null, `${sha}\n${sha}`]) {
+      expect(() => push({ workspaceRef: workspace, sha: bad as string, remote: honest, ref: REF }))
+        .toThrow(/literal sha/)
+    }
+    expect(refsOf(honest)).toBe('')
+  })
+
+  it('refuses a destination ref outside refs/heads/', () => {
+    for (const bad of ['refs/tags/v1', 'HEAD', 'refs/heads/../../evil', `refs/heads/${BRANCH}:refs/heads/other`, '']) {
+      expect(() => push({ workspaceRef: workspace, sha, remote: honest, ref: bad }))
+        .toThrow(/unexpected destination ref/)
+    }
+    expect(refsOf(honest)).toBe('')
+  })
+
+  it('refuses an empty remote rather than falling back to a configured one', () => {
+    expect(() => push({ workspaceRef: workspace, sha, remote: '', ref: REF })).toThrow(/no push remote/)
+  })
+
+  it('refuses a sha the builder never produced', () => {
+    const absentSha = 'c'.repeat(40)
+    expect(() => push({ workspaceRef: workspace, sha: absentSha, remote: honest, ref: REF })).toThrow()
+    expect(refsOf(honest)).toBe('')
+  })
+
+  it('refuses a sha that exists but is not a commit', () => {
+    const blob = rawGit(workspace, ['rev-parse', 'HEAD:built.txt']).stdout.trim()
+    expect(() => push({ workspaceRef: workspace, sha: blob, remote: honest, ref: REF })).toThrow()
+    expect(refsOf(honest)).toBe('')
+  })
+})
+
+describe('workspaceObjectStore — the object store must be inside the bound workspace', () => {
+  it('accepts the ordinary case', () => {
+    expect(workspaceObjectStore(workspace)).toBe(join(workspace, '.git', 'objects'))
+  })
+
+  it('refuses a workspace with no object store at all', () => {
+    const bare = join(root, 'not-a-repo')
+    mkdirSync(bare)
+    expect(() => workspaceObjectStore(bare)).toThrow(/no git object store/)
+  })
+
+  it('refuses an object store symlinked out of the workspace', () => {
+    const other = join(root, 'other-repo')
+    rawGit(root, ['init', '--quiet', other])
+    const victim = join(root, 'victim')
+    mkdirSync(join(victim, '.git'), { recursive: true })
+    try {
+      symlinkSync(join(other, '.git', 'objects'), join(victim, '.git', 'objects'), 'junction')
+    } catch {
+      return // symlink/junction creation not permitted in this environment — skip
+    }
+    expect(() => workspaceObjectStore(victim)).toThrow(/escapes the workspace/)
+  })
+})
+
+describe('resolveWorkspaceHead — HEAD without starting git in the builder repo', () => {
+  it('agrees with git rev-parse on a normal branch checkout', () => {
+    expect(resolveWorkspaceHead(workspace)).toBe(sha)
+  })
+
+  it('resolves a detached HEAD', () => {
+    writeFileSync(join(workspace, '.git', 'HEAD'), `${sha}\n`)
+    expect(resolveWorkspaceHead(workspace)).toBe(sha)
+  })
+
+  it('resolves through packed-refs when the loose ref is gone', () => {
+    const before = resolveWorkspaceHead(workspace)
+    rawGit(workspace, ['pack-refs', '--all'])
+    expect(resolveWorkspaceHead(workspace)).toBe(before)
+  })
+
+  it('refuses a symref that would climb out of the git dir', () => {
+    for (const evil of ['ref: refs/../../../../etc/passwd', 'ref: ../../secret', 'ref: refs/heads/../../evil']) {
+      writeFileSync(join(workspace, '.git', 'HEAD'), `${evil}\n`)
+      expect(() => resolveWorkspaceHead(workspace)).toThrow(/unsafe ref name/)
+    }
+  })
+
+  it('refuses garbage rather than returning something pushable', () => {
+    for (const junk of ['', 'not a sha', 'ref:', `ref: refs/heads/gone`]) {
+      writeFileSync(join(workspace, '.git', 'HEAD'), `${junk}\n`)
+      expect(() => resolveWorkspaceHead(workspace)).toThrow()
+    }
+  })
+
+  it('refuses a ref file that does not hold a sha', () => {
+    writeFileSync(join(workspace, '.git', 'HEAD'), 'ref: refs/heads/master\n')
+    mkdirSync(join(workspace, '.git', 'refs', 'heads'), { recursive: true })
+    writeFileSync(join(workspace, '.git', 'refs', 'heads', 'master'), 'ref: refs/heads/loop\n')
+    expect(() => resolveWorkspaceHead(workspace)).toThrow(/does not hold a sha/)
+  })
+})

@@ -37,7 +37,7 @@
 // Timeout is the spend-cap stand-in until Phase-2 spend tracking lands.
 
 import { createClient } from '@supabase/supabase-js'
-import { spawnSync, spawn } from 'child_process'
+import { spawn } from 'child_process'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve } from 'path'
@@ -55,6 +55,7 @@ import {
 } from './lib/attempt-recovery.mjs'
 import { consentDrift } from './lib/approval-binding.mjs'
 import { workspaceBindingError } from './lib/workspace-binding.mjs'
+import { trustedPush, resolveWorkspaceHead } from './lib/trusted-push.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -159,13 +160,11 @@ async function logAudit(sb, tool, ok, error) {
   catch (e) { console.error(`[audit] write failed (non-fatal): ${e.message}`) }
 }
 
-// git helper (throws on nonzero) — the dispatcher IS the only push-cred holder; it is
-// NOT subject to the workspace deny-list.
-function git(cwd, args) {
-  const r = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' })
-  if (r.status !== 0) throw new Error(`git ${args.join(' ')} (${r.status}): ${(r.stderr || r.stdout || '').trim()}`)
-  return (r.stdout || '').trim()
-}
+// No git helper here on purpose. The dispatcher IS the only push-cred holder, so the one
+// place it runs git — the gated push — must never do so inside the builder's workspace,
+// where .git/hooks, core.hooksPath, include.path and url.*.pushInsteadOf are all attacker
+// input. scripts/lib/trusted-push.mjs owns every git invocation on that path and reads the
+// workspace as plain files. See the header there.
 
 // ---- durability: a finished build must survive a flaky network ----
 // 2026-08-08 incident: request e0afb33a built cleanly (684s, commit 43f49d6, QC FIX-FIRST)
@@ -435,8 +434,10 @@ async function gatedPush(sb, row) {
 
   // HEAD must be EXACTLY the reviewed+approved commit. approved_sha === reviewed_sha is
   // already asserted above, so this closes the three-way equality the push depends on.
+  // Read as plain files, not via `git rev-parse` — starting a git process in the builder's
+  // repository is exactly what the trusted-push repo exists to avoid.
   let head
-  try { head = git(r.workspace_ref, ['rev-parse', 'HEAD']) } catch (e) { return fail(`rev-parse failed: ${e.message}`) }
+  try { head = resolveWorkspaceHead(r.workspace_ref) } catch (e) { return fail(`HEAD read failed: ${e.message}`) }
   if (head !== r.approved_sha) return fail(`SHA drift: HEAD ${head} != approved_sha ${r.approved_sha}`)
   console.log(`[push] gate: HEAD === approved_sha === reviewed_sha OK (${head})`)
 
@@ -454,11 +455,16 @@ async function gatedPush(sb, row) {
   // Push the LITERAL approved commit, never `HEAD`. HEAD was only verified a moment ago and
   // is a moving target — anything that commits in the workspace between the check and the
   // push would otherwise ship an unreviewed commit under a valid approval.
+  // ...and push it from a repository this process just built, not from the workspace. The
+  // builder contributes objects and nothing else: no hooks, no config, no remotes. Without
+  // this, a planted .git/hooks/pre-push ran as the dispatcher with the push credential live,
+  // and a planted url.*.pushInsteadOf redirected this exact push to an attacker's host.
   const sha = r.approved_sha
   const remote = SANDBOX_REMOTE || `https://github.com/${SANDBOX_REPO}.git`
   console.log(`[push] pushing ${sha} → ${remote} ${branch}`)
   try {
-    git(r.workspace_ref, ['push', remote, `${sha}:refs/heads/${branch}`])
+    const from = trustedPush({ workspaceRef: r.workspace_ref, sha, remote, ref: `refs/heads/${branch}` })
+    console.log(`[push] pushed from trusted repo ${from} (builder .git never on the git path)`)
   } catch (e) {
     return fail(`git push failed: ${e.message}`)
   }
