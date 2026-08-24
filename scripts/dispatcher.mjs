@@ -447,9 +447,15 @@ async function gatedPush(sb, row) {
   // or rebuild landing during the copy sailed straight past a check that had already passed.
   // Preparing before re-reading closes that window: nothing between the re-read and the push
   // touches disk or git except the push itself. No credential is spent here.
+  // Bind the fixed remote into the unforgeable prepared handle now; stage two accepts no
+  // replacement remote, so the destination cannot change after the consent re-read.
+  const remote = SANDBOX_REMOTE || `https://github.com/${SANDBOX_REPO}.git`
   let prepared
   try {
-    prepared = prepareTrustedPush({ workspaceRef: r.workspace_ref, sha: r.approved_sha, ref: `refs/heads/${branch}` })
+    prepared = prepareTrustedPush({
+      workspaceRef: r.workspace_ref, sha: r.approved_sha,
+      ref: `refs/heads/${branch}`, remote,
+    })
   } catch (e) {
     return fail(`trusted repo prepare failed: ${e.message}`)
   }
@@ -474,10 +480,9 @@ async function gatedPush(sb, row) {
   // this, a planted .git/hooks/pre-push ran as the dispatcher with the push credential live,
   // and a planted url.*.pushInsteadOf redirected this exact push to an attacker's host.
   const sha = r.approved_sha
-  const remote = SANDBOX_REMOTE || `https://github.com/${SANDBOX_REPO}.git`
   console.log(`[push] pushing ${sha} → ${remote} ${branch}`)
   try {
-    const from = pushTrustedRepo(prepared, { remote })
+    const from = pushTrustedRepo(prepared)
     console.log(`[push] pushed from trusted repo ${from} (builder .git never on the git path)`)
   } catch (e) {
     prepared.cleanup()

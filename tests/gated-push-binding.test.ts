@@ -55,7 +55,7 @@ const state: {
   reads: Array<Row | undefined>
   updates: Row[]
   pushes: Push[]
-  prepares: Array<{ workspaceRef: string; sha: string; ref: string }>
+  prepares: Array<{ workspaceRef: string; sha: string; ref: string; remote: string }>
   cleanups: number
   subprocesses: unknown[][]
   head: string
@@ -104,22 +104,25 @@ const TRUSTED_REPO = join(tmpdir(), 'mc-trusted-push-stub', 'repo')
 // ever sees what prepareTrustedPush() already validated (sha/ref come from the handle).
 vi.mock('../scripts/lib/trusted-push.mjs', () => ({
   resolveWorkspaceHead: () => state.head,
-  prepareTrustedPush: ({ workspaceRef, sha, ref }: { workspaceRef: string; sha: string; ref: string }) => {
-    state.prepares.push({ workspaceRef, sha, ref })
+  prepareTrustedPush: ({ workspaceRef, sha, ref, remote }: { workspaceRef: string; sha: string; ref: string; remote: string }) => {
+    state.prepares.push({ workspaceRef, sha, ref, remote })
     state.onPrepare?.()
     return {
       repo: TRUSTED_REPO,
       sha,
       ref,
+      remote,
       workspaceRef,
       cleanup: () => { state.cleanups += 1 },
     }
   },
   pushTrustedRepo: (
-    prepared: { repo: string; sha: string; ref: string; workspaceRef: string },
-    { remote }: { remote: string },
+    prepared: { repo: string; sha: string; ref: string; remote: string; workspaceRef: string },
   ) => {
-    state.pushes.push({ workspaceRef: prepared.workspaceRef, sha: prepared.sha, remote, ref: prepared.ref })
+    state.pushes.push({
+      workspaceRef: prepared.workspaceRef, trustedRepo: prepared.repo,
+      sha: prepared.sha, ref: prepared.ref, remote: prepared.remote,
+    })
     return prepared.repo
   },
 }))

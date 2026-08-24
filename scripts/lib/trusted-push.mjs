@@ -249,17 +249,27 @@ export function assertSafeRemote(remote) {
   return remote
 }
 
+// The handle prepareTrustedPush() returns is the only thing pushTrustedRepo() will act on.
+// Keyed by object identity (a WeakMap, so a discarded handle is reclaimed normally) rather
+// than any value ON the handle, because values can be copied into a forged look-alike but
+// identity cannot be. `used` flips true the instant a handle is accepted by pushTrustedRepo(),
+// so the same prepared repo can never be pushed twice, whether that push succeeded or failed.
+const trustedHandles = new WeakMap()
+
 // Stage 1 of the credentialed push, split out so a caller can run the authoritative consent
 // re-read AFTER this and still have the network push be the very next thing that happens.
 // Everything that touches disk and can take real time on a large build lives here: mkdtemp,
 // git init, copying every object, and the cat-file check that the approved sha is actually
 // present and a commit. None of it spends the push credential, so re-checking consent right
-// after this returns cannot race it. The handle is bound to the exact sha/ref validated here
-// — pushTrustedRepo() below takes them from the handle, never a fresh argument, so stage 2
-// can never be pointed at a different commit than the one cat-file just confirmed.
-export function prepareTrustedPush({ workspaceRef, sha, ref, git = runGit }) {
+// after this returns cannot race it. The handle is bound to the exact sha/ref/remote validated
+// here — frozen, and registered as the one authentic, not-yet-used handle — so pushTrustedRepo()
+// below can only ever push what was already validated: not a different commit, not a different
+// destination ref, not a different remote, not this same handle twice, and not a forged object
+// built to look like one.
+export function prepareTrustedPush({ workspaceRef, sha, ref, remote, git = runGit }) {
   if (!SHA_RE.test(sha ?? '')) throw new Error(`refusing to push a source that is not a literal sha: ${sha}`)
   if (!/^refs\/heads\/[A-Za-z0-9._-]+$/.test(ref ?? '')) throw new Error(`refusing an unexpected destination ref: ${ref}`)
+  assertSafeRemote(remote)
 
   const trusted = createTrustedPushRepo(workspaceRef, { git })
   const harden = ['-c', `core.hooksPath=${trusted.hooks}`]
@@ -270,17 +280,25 @@ export function prepareTrustedPush({ workspaceRef, sha, ref, git = runGit }) {
     trusted.cleanup()
     throw e
   }
-  return { repo: trusted.repo, hooks: trusted.hooks, sha, ref, cleanup: trusted.cleanup }
+  const handle = Object.freeze({ repo: trusted.repo, hooks: trusted.hooks, sha, ref, remote, cleanup: trusted.cleanup })
+  trustedHandles.set(handle, { used: false })
+  return handle
 }
 
-// Stage 2: the credentialed network push, and nothing else. Takes the handle prepareTrustedPush()
-// returned — sha and ref come from it, not from `opts` — so this can only ever push what was
-// already validated. The caller owns the handle's lifetime and must call `prepared.cleanup()`
-// exactly once, whatever the outcome.
-export function pushTrustedRepo(prepared, { remote, git = runGit }) {
-  assertSafeRemote(remote)
+// Stage 2: the credentialed network push, and nothing else. Accepts only the frozen handle
+// prepareTrustedPush() returned — repo, hooks, sha, ref and remote all come from it, never
+// from a second argument, so this can only ever push what was already validated to exactly
+// where prepare bound it. Rejects anything that is not that exact, not-yet-used object before
+// Git ever runs: a forged look-alike was never registered above, and a reused handle is
+// marked used on its first call regardless of outcome. The caller still owns the handle's
+// lifetime and must call `prepared.cleanup()` exactly once, whatever the outcome.
+export function pushTrustedRepo(prepared, { git = runGit } = {}) {
+  const state = trustedHandles.get(prepared)
+  if (!state) throw new Error('refusing an unrecognised trusted-push handle')
+  if (state.used) throw new Error('refusing to reuse a trusted-push handle')
+  state.used = true
   const harden = ['-c', `core.hooksPath=${prepared.hooks}`]
-  git(prepared.repo, [...harden, 'push', remote, `${prepared.sha}:${prepared.ref}`])
+  git(prepared.repo, [...harden, 'push', prepared.remote, `${prepared.sha}:${prepared.ref}`])
   return prepared.repo
 }
 
@@ -294,9 +312,9 @@ export function trustedPush({ workspaceRef, sha, remote, ref, git = runGit }) {
   if (!/^refs\/heads\/[A-Za-z0-9._-]+$/.test(ref ?? '')) throw new Error(`refusing an unexpected destination ref: ${ref}`)
   assertSafeRemote(remote)
 
-  const prepared = prepareTrustedPush({ workspaceRef, sha, ref, git })
+  const prepared = prepareTrustedPush({ workspaceRef, sha, ref, remote, git })
   try {
-    return pushTrustedRepo(prepared, { remote, git })
+    return pushTrustedRepo(prepared, { git })
   } finally {
     prepared.cleanup()
   }

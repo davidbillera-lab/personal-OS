@@ -20,6 +20,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   trustedPush, sanitizeGitEnv, resolveWorkspaceHead, workspaceObjectStore, createTrustedPushRepo,
+  prepareTrustedPush, pushTrustedRepo,
 } from '../scripts/lib/trusted-push.mjs'
 
 const REQ = '11111111-1111-1111-1111-111111111111'
@@ -472,6 +473,38 @@ describe('trustedPush — the destination is not negotiable', () => {
     const blob = rawGit(workspace, ['rev-parse', 'HEAD:built.txt']).stdout.trim()
     expect(() => push({ workspaceRef: workspace, sha: blob, remote: honest, ref: REF })).toThrow()
     expect(refsOf(honest)).toBe('')
+  })
+})
+
+describe('prepared trusted-push handle — identity, binding, and single use', () => {
+  it('is frozen and binds the remote before the consent re-read', () => {
+    const prepared = prepareTrustedPush({ workspaceRef: workspace, sha, ref: REF, remote: honest })
+    try {
+      expect(Object.isFrozen(prepared)).toBe(true)
+      expect(Reflect.set(prepared, 'remote', attacker)).toBe(false)
+      pushTrustedRepo(prepared)
+      expect(refsOf(honest)).toBe(`${sha} ${REF}`)
+      expect(refsOf(attacker)).toBe('')
+    } finally { prepared.cleanup() }
+  })
+
+  it('rejects a forged look-alike before Git runs', () => {
+    const forged = Object.freeze({
+      repo: workspace, hooks: join(workspace, '.git', 'hooks'),
+      sha, ref: REF, remote: attacker, cleanup: () => {},
+    })
+    expect(() => pushTrustedRepo(forged)).toThrow(/unrecognised trusted-push handle/)
+    expect(refsOf(honest)).toBe('')
+    expect(refsOf(attacker)).toBe('')
+  })
+
+  it('rejects reuse even after the first push succeeds', () => {
+    const prepared = prepareTrustedPush({ workspaceRef: workspace, sha, ref: REF, remote: honest })
+    try {
+      pushTrustedRepo(prepared)
+      expect(() => pushTrustedRepo(prepared)).toThrow(/reuse a trusted-push handle/)
+      expect(refsOf(honest)).toBe(`${sha} ${REF}`)
+    } finally { prepared.cleanup() }
   })
 })
 
