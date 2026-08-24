@@ -55,7 +55,7 @@ import {
 } from './lib/attempt-recovery.mjs'
 import { consentDrift } from './lib/approval-binding.mjs'
 import { workspaceBindingError } from './lib/workspace-binding.mjs'
-import { trustedPush, resolveWorkspaceHead } from './lib/trusted-push.mjs'
+import { prepareTrustedPush, pushTrustedRepo, resolveWorkspaceHead } from './lib/trusted-push.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -441,20 +441,34 @@ async function gatedPush(sb, row) {
   if (head !== r.approved_sha) return fail(`SHA drift: HEAD ${head} != approved_sha ${r.approved_sha}`)
   console.log(`[push] gate: HEAD === approved_sha === reviewed_sha OK (${head})`)
 
-  // Authoritative re-read IMMEDIATELY before the push. Every gate above was checked against
-  // a row read before rev-parse and the filesystem checks ran; a reject, a resume or a
-  // rebuild landing inside that window would otherwise be pushed straight past. Any change
-  // to a consent-bearing field ⇒ abort, no push.
+  // Prepare the trusted repo FIRST: mkdtemp, git init, copy every object, cat-file the
+  // approved commit. This is the (potentially long, for a large build) disk work that used
+  // to run inside trustedPush() AFTER the authoritative re-read below — so a reject, resume,
+  // or rebuild landing during the copy sailed straight past a check that had already passed.
+  // Preparing before re-reading closes that window: nothing between the re-read and the push
+  // touches disk or git except the push itself. No credential is spent here.
+  let prepared
+  try {
+    prepared = prepareTrustedPush({ workspaceRef: r.workspace_ref, sha: r.approved_sha, ref: `refs/heads/${branch}` })
+  } catch (e) {
+    return fail(`trusted repo prepare failed: ${e.message}`)
+  }
+  console.log(`[push] gate: trusted repo prepared (${prepared.repo})`)
+
+  // Authoritative re-read IMMEDIATELY before the push. Every gate above — AND the prepare
+  // step just above — was checked against a row read before any of it ran; a reject, a
+  // resume, or a rebuild landing anywhere in that window, including during the object copy,
+  // would otherwise be pushed straight past. Any change to a consent-bearing field ⇒ abort,
+  // no push, and the trusted repo prepared above is torn down instead of used.
   const { data: fresh, error: ferr } = await sb.from('mc_requests').select('*').eq('id', r.id).single()
-  if (ferr || !fresh) return fail(`pre-push re-read failed: ${ferr?.message ?? 'row not found'}`)
+  if (ferr || !fresh) { prepared.cleanup(); return fail(`pre-push re-read failed: ${ferr?.message ?? 'row not found'}`) }
   const drift = consentDrift(r, fresh)
-  if (drift) return fail(`pre-push drift: ${drift}`)
+  if (drift) { prepared.cleanup(); return fail(`pre-push drift: ${drift}`) }
   console.log('[push] gate: authoritative re-read clean (no approval drift)')
 
   // --- all gates passed: push (dispatcher is the ONLY push-cred holder) ---
-  // Push the LITERAL approved commit, never `HEAD`. HEAD was only verified a moment ago and
-  // is a moving target — anything that commits in the workspace between the check and the
-  // push would otherwise ship an unreviewed commit under a valid approval.
+  // Push the LITERAL approved commit, never `HEAD` — prepared.sha is exactly r.approved_sha,
+  // frozen when prepareTrustedPush() cat-file-validated it above.
   // ...and push it from a repository this process just built, not from the workspace. The
   // builder contributes objects and nothing else: no hooks, no config, no remotes. Without
   // this, a planted .git/hooks/pre-push ran as the dispatcher with the push credential live,
@@ -463,11 +477,13 @@ async function gatedPush(sb, row) {
   const remote = SANDBOX_REMOTE || `https://github.com/${SANDBOX_REPO}.git`
   console.log(`[push] pushing ${sha} → ${remote} ${branch}`)
   try {
-    const from = trustedPush({ workspaceRef: r.workspace_ref, sha, remote, ref: `refs/heads/${branch}` })
+    const from = pushTrustedRepo(prepared, { remote })
     console.log(`[push] pushed from trusted repo ${from} (builder .git never on the git path)`)
   } catch (e) {
+    prepared.cleanup()
     return fail(`git push failed: ${e.message}`)
   }
+  prepared.cleanup()
 
   const repoURL = SANDBOX_REMOTE || `https://github.com/${SANDBOX_REPO}`
   const { data: done, error: derr } = await sb.from('mc_requests')

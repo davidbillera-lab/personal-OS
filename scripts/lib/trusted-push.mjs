@@ -249,21 +249,55 @@ export function assertSafeRemote(remote) {
   return remote
 }
 
-// Push exactly `sha` to exactly `ref` on exactly `remote`, from a repository the builder has
-// never touched. Returns the trusted repo path that was used (for logging).
-export function trustedPush({ workspaceRef, sha, remote, ref, git = runGit }) {
+// Stage 1 of the credentialed push, split out so a caller can run the authoritative consent
+// re-read AFTER this and still have the network push be the very next thing that happens.
+// Everything that touches disk and can take real time on a large build lives here: mkdtemp,
+// git init, copying every object, and the cat-file check that the approved sha is actually
+// present and a commit. None of it spends the push credential, so re-checking consent right
+// after this returns cannot race it. The handle is bound to the exact sha/ref validated here
+// — pushTrustedRepo() below takes them from the handle, never a fresh argument, so stage 2
+// can never be pointed at a different commit than the one cat-file just confirmed.
+export function prepareTrustedPush({ workspaceRef, sha, ref, git = runGit }) {
   if (!SHA_RE.test(sha ?? '')) throw new Error(`refusing to push a source that is not a literal sha: ${sha}`)
   if (!/^refs\/heads\/[A-Za-z0-9._-]+$/.test(ref ?? '')) throw new Error(`refusing an unexpected destination ref: ${ref}`)
-  assertSafeRemote(remote)
 
   const trusted = createTrustedPushRepo(workspaceRef, { git })
   const harden = ['-c', `core.hooksPath=${trusted.hooks}`]
   try {
     // The approved commit must be present and actually be a commit before anything is sent.
     git(trusted.repo, [...harden, 'cat-file', '-e', `${sha}^{commit}`])
-    git(trusted.repo, [...harden, 'push', remote, `${sha}:${ref}`])
-    return trusted.repo
-  } finally {
+  } catch (e) {
     trusted.cleanup()
+    throw e
+  }
+  return { repo: trusted.repo, hooks: trusted.hooks, sha, ref, cleanup: trusted.cleanup }
+}
+
+// Stage 2: the credentialed network push, and nothing else. Takes the handle prepareTrustedPush()
+// returned — sha and ref come from it, not from `opts` — so this can only ever push what was
+// already validated. The caller owns the handle's lifetime and must call `prepared.cleanup()`
+// exactly once, whatever the outcome.
+export function pushTrustedRepo(prepared, { remote, git = runGit }) {
+  assertSafeRemote(remote)
+  const harden = ['-c', `core.hooksPath=${prepared.hooks}`]
+  git(prepared.repo, [...harden, 'push', remote, `${prepared.sha}:${prepared.ref}`])
+  return prepared.repo
+}
+
+// Push exactly `sha` to exactly `ref` on exactly `remote`, from a repository the builder has
+// never touched. Returns the trusted repo path that was used (for logging). A convenience
+// wrapper over the two stages above for callers that want it done atomically with no consent
+// re-check in between — gatedPush() in dispatcher.mjs calls the two stages directly instead,
+// so it can re-check consent between preparing and pushing.
+export function trustedPush({ workspaceRef, sha, remote, ref, git = runGit }) {
+  if (!SHA_RE.test(sha ?? '')) throw new Error(`refusing to push a source that is not a literal sha: ${sha}`)
+  if (!/^refs\/heads\/[A-Za-z0-9._-]+$/.test(ref ?? '')) throw new Error(`refusing an unexpected destination ref: ${ref}`)
+  assertSafeRemote(remote)
+
+  const prepared = prepareTrustedPush({ workspaceRef, sha, ref, git })
+  try {
+    return pushTrustedRepo(prepared, { remote, git })
+  } finally {
+    prepared.cleanup()
   }
 }

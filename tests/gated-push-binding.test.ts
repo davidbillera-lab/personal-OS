@@ -55,9 +55,14 @@ const state: {
   reads: Array<Row | undefined>
   updates: Row[]
   pushes: Push[]
+  prepares: Array<{ workspaceRef: string; sha: string; ref: string }>
+  cleanups: number
   subprocesses: unknown[][]
   head: string
-} = { reads: [], updates: [], pushes: [], subprocesses: [], head: APPROVED }
+  // Fires from inside the prepareTrustedPush mock — standing in for the real function's
+  // (potentially long) object copy, during which a reject/rebuild/new-attempt can land.
+  onPrepare: (() => void) | null
+} = { reads: [], updates: [], pushes: [], prepares: [], cleanups: 0, subprocesses: [], head: APPROVED, onPrepare: null }
 
 vi.mock('@supabase/supabase-js', () => ({
   createClient: () => ({
@@ -93,11 +98,29 @@ const TRUSTED_REPO = join(tmpdir(), 'mc-trusted-push-stub', 'repo')
 
 // The push path is a module boundary now, so mock the module, not the subprocess: git never
 // runs from this test. The WORKSPACE PATH stays real — the binding check resolves it on disk.
+// Two stages, mirroring the real prepare/push split: prepareTrustedPush() is where the real
+// implementation does the (potentially slow) object copy + cat-file validation, so onPrepare
+// hooks there to simulate a row mutation landing during that window. pushTrustedRepo() only
+// ever sees what prepareTrustedPush() already validated (sha/ref come from the handle).
 vi.mock('../scripts/lib/trusted-push.mjs', () => ({
   resolveWorkspaceHead: () => state.head,
-  trustedPush: ({ workspaceRef, sha, remote, ref }: Push) => {
-    state.pushes.push({ workspaceRef, sha, remote, ref })
-    return TRUSTED_REPO
+  prepareTrustedPush: ({ workspaceRef, sha, ref }: { workspaceRef: string; sha: string; ref: string }) => {
+    state.prepares.push({ workspaceRef, sha, ref })
+    state.onPrepare?.()
+    return {
+      repo: TRUSTED_REPO,
+      sha,
+      ref,
+      workspaceRef,
+      cleanup: () => { state.cleanups += 1 },
+    }
+  },
+  pushTrustedRepo: (
+    prepared: { repo: string; sha: string; ref: string; workspaceRef: string },
+    { remote }: { remote: string },
+  ) => {
+    state.pushes.push({ workspaceRef: prepared.workspaceRef, sha: prepared.sha, remote, ref: prepared.ref })
+    return prepared.repo
   },
 }))
 
@@ -129,8 +152,11 @@ beforeEach(() => {
   state.reads = []
   state.updates = []
   state.pushes = []
+  state.prepares = []
+  state.cleanups = 0
   state.subprocesses = []
   state.head = APPROVED
+  state.onPrepare = null
 })
 
 const approvedRow = (over: Row = {}) => ({
@@ -155,6 +181,8 @@ async function runGatedPush(rows: Array<Row | undefined>) {
 }
 
 const pushes = () => state.pushes
+const prepares = () => state.prepares
+const cleanups = () => state.cleanups
 const failure = () => state.updates.find((u) => u.status === 'failed')
 const completion = () => state.updates.find((u) => u.status === 'completed')
 
@@ -318,6 +346,54 @@ describe('gatedPush — authoritative re-read immediately before the push', () =
 
     expect(pushes()).toHaveLength(0)
     expect(failure().blocker).toContain('pre-push re-read failed')
+  })
+})
+
+describe('gatedPush — cancellation/drift arriving WHILE the trusted repo is being prepared', () => {
+  // THE FIX: prepareTrustedPush() is where the real implementation does the (potentially
+  // long, for a large build) object copy and cat-file validation. Before this fix, the
+  // authoritative re-read ran BEFORE that work started, so a reject/cancel/rebuild landing
+  // during the copy sailed straight past a check that had already passed. `onPrepare` fires
+  // exactly when that copy would be running and mutates the row the SUBSEQUENT authoritative
+  // re-read sees, proving the re-read now runs after preparation, not before it.
+  it('a cancel landing during preparation is caught by the re-read, not missed by it', async () => {
+    state.reads = [approvedRow()]
+    state.onPrepare = () => { state.reads.push(approvedRow({ status: 'blocked', phase: null, approved_sha: null })) }
+
+    const { gatedPush, createAdminSupabaseClient } = await import('../scripts/dispatcher.mjs')
+    await gatedPush(createAdminSupabaseClient(), { id: REQ })
+
+    expect(prepares(), 'preparation must actually run for this test to prove anything').toHaveLength(1)
+    expect(pushes()).toHaveLength(0)
+    expect(failure()?.blocker ?? '').toContain('pre-push drift')
+    expect(cleanups(), 'the prepared trusted repo must be torn down, not leaked').toBe(1)
+  })
+
+  it('a reviewed_sha rewrite landing during preparation stops the push', async () => {
+    state.reads = [approvedRow()]
+    state.onPrepare = () => { state.reads.push(approvedRow({ reviewed_sha: OTHER_SHA })) }
+
+    const { gatedPush, createAdminSupabaseClient } = await import('../scripts/dispatcher.mjs')
+    await gatedPush(createAdminSupabaseClient(), { id: REQ })
+
+    expect(prepares()).toHaveLength(1)
+    expect(pushes()).toHaveLength(0)
+    expect(failure().blocker).toContain('pre-push drift')
+    expect(failure().blocker).toContain('reviewed_sha')
+    expect(cleanups()).toBe(1)
+  })
+
+  it('a new attempt claiming the row during preparation stops the push', async () => {
+    state.reads = [approvedRow()]
+    state.onPrepare = () => { state.reads.push(approvedRow({ attempt_id: '55555555-5555-5555-5555-555555555555' })) }
+
+    const { gatedPush, createAdminSupabaseClient } = await import('../scripts/dispatcher.mjs')
+    await gatedPush(createAdminSupabaseClient(), { id: REQ })
+
+    expect(prepares()).toHaveLength(1)
+    expect(pushes()).toHaveLength(0)
+    expect(failure().blocker).toContain('attempt_id')
+    expect(cleanups()).toBe(1)
   })
 })
 
