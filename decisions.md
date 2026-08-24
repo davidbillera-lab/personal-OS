@@ -668,3 +668,19 @@ Also removed the reason that test had to race module side effects at all. Import
 - `credentials` and `credential_access_log` use `authenticated_full_access FOR ALL`, so any authenticated user could read ciphertext and erase the access trail. Only 1 user exists today.
 - Auth remains a static shared secret. The durable fix is datastore-backed key validation with instant global revocation — designed in `specs/2026-08-23-mc-security-hardening.md`.
 
+
+### 2026-08-23 follow-up — hardening applied under a no-functionality-break constraint
+
+**Decision:** Apply only fixes provable to be non-breaking; hold anything unverifiable.
+
+**Applied:**
+- **RLS tightened on `credentials` and `credential_access_log`** (migration `deny_direct_client_access_to_credentials`). They used `authenticated_full_access FOR ALL USING (true)`, letting any authenticated user read credential ciphertext and **erase its own access trail**. Verified safe first: every code path uses `createAdminSupabaseClient()` (service role, bypasses RLS) and no browser client touches these tables. Post-change: `authenticated` sees 0 rows; data intact at 46 credentials / 87 log rows.
+- **Audit failures surfaced.** `logAudit()` awaited the insert but never inspected the returned `{ error }`; PostgREST reports failures in the response rather than throwing, so rows could vanish while the route claimed a complete trail.
+- **Scope-collision detection** at startup. One secret configured in two scope env vars silently grants the higher scope. No collisions exist today. Resolution behavior deliberately unchanged so a misconfiguration cannot take MC down.
+- **Secret scanner widened** to OpenAI `sk-`/`sk-proj-` and Stripe `sk_live_`/`sk_test_`/`whsec_`/`rk_live_`. Self-tested.
+
+**Held back deliberately:**
+- **Datastore-backed key validation.** The durable fix, but it rewrites the auth path — too much breakage risk to ship unattended. Needs its own approved build.
+- **Rate limiting** on the MCP endpoint. `chatgpt-liaison` alone made 380 calls; a badly-chosen limit would throttle legitimate agents.
+- **Supabase PAT out of CLI args.** Smoke test of the `SUPABASE_ACCESS_TOKEN` env path was inconclusive, so the config was left untouched rather than risk breaking the Supabase MCP server. Still visible in process listings.
+
