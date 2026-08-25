@@ -578,12 +578,6 @@ describe('resolveWorkspaceHead — HEAD without starting git in the builder repo
 // USERPROFILE / XDG_CONFIG_HOME at an empty directory and sets GIT_CONFIG_NOSYSTEM. Codex
 // flagged the gap; these two tests are the regression proof.
 // ---------------------------------------------------------------------------------------
-// Host-level config. Every trap above lives INSIDE the workspace; these live on the MACHINE —
-// $HOME/.gitconfig — which the builder never touches but which git reads on every invocation
-// anyway. Stripping GIT_* does nothing about that, so the push path now pins HOME /
-// USERPROFILE / XDG_CONFIG_HOME at an empty directory and sets GIT_CONFIG_NOSYSTEM. Codex
-// flagged the gap; these two tests are the regression proof.
-// ---------------------------------------------------------------------------------------
 describe('host global git config', () => {
   let fakeHome = ''
   let savedHome: Record<string, string | undefined> = {}
