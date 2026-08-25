@@ -570,3 +570,76 @@ describe('resolveWorkspaceHead — HEAD without starting git in the builder repo
     expect(() => resolveWorkspaceHead(workspace)).toThrow(/does not hold a sha/)
   })
 })
+
+// ---------------------------------------------------------------------------------------
+// Host-level config. Every trap above lives INSIDE the workspace; these live on the MACHINE —
+// $HOME/.gitconfig — which the builder never touches but which git reads on every invocation
+// anyway. Stripping GIT_* does nothing about that, so the push path now pins HOME /
+// USERPROFILE / XDG_CONFIG_HOME at an empty directory and sets GIT_CONFIG_NOSYSTEM. Codex
+// flagged the gap; these two tests are the regression proof.
+// ---------------------------------------------------------------------------------------
+// Host-level config. Every trap above lives INSIDE the workspace; these live on the MACHINE —
+// $HOME/.gitconfig — which the builder never touches but which git reads on every invocation
+// anyway. Stripping GIT_* does nothing about that, so the push path now pins HOME /
+// USERPROFILE / XDG_CONFIG_HOME at an empty directory and sets GIT_CONFIG_NOSYSTEM. Codex
+// flagged the gap; these two tests are the regression proof.
+// ---------------------------------------------------------------------------------------
+describe('host global git config', () => {
+  let fakeHome = ''
+  let savedHome: Record<string, string | undefined> = {}
+
+  // redirectOnly: a pre-push hook that exits 1 aborts the push BEFORE a url rewrite can
+  // deliver, so the baseline — which has to observe the rewrite landing — gets the url rules
+  // on their own. The trustedPush test takes the full set, since it asserts none of them fire.
+  function poisonGlobalConfig({ redirectOnly = false }: { redirectOnly?: boolean } = {}) {
+    fakeHome = mkdtempSync(join(tmpdir(), 'mc-hostile-home-'))
+    const hooks = join(fakeHome, 'hooks')
+    mkdirSync(hooks)
+    trap(join(hooks, 'pre-push'), 'global-prepush')
+    trap(join(fakeHome, 'cred.sh'), 'global-credential')
+    const redirectRules = [
+      `[url "${fwd(attacker)}"]`,
+      `\tinsteadOf = ${fwd(ghost)}`,
+      `\tpushInsteadOf = ${fwd(ghost)}`,
+    ]
+    const executeRules = [
+      '[core]',
+      `\thooksPath = ${fwd(hooks)}`,
+      '[credential]',
+      `\thelper = !${fwd(join(fakeHome, 'cred.sh'))}`,
+    ]
+    const rules = redirectOnly ? redirectRules : [...executeRules, ...redirectRules]
+    writeFileSync(join(fakeHome, '.gitconfig'), rules.join('\n') + '\n')
+    savedHome = {}
+    for (const k of ['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME']) {
+      savedHome[k] = process.env[k]
+      process.env[k] = fakeHome
+    }
+  }
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(savedHome)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    savedHome = {}
+    if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
+    fakeHome = ''
+  })
+
+  // Without this the test below would prove nothing — it has to be shown that the machine-level
+  // trap really does fire when git is left to read it.
+  it('baseline: a raw push DOES honour host global config', () => {
+    poisonGlobalConfig({ redirectOnly: true })
+    rawGit(workspace, ['push', ghost, `${sha}:${REF}`])
+    expect(refsOf(attacker), 'global pushInsteadOf did not redirect — the trap is built wrong').toBe(`${sha} ${REF}`)
+  })
+
+  it('trustedPush ignores host global config entirely', () => {
+    poisonGlobalConfig()
+    push({ workspaceRef: workspace, sha, remote: honest, ref: REF })
+    expect(refsOf(honest)).toBe(`${sha} ${REF}`)
+    expect(refsOf(attacker), 'the push was redirected by host global config').toBe('')
+    expect(breached(), 'a host-level trap executed').toBe('')
+  })
+})

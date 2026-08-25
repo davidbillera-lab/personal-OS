@@ -47,7 +47,7 @@ interface Chain {
 }
 
 // What the dispatcher asked trusted-push to send, captured verbatim.
-type Push = { workspaceRef: string; sha: string; remote: string; ref: string }
+type Push = { workspaceRef: string; sha: string; remote: string; ref: string; trustedRepo?: string }
 
 // `reads` is the queue of rows the authoritative SELECTs see, in order; an `undefined` entry
 // stands for a read that found no row at all.

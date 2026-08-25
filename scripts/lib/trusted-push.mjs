@@ -50,6 +50,19 @@ const SHA_RE = /^[0-9a-f]{40}$/
 // GIT_OBJECT_DIRECTORY relocate the repository out from under us, GIT_SSH_COMMAND and
 // GIT_PROXY_COMMAND and GIT_ASKPASS all name programs git will execute. Rather than list the
 // dangerous ones, drop the whole GIT_ namespace and put back only what this process chose.
+// Dropping GIT_* is only half of it. git also reads the SYSTEM config and, through HOME /
+// USERPROFILE / XDG_CONFIG_HOME, the GLOBAL config — both of which can carry
+// url.<x>.pushInsteadOf, insteadOf, credential.helper, includeIf and core.hooksPath. On the
+// credentialed push path that means host config could still redirect the push or run a helper
+// with the token live. Point the config-home variables at an empty directory this process
+// created and set GIT_CONFIG_NOSYSTEM, so the only configuration git sees is what this module
+// passes explicitly with -c.
+let hermeticConfigHome = null
+function emptyConfigHome() {
+  if (!hermeticConfigHome) hermeticConfigHome = mkdtempSync(join(tmpdir(), 'mc-git-nohome-'))
+  return hermeticConfigHome
+}
+
 export function sanitizeGitEnv(env = process.env) {
   const out = {}
   for (const [key, value] of Object.entries(env)) {
@@ -59,6 +72,11 @@ export function sanitizeGitEnv(env = process.env) {
     if (/^SSH_ASKPASS(_REQUIRE)?$/i.test(key)) continue
     out[key] = value
   }
+  const home = emptyConfigHome()
+  out.HOME = home
+  out.USERPROFILE = home
+  out.XDG_CONFIG_HOME = home
+  out.GIT_CONFIG_NOSYSTEM = '1'
   // A push that cannot authenticate must fail, not sit forever on a prompt no one will answer.
   out.GIT_TERMINAL_PROMPT = '0'
   return out
@@ -66,9 +84,11 @@ export function sanitizeGitEnv(env = process.env) {
 
 // Every git invocation on the push path goes through here: sanitized environment, no shell,
 // throws on a nonzero exit. `cwd` is always a directory THIS module created.
-export function runGit(cwd, args) {
-  const r = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: sanitizeGitEnv() })
-  if (r.error) throw new Error(`git ${args[0]} could not start: ${r.error.message}`)
+export function runGit(cwd, args, { timeoutMs = 120_000 } = {}) {
+  // Without a timeout a stalled push, or cat-file on a damaged pack, wedges the dispatcher
+  // indefinitely and leaves it ambiguous whether an approved build actually shipped.
+  const r = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: sanitizeGitEnv(), timeout: timeoutMs })
+  if (r.error) throw new Error(`git ${args[0]} could not start or timed out after ${timeoutMs}ms: ${r.error.message}`)
   if (r.status !== 0) throw new Error(`git ${args.join(' ')} (${r.status}): ${(r.stderr || r.stdout || '').trim()}`)
   return (r.stdout || '').trim()
 }
@@ -134,6 +154,7 @@ const LOOSE_FILE_RE = /^(?:[0-9a-f]{38}|[0-9a-f]{62})$/
 // Normal Git maintenance may emit sidecars alongside .pack/.idx. Accept only documented,
 // hash-bound pack names; unknown files still fail closed.
 const PACK_FILE_RE = /^pack-[0-9a-f]{40,64}\.(?:pack|idx|rev|bitmap|mtimes|promisor|keep)$/i
+const MIDX_FILE_RE = /^multi-pack-index(?:-[0-9a-f]{40,64}[.](?:bitmap|rev))?$/i
 // Generous but finite: real build objects are source files and packs, not multi-gigabyte
 // blobs. Caps exist so a planted object can't be used to exhaust disk on the host running the
 // dispatcher; they are not tuned to a specific attack, just to "this cannot be legitimate".
@@ -177,6 +198,11 @@ export function importTrustedObjects(sourceObjects, destObjects) {
       const destDir = join(destObjects, 'pack')
       mkdirSync(destDir, { recursive: true })
       for (const name of readdirSync(topPath)) {
+        // git maintenance/gc writes a multi-pack-index and its sidecars here. They are
+        // regenerable metadata, not objects, so skip them rather than refuse a push from a
+        // workspace that has merely been maintained. The packs still carry every object and
+        // each one is name- and type-checked below.
+        if (MIDX_FILE_RE.test(name)) continue
         if (!PACK_FILE_RE.test(name)) throw new Error(`unexpected entry in objects/pack: ${name}`)
         copyValidatedObjectFile(
           join(topPath, name), join(destDir, name), `pack/${name}`, maxPackEntryBytes(name),
@@ -298,7 +324,18 @@ export function pushTrustedRepo(prepared, { git = runGit } = {}) {
   if (state.used) throw new Error('refusing to reuse a trusted-push handle')
   state.used = true
   const harden = ['-c', `core.hooksPath=${prepared.hooks}`]
-  git(prepared.repo, [...harden, 'push', prepared.remote, `${prepared.sha}:${prepared.ref}`])
+  // git config is hermetic now, so the host credential helper is deliberately out of reach. A
+  // network push therefore has to carry its own credential. It is referenced by NAME inside the
+  // helper snippet and read from the environment there — never passed as an argv value, which
+  // any process listing on the box could read.
+  if (prepared.remote.toLowerCase().startsWith('https://')) {
+    if (!process.env.SANDBOX_GITHUB_TOKEN) {
+      throw new Error('refusing a credentialed push with no SANDBOX_GITHUB_TOKEN: host git config is intentionally unreachable on this path')
+    }
+    harden.push('-c', 'credential.helper=')
+    harden.push('-c', 'credential.helper=!f() { echo username=x-access-token; echo "password=$SANDBOX_GITHUB_TOKEN"; }; f')
+  }
+  git(prepared.repo, [...harden, 'push', prepared.remote, `${prepared.sha}:${prepared.ref}`], { timeoutMs: 300_000 })
   return prepared.repo
 }
 
