@@ -461,15 +461,27 @@ async function gatedPush(sb, row) {
   }
   console.log(`[push] gate: trusted repo prepared (${prepared.repo})`)
 
+  // Tearing down a temp directory must never decide the outcome of a push. On Windows an AV
+  // scanner or the search indexer can still hold a handle when we unlink, and letting that
+  // throw here would skip fail() on the abort paths below and — far worse, at the success
+  // site — skip marking the request completed AFTER the branch had already landed on the
+  // remote, leaving "pushed but the row disagrees" for an operator to untangle.
+  const safeCleanup = () => {
+    try {
+      prepared.cleanup()
+    } catch (e) {
+      console.error(`[push] trusted repo cleanup failed (non-fatal): ${e.message}`)
+    }
+  }
   // Authoritative re-read IMMEDIATELY before the push. Every gate above — AND the prepare
   // step just above — was checked against a row read before any of it ran; a reject, a
   // resume, or a rebuild landing anywhere in that window, including during the object copy,
   // would otherwise be pushed straight past. Any change to a consent-bearing field ⇒ abort,
   // no push, and the trusted repo prepared above is torn down instead of used.
   const { data: fresh, error: ferr } = await sb.from('mc_requests').select('*').eq('id', r.id).single()
-  if (ferr || !fresh) { prepared.cleanup(); return fail(`pre-push re-read failed: ${ferr?.message ?? 'row not found'}`) }
+  if (ferr || !fresh) { safeCleanup(); return fail(`pre-push re-read failed: ${ferr?.message ?? 'row not found'}`) }
   const drift = consentDrift(r, fresh)
-  if (drift) { prepared.cleanup(); return fail(`pre-push drift: ${drift}`) }
+  if (drift) { safeCleanup(); return fail(`pre-push drift: ${drift}`) }
   console.log('[push] gate: authoritative re-read clean (no approval drift)')
 
   // --- all gates passed: push (dispatcher is the ONLY push-cred holder) ---
@@ -485,10 +497,10 @@ async function gatedPush(sb, row) {
     const from = pushTrustedRepo(prepared)
     console.log(`[push] pushed from trusted repo ${from} (builder .git never on the git path)`)
   } catch (e) {
-    prepared.cleanup()
+    safeCleanup()
     return fail(`git push failed: ${e.message}`)
   }
-  prepared.cleanup()
+  safeCleanup()
 
   const repoURL = SANDBOX_REMOTE || `https://github.com/${SANDBOX_REPO}`
   const { data: done, error: derr } = await sb.from('mc_requests')

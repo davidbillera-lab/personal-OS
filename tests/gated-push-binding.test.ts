@@ -57,12 +57,13 @@ const state: {
   pushes: Push[]
   prepares: Array<{ workspaceRef: string; sha: string; ref: string; remote: string }>
   cleanups: number
+  cleanupThrows: boolean
   subprocesses: unknown[][]
   head: string
   // Fires from inside the prepareTrustedPush mock — standing in for the real function's
   // (potentially long) object copy, during which a reject/rebuild/new-attempt can land.
   onPrepare: (() => void) | null
-} = { reads: [], updates: [], pushes: [], prepares: [], cleanups: 0, subprocesses: [], head: APPROVED, onPrepare: null }
+} = { reads: [], updates: [], pushes: [], prepares: [], cleanups: 0, cleanupThrows: false, subprocesses: [], head: APPROVED, onPrepare: null }
 
 vi.mock('@supabase/supabase-js', () => ({
   createClient: () => ({
@@ -113,7 +114,12 @@ vi.mock('../scripts/lib/trusted-push.mjs', () => ({
       ref,
       remote,
       workspaceRef,
-      cleanup: () => { state.cleanups += 1 },
+      cleanup: () => {
+        state.cleanups += 1
+        // Windows keeps handles open longer than anyone expects — AV, indexer, a lagging
+        // git child. cleanupThrows reproduces that.
+        if (state.cleanupThrows) throw new Error('EBUSY: handle still held')
+      },
     }
   },
   pushTrustedRepo: (
@@ -157,6 +163,7 @@ beforeEach(() => {
   state.pushes = []
   state.prepares = []
   state.cleanups = 0
+  state.cleanupThrows = false
   state.subprocesses = []
   state.head = APPROVED
   state.onPrepare = null
@@ -413,5 +420,23 @@ describe('requestApproval — a new attempt inherits no consent', () => {
     expect(ask.approved_sha, 'a rebuild must not inherit the previous approval').toBeNull()
     expect(ask.approved_by).toBeNull()
     expect(ask.approved_at).toBeNull()
+  })
+})
+
+// A temp-directory teardown must never decide whether the request row gets its outcome. The
+// success-path cleanup runs AFTER the branch is already on the remote, so an unguarded throw
+// there left the push landed and the row still in_progress — the worst state to hand an
+// operator, because a retry re-pushes something that already shipped.
+describe('gatedPush — cleanup failure never masks the outcome', () => {
+  it('still marks the request completed when tearing down the trusted repo throws', async () => {
+    state.cleanupThrows = true
+    await runGatedPush([approvedRow()])
+
+    expect(pushes(), 'the push itself should still have happened').toHaveLength(1)
+    expect(cleanups(), 'cleanup should have been attempted').toBe(1)
+    const done = completion()
+    expect(done, 'the row must still reach completed after the branch landed').toBeTruthy()
+    expect(done.result_summary).toContain(APPROVED)
+    expect(failure(), 'a cleanup failure must not be reported as a push failure').toBeUndefined()
   })
 })
