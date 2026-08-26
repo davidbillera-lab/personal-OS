@@ -1,0 +1,41 @@
+title = "personal-os gitleaks config"
+
+[extend]
+# Start from gitleaks' maintained default rule set (AWS, GCP, GitHub, OpenAI,
+# Stripe, JWT, etc.) and layer Mission Control's own token shapes on top —
+# the default rules have no idea "mc-api-key-..." or "mc_..." are secrets.
+useDefault = true
+
+[[rules]]
+id = "mc-internal-api-key"
+description = "Mission Control internal API key / bearer token"
+regex = '''(?i)mc[-_](api[-_]?key|readonly[-_]?key|liaison[-_]?key|orchestrator[-_]?key)[-_][A-Za-z0-9_-]{10,}'''
+tags = ["mission-control", "internal"]
+
+[allowlist]
+# a6e373e: the MCP_API_KEY leak decisions.md documents as the 2026-05-06 incident.
+# c00cd150/4c36d1a1/bb7354ad/88ea7d1b: the SAME secret value (verified by hash
+# comparison, value never printed) additionally found in .mcp.json starting
+# 2026-05-15 and copy-pasted into decisions.md itself on 2026-06-08 and
+# 2026-08-01 — a broader/earlier footprint than the incident writeup names.
+# Absent from current HEAD of both files. Liveness against the current MCP
+# endpoint NOT yet independently verified for this specific sighting — see
+# decisions.md 2026-08-26 entry. Allowlisted here only to stop CI noise on a
+# historical, already-superseded value; this is not a liveness claim.
+commits = [
+  "a6e373e03214ba95f92f2e4ee87d0e5a21b1ba23",
+  "c00cd15060ad9c1cd2fa9ded0f69c56e1c4e71e8",
+  "4c36d1a13cdffc5636256e6dda604ecf280828bf",
+  "bb7354add2bdf36892b93be67b3234c4f75b6be5",
+  "88ea7d1b49120861196359156f9253b7e8b0ac5b",
+]
+
+# Test fixtures for the dispatcher's own secret-scrubbing suite (see
+# decisions.md 2026-08-11) intentionally contain realistic-looking fake
+# tokens — that's the thing under test. scripts/seed-vault.mjs seeds local
+# dev data with placeholder credential values, not real ones.
+paths = [
+  '''tests/sanitize-dispatcher-path\.test\.ts''',
+  '''tests/sanitize-result\.test\.ts''',
+  '''scripts/seed-vault\.mjs''',
+]
