@@ -28,6 +28,23 @@ function Say($m) {
   Add-Content -Path $log -Value $line -Encoding utf8
 }
 
+# A reconcile/start step that "succeeds" over a nonzero pm2 exit code is the same failure
+# shape this whole script exists to catch: success reported over a relay that never actually
+# came back. Capture $LASTEXITCODE the instant the native call returns — before any other
+# native command can overwrite it — log bounded output either way, and fail loudly and
+# immediately (not "continue and hope verify catches it") so a broken `pm2 save` cannot leave
+# a stale dump behind while the script still reports "done".
+function Invoke-Pm2Step($desc, $cmdLine, $maxLines = 8) {
+  Say "[rig-boot] $desc"
+  $output = cmd /c $cmdLine 2>&1
+  $exit = $LASTEXITCODE
+  $output | Select-Object -First $maxLines | ForEach-Object { Say "  $_" }
+  if ($exit -ne 0) {
+    Say "[rig-boot] FAILED: $desc exited $exit; mc-dispatcher is not reconciled. Check: npx pm2 logs mc-dispatcher --err --lines 50"
+    exit 1
+  }
+}
+
 Say '[rig-boot] starting'
 Set-Location $repo
 
@@ -68,24 +85,35 @@ cmd /c "npx pm2 resurrect" 2>&1 | ForEach-Object { Say "  $_" }
 # came back stopped, stayed stopped, and this script logged 'done' over a relay that would
 # never claim a row. Decide from the ACTUAL pm2 state, then act — idempotently, and without
 # touching a dispatcher that is already up (a build runs in a blocking spawn; restarting it
-# mid-build would kill the work). Decision + parsing live in scripts/lib/rig-wake.mjs so the
-# contract is unit-tested (tests/rig-wake.test.ts).
+# mid-build would kill the work). Anything that is NOT up is brought back from
+# ecosystem.config.cjs, not from pm2's saved definition, which on this rig predates the
+# on-demand relay. Decision + parsing live in scripts/lib/rig-wake.mjs so the contract is
+# unit-tested (tests/rig-wake.test.ts).
 $action = (cmd /c "npx pm2 jlist 2>NUL | node scripts\lib\rig-wake.mjs action" | Select-Object -Last 1)
 $action = if ($action) { "$action".Trim() } else { 'start' }
 switch ($action) {
   'none' {
     Say '[rig-boot] mc-dispatcher already online; leaving it alone'
   }
-  'restart' {
-    Say '[rig-boot] mc-dispatcher present but not online; restarting'
-    cmd /c "npx pm2 restart mc-dispatcher --update-env" 2>&1 | Select-Object -First 5 | ForEach-Object { Say "  $_" }
+  'reconcile' {
+    # A saved-stopped entry is a saved DEFINITION, and this rig's is pre-on-demand:
+    # autorestart:true, no DISPATCHER_IDLE_SLEEP_MS. `pm2 restart --update-env` re-launches
+    # that definition — --update-env re-reads the calling SHELL's env, never the config file
+    # — so the woken dispatcher would never sleep and pm2 would restart it back out of every
+    # rig-sleep. Delete the stale definition and start from ecosystem.config.cjs instead.
+    # Safe: the entry is stopped, so nothing running is being deleted, and `pm2 save` then
+    # persists the corrected dump so the next resurrect brings back the current definition.
+    Say '[rig-boot] mc-dispatcher present but not online; reloading definition from ecosystem.config.cjs'
+    Invoke-Pm2Step 'pm2 delete mc-dispatcher' 'npx pm2 delete mc-dispatcher' 3
+    Invoke-Pm2Step 'pm2 start ecosystem.config.cjs --only mc-dispatcher' 'npx pm2 start ecosystem.config.cjs --only mc-dispatcher' 8
+    Invoke-Pm2Step 'pm2 save' 'npx pm2 save' 3
   }
   default {
     # No saved entry, or pm2 state unreadable. Start from the config, never from the bare
     # script: ecosystem.config.cjs is what carries autorestart:false and the idle-sleep env.
     Say "[rig-boot] mc-dispatcher not in pm2 (action=$action); starting from ecosystem.config.cjs"
-    cmd /c "npx pm2 start ecosystem.config.cjs --only mc-dispatcher" 2>&1 | Select-Object -First 8 | ForEach-Object { Say "  $_" }
-    cmd /c "npx pm2 save" 2>&1 | Select-Object -First 3 | ForEach-Object { Say "  $_" }
+    Invoke-Pm2Step 'pm2 start ecosystem.config.cjs --only mc-dispatcher' 'npx pm2 start ecosystem.config.cjs --only mc-dispatcher' 8
+    Invoke-Pm2Step 'pm2 save' 'npx pm2 save' 3
   }
 }
 

@@ -74,9 +74,11 @@ Control rows, or anything under `builds/`. The wake path logs to `rig-boot.log`
 (gitignored); the sleep path logs to the same file, so there is one timeline to read.
 
 `rig:wake` does **not** rely on `pm2 resurrect` to start anything — resurrect restores the
-saved state, which after a sleep is `stopped`, with `autorestart` off. The wake explicitly
-starts or restarts `mc-dispatcher` (and leaves it alone if it is already online, in case a
-build is running), then verifies it and **exits non-zero if it is not `online`**. So a wake
+saved state, which after a sleep is `stopped`. For a stopped or errored entry, the wake
+deletes the saved PM2 definition and recreates it from `ecosystem.config.cjs`; a plain
+`pm2 restart` would reuse stale pre-on-demand settings. It then saves the corrected PM2 dump.
+An already-online dispatcher is left alone in case a build is running. Finally the wake
+verifies the process and **exits non-zero if it is not `online`**. So a wake
 that fails, fails visibly: the last log line is `FAILED: mc-dispatcher is not online` rather
 than `done`. If Hermes reports the last few lines back and they say that, the relay did not
 come up and nothing will be built.
