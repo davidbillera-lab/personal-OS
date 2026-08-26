@@ -684,3 +684,16 @@ Also removed the reason that test had to race module side effects at all. Import
 - **Rate limiting** on the MCP endpoint. `chatgpt-liaison` alone made 380 calls; a badly-chosen limit would throttle legitimate agents.
 - **Supabase PAT out of CLI args.** Smoke test of the `SUPABASE_ACCESS_TOKEN` env path was inconclusive, so the config was left untouched rather than risk breaking the Supabase MCP server. Still visible in process listings.
 
+### 2026-08-26 follow-up — CI scan fix + caller audit on the newly-gated LLM routes
+
+**Decision:** Fix a real CI break found by a fresh Codex QC pass; verify (don't assume) that gating `/api/classify` and `/api/route-task` behind `MCP_API_KEY` doesn't break a live caller.
+
+**Applied:**
+- **Gitleaks CI (`secret-scan.yml`) de-scoped from full history to the incoming commit.** It ran with `fetch-depth: 0` and no baseline/allowlist, so it would have flagged the known, already-rotated `MCP_API_KEY` literal in commit `a6e373e` (history intentionally not rewritten, per 2026-08-23 above) and failed **every** push/PR going forward. Removed the full-history fetch — CI now scans only each incoming commit's file contents, which still catches any new secret entering the codebase.
+- **Caller audit for `/api/classify` and `/api/route-task`.** Repo-wide grep (`.ts`/`.tsx`/`.js`/`.jsx`, no matches outside docs) confirms **zero current callers** for either route — same dormant status already documented above for `/api/kill-criteria`. Gating them behind `MCP_API_KEY` breaks nothing live today. Both are unbuilt/unwired product surfaces (Brain Dump auto-classification, task model-routing); whoever wires them up next must call them server-side with the bearer token, not from a browser client.
+
+**Held back deliberately (flagged by the same QC pass, not yet acted on):**
+- **Shared god-token scope.** `/api/classify`, `/api/route-task`, and `/api/kill-criteria` all require the same full-scope `MCP_API_KEY` used for privileged MCP tooling — least-privilege violation, but splitting it needs the datastore-backed key model above, not a quick patch.
+- **No rate/cost limit on `/api/route-task`** now that it's authenticated — auth stops casual abuse, not a compromised token turning it into uncapped model spend.
+- **Bearer header parsing accepts a raw secret with no `Bearer ` prefix.** Works, but loosens the auth contract.
+
