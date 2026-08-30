@@ -641,3 +641,25 @@ Also removed the reason that test had to race module side effects at all. Import
 **Open, not closed:** one full-suite run failed a single test and I did not capture which; seven subsequent runs (three shuffled) are green and I cannot reproduce it. It landed on a cold-transform run while Docker Desktop was starting, so contention is the likely cause — recorded as unreproduced rather than fixed. Separately, `findPushable`'s fix is proven by unit test but has not yet pushed a real reassigned row, because recording an approval is operator-only.
 
 **Made by:** David ("take care of what needs to be done so we can be 100% confident in the launch") / Claude.
+
+---
+
+## 2026-08-30 — On-demand rig wake was silently failing; fixed and safety net re-enabled
+
+**Decision:** Fix the actual wake mechanism (not just the claim logic, which was never broken) and re-enable the login-triggered safety net that had been silently disabled.
+
+**What was wrong:** David reported that specs Hermes drops into MC just sit there — the dispatcher never picks them up. Investigation (two sessions) found `claimPlannedOne()` itself has fired successfully 3 times historically and was never the problem. The actual gaps:
+- `rig-boot.ps1` ran `pm2 resurrect` and logged "done" over whatever came back — including a saved-`stopped` `mc-dispatcher`, since resurrect restores the *saved* state and `rig-sleep.ps1` stops the entry on idle (`autorestart:false` by design). A wake could report success over a dead relay — the same failure shape as the 2026-08-13 outage.
+- A saved pm2 process definition can predate the on-demand relay design (`autorestart:true`, no idle-sleep env). `pm2 restart` re-launches that stale definition instead of reading `ecosystem.config.cjs`.
+- The `MC Rig Boot` scheduled task — the login-trigger safety net built specifically to prevent a silently-dead relay — was **disabled**, and its run history showed it had **never fired once** (`LastRunTime` = Windows' never-run sentinel).
+- The one-shot nudge (`nudgeUnplanned()`) sends exactly one Telegram ping per stalled request, ever, with no re-arm — an ignored nudge goes silent permanently. Not fixed here; flagged as a known limitation.
+
+**Applied:**
+- Merged `fix/rig-wake-start-stopped` (commits `ac40e3b`, `d4466e3`) to `main` (`540e4f2`). `scripts/lib/rig-wake.mjs` now decides none/reconcile/start from the *actual* pm2 state; a stopped/errored entry is deleted and recreated from `ecosystem.config.cjs` (not restarted) and saved so the correct definition survives the next resurrect. 29/29 tests passing, independent Codex QC: SHIP, zero blocking findings.
+- Re-enabled `MC Rig Boot` and proved it live: manually triggered, watched it correctly reconcile a stopped `mc-dispatcher` to online.
+- Fixed a separate bug found along the way: the `personal-os-git-main-jsg1.vercel.app` alias (the actual endpoint Hermes and the ChatGPT liaison call) was pointed at a 6-day-old deployment — pushes to `main` were not reflected there. Repointed to the current deployment. The underlying "alias doesn't auto-follow" quirk (same one fixed once before, 2026-08-23) has recurred and is not durably fixed — worth a real fix, not another manual repoint, if it happens a third time.
+- Closed out `mc_requests` row `7d100592` ("Diagnose and repair Hermes-to-Claude dispatch handoff") directly — Claude Code completed both the diagnosis and the repair, so no Hermes plan was needed for this one.
+
+**Still open:** two other Hermes-assigned `mc_requests` rows (`02af8552`, `26d1849b`) remain unplanned despite nudges and a direct relayed message — this is Hermes not engaging, not a dispatch-mechanism defect. `fix/second-half-relay-closure` (dispatcher push-hardening, SHA `9af80a4`, local-only worktree) is unrelated to this fix and still gated behind the security-branch merge order.
+
+**Made by:** David ("finish out what you were doing with the dispatch agent and let's get this up and running once and for all") / Claude.
