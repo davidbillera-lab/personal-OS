@@ -721,4 +721,3 @@ Also removed the reason that test had to race module side effects at all. Import
 **Still open:** two other Hermes-assigned `mc_requests` rows (`02af8552`, `26d1849b`) remain unplanned despite nudges and a direct relayed message — this is Hermes not engaging, not a dispatch-mechanism defect. `fix/second-half-relay-closure` (dispatcher push-hardening, SHA `9af80a4`, local-only worktree) is unrelated to this fix and still gated behind the security-branch merge order.
 
 **Made by:** David ("finish out what you were doing with the dispatch agent and let's get this up and running once and for all") / Claude.
->>>>>>> main
