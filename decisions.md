@@ -721,3 +721,22 @@ Also removed the reason that test had to race module side effects at all. Import
 **Still open:** two other Hermes-assigned `mc_requests` rows (`02af8552`, `26d1849b`) remain unplanned despite nudges and a direct relayed message — this is Hermes not engaging, not a dispatch-mechanism defect. `fix/second-half-relay-closure` (dispatcher push-hardening, SHA `9af80a4`, local-only worktree) is unrelated to this fix and still gated behind the security-branch merge order.
 
 **Made by:** David ("finish out what you were doing with the dispatch agent and let's get this up and running once and for all") / Claude.
+
+---
+
+## 2026-08-31 — Instant Telegram ping when Hermes submits a plan
+
+**Decision:** Notify David the moment a plan lands, instead of only via the twice-daily stuck-jobs sweep (which can take up to ~14h to fire on a fresh submission, since it requires 2h staleness on top of a fixed twice-daily cron).
+
+**Why not just make the existing sweep run more often:** a subagent's first-pass design proposed a Postgres trigger + `pg_net.http_post` webhook specifically to route around Vercel's cron limits. Verified via git history (commit `82ad888`, "Vercel Hobby rejects sub-daily crons") that this project is confirmed on Hobby and a sub-daily cron was already tried and reverted for exactly this reason — so extending the existing cron-based sweep genuinely cannot deliver an instant ping. But reviewing the actual code found a smaller path than the webhook: `mc_submit_plan` (`lib/mcp-tools.ts`) is the *only* code path that ever sets `phase='planned'`, and it already has a write-once precondition, so notifying directly from there is both instant and needs zero new infrastructure (no Postgres extension, no Vault secrets, no new route) — and it matches this codebase's existing convention of notifying from application code at the call site (`logAudit`, `notifyAwaitingApproval`, etc.), not from DB triggers.
+
+**Applied:**
+- `lib/alerts/plan-ready.ts` — pure, unit-tested message builder (title + short id, truncated defensively at 200 chars for Telegram's message limit, clean `Request <id>` fallback when title is blank).
+- `mc_submit_plan` sends the Telegram ping right after its DB update succeeds, gated on `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` being set, wrapped in try/catch, with a 3s `AbortSignal.timeout` — a caught exception alone doesn't stop a hung request from stalling Hermes's synchronous tool call, so the timeout is load-bearing, not decorative (first Codex QC pass caught this as the one blocking finding; fixed, re-reviewed: SHIP).
+- No dedup ledger needed — the write-once precondition already guarantees this fires at most once per request.
+- The twice-daily stuck-jobs sweep (`app/api/alerts/stuck-jobs`) is untouched and stays as the backstop if this send fails, times out, or Telegram env is unset.
+- Verified live twice against real Supabase + Telegram (not just unit tests) via a throwaway request row, both before and after the QC fixes.
+
+**Held back deliberately (Codex should-fix, not blocking):**
+- **Fully non-blocking dispatch.** The call is still `await`ed (bounded to 3s by the timeout). Making it genuinely fire-and-forget in a Vercel serverless function needs `waitUntil()` — otherwise the runtime can kill the request before an unawaited background call completes. More machinery than justified for a single, rare, already-bounded 3s worst case.
+- **Extracting Telegram delivery into its own module.** One call site doesn't yet justify a shared abstraction; revisit if a third caller shows up.

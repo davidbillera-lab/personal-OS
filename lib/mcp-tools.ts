@@ -3,6 +3,7 @@ import { decrypt, encrypt } from '@/lib/crypto'
 import { fetchGitHubDiff } from '@/lib/github'
 import { runCodexQC, rerunCodexQCOnSpec } from '@/app/(app)/projects/[id]/actions'
 import { captureToVault } from '@/lib/vault'
+import { buildPlanReadyMessage } from '@/lib/alerts/plan-ready'
 import {
   buildWorkflowRequestText,
   JARVIS_WORKFLOW_TYPE,
@@ -1512,7 +1513,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
 
     const { data: current, error: currentError } = await supabase
       .from('mc_requests')
-      .select('status, assigned_to, plan')
+      .select('status, assigned_to, plan, title')
       .eq('id', request_id)
       .single()
     if (currentError || !current) throw new Error(`Request not found: ${request_id}`)
@@ -1535,6 +1536,30 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       .maybeSingle()
     if (error) throw new Error(error.message)
     if (!data) throw new Error('Request changed while plan was being submitted; re-fetch and retry')
+
+    // Best-effort instant ping so the operator doesn't have to remember to check
+    // MC for new work. A caught exception alone doesn't stop a hung Telegram
+    // call from stalling this synchronous tool response, so the fetch also
+    // carries a hard timeout -- Hermes's mc_submit_plan call must never wait on
+    // Telegram's latency. The twice-daily stuck-jobs sweep
+    // (app/api/alerts/stuck-jobs) is the backstop if this send fails, times
+    // out, or TELEGRAM_* is unset.
+    const botToken = process.env.TELEGRAM_BOT_TOKEN
+    const chatId = process.env.TELEGRAM_CHAT_ID
+    if (botToken && chatId) {
+      try {
+        const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text: buildPlanReadyMessage(current.title, request_id) }),
+          signal: AbortSignal.timeout(3000),
+        })
+        if (!resp.ok) console.error('mc_submit_plan: telegram send failed', resp.status)
+      } catch (e) {
+        console.error('mc_submit_plan: telegram send failed', e instanceof Error ? e.message : e)
+      }
+    }
+
     return JSON.stringify({ request_id: data.id, phase: data.phase, plan_submitted_at: data.plan_submitted_at })
   }
 
