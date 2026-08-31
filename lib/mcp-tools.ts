@@ -1538,10 +1538,12 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
     if (!data) throw new Error('Request changed while plan was being submitted; re-fetch and retry')
 
     // Best-effort instant ping so the operator doesn't have to remember to check
-    // MC for new work — never lets a notify failure break the plan submission
-    // itself (same non-fatal pattern as logAudit() elsewhere in this file).
-    // The twice-daily stuck-jobs sweep (app/api/alerts/stuck-jobs) is the
-    // backstop if this send fails or TELEGRAM_* is unset.
+    // MC for new work. A caught exception alone doesn't stop a hung Telegram
+    // call from stalling this synchronous tool response, so the fetch also
+    // carries a hard timeout -- Hermes's mc_submit_plan call must never wait on
+    // Telegram's latency. The twice-daily stuck-jobs sweep
+    // (app/api/alerts/stuck-jobs) is the backstop if this send fails, times
+    // out, or TELEGRAM_* is unset.
     const botToken = process.env.TELEGRAM_BOT_TOKEN
     const chatId = process.env.TELEGRAM_CHAT_ID
     if (botToken && chatId) {
@@ -1550,6 +1552,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ chat_id: chatId, text: buildPlanReadyMessage(current.title, request_id) }),
+          signal: AbortSignal.timeout(3000),
         })
         if (!resp.ok) console.error('mc_submit_plan: telegram send failed', resp.status)
       } catch (e) {
