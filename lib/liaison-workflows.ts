@@ -4,6 +4,7 @@ export const LIAISON_WORKERS = [
   { id: 'hermes', role: 'specification', capability: 'Drafts and revises requirements and acceptance criteria.' },
   { id: 'claude', role: 'implementation', capability: 'Builds and fixes code in the approved repository workflow.' },
   { id: 'codex-qc', role: 'quality_control', capability: 'Independently reviews the candidate implementation.' },
+  { id: 'codex', role: 'implementation', capability: 'Builds on a feature branch in the Codex builder lane; Claude reviews the PR; never merges its own work.' },
 ] as const
 
 export type LiaisonWorkerId = (typeof LIAISON_WORKERS)[number]['id']

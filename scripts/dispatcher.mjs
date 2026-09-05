@@ -44,7 +44,7 @@ import { notifyAwaitingApproval, notifyClassifierHold, notifyBuildFailed, notify
 import { pickAdapter } from './lib/claude-executor-adapter.mjs'
 import { classifyOps } from './lib/ops-classifier.mjs'
 import { sanitizeForMC } from './lib/sanitize-result.mjs'
-import { isClaimablePlanned } from './lib/planned-claim.mjs'
+import { isClaimablePlanned, isDispatcherRow } from './lib/planned-claim.mjs'
 import { needsPlanNudge, planNudgeKey, PLAN_NUDGE_AFTER_MS } from './lib/plan-nudge.mjs'
 import { resolveCloneTarget, cloneAllowlist } from './lib/clone-target.mjs'
 import { workSetEmpty, shouldSleep } from './lib/idle-sleep.mjs'
@@ -178,11 +178,14 @@ const clearResult = (requestId, attemptId) => clearAttemptResult(BUILDS_DIR, req
 
 // ---- Path A: atomic claim ----
 async function claimOne(sb) {
+  // Codex builder lane rows (assigned_to='codex') are claimed by Codex itself, never here;
+  // everything else (null/'claude'/'hermes') is unchanged dispatcher territory.
   const { data: candidates, error: selErr } = await sb
-    .from('mc_requests').select('id')
-    .eq('status', 'queued').order('created_at', { ascending: true }).limit(1)
+    .from('mc_requests').select('id, assigned_to')
+    .eq('status', 'queued').or('assigned_to.is.null,assigned_to.neq.codex').order('created_at', { ascending: true }).limit(1)
   if (selErr) throw new Error(`claim select failed: ${selErr.message}`)
   if (!candidates || candidates.length === 0) return null
+  if (!isDispatcherRow(candidates[0])) return null
   const candidateId = candidates[0].id
   const attemptId = crypto.randomUUID()
   const { data: claimed, error: updErr } = await sb
@@ -208,6 +211,7 @@ async function claimPlannedOne(sb) {
   const { data: candidates, error: selErr } = await sb
     .from('mc_requests').select('*')
     .eq('status', 'submitted').eq('phase', 'planned').not('plan', 'is', null)
+    .or('assigned_to.is.null,assigned_to.neq.codex')
     .order('created_at', { ascending: true }).limit(1)
   if (selErr) throw new Error(`claim(planned) select failed: ${selErr.message}`)
   if (!candidates || candidates.length === 0) return null
@@ -512,12 +516,13 @@ async function reconcile(sb) {
 // Deduped through mc_alert_sends so a still-unplanned row is announced once, not every sweep.
 async function nudgeUnplanned(sb) {
   const { data: rows, error } = await sb.from('mc_requests')
-    .select('id, title, status, phase, plan, updated_at, created_at')
+    .select('id, title, status, phase, plan, assigned_to, updated_at, created_at')
     .eq('status', 'submitted').is('phase', null).is('plan', null)
   if (error) { console.log(`[nudge] query failed: ${error.message}`); return }
 
   const now = new Date()
-  const waiting = (rows || []).filter((r) => needsPlanNudge(r, now, PLAN_NUDGE_AFTER_MS))
+  // codex-lane rows plan themselves; never nudge Hermes for them.
+  const waiting = (rows || []).filter((r) => r.assigned_to !== 'codex' && needsPlanNudge(r, now, PLAN_NUDGE_AFTER_MS))
   if (waiting.length === 0) return
 
   // Read the ledger once. A read failure degrades to "announce anyway" — same fail-safe

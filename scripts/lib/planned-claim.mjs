@@ -5,5 +5,11 @@
 export function isClaimablePlanned(row, claimPlanned) {
   if (!claimPlanned) return false
   if (!row) return false
+  if (!isDispatcherRow(row)) return false
   return row.status === 'submitted' && row.phase === 'planned' && row.plan != null
 }
+
+// Rows assigned to the Codex builder lane are never the dispatcher's. Only 'codex' is
+// excluded: null/'claude'/'hermes' rows are all legitimately dispatcher work (Hermes-planned
+// rows are still assigned_to='hermes' at claim time).
+export function isDispatcherRow(row) { return !!row && row.assigned_to !== 'codex' }
