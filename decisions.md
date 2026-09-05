@@ -682,3 +682,15 @@ Also removed the reason that test had to race module side effects at all. Import
 **Held back deliberately (Codex should-fix, not blocking):**
 - **Fully non-blocking dispatch.** The call is still `await`ed (bounded to 3s by the timeout). Making it genuinely fire-and-forget in a Vercel serverless function needs `waitUntil()` — otherwise the runtime can kill the request before an unawaited background call completes. More machinery than justified for a single, rare, already-bounded 3s worst case.
 - **Extracting Telegram delivery into its own module.** One call site doesn't yet justify a shared abstraction; revisit if a third caller shows up.
+
+---
+
+## 2026-09-05 — Codex promoted to builder (reciprocal QC lane); main branch-protected; dispatcher skips codex rows
+
+**Decision:** Codex moves from reviewer-only to a full builder with parity to Claude Code. One invariant holds: nobody merges their own unreviewed work to main, and canonical persistence (merge to main, decisions.md, vault, mc_update_project_status) stays a single reviewed lane run by Claude Code — CodexQC in reverse, Codex builds, Claude reviews. Mechanically: a new MC worker identity codex (LIAISON_WORKERS), mc_submit_request accepts preferred_worker:'codex', the rig dispatcher and the Hermes plan-nudge skip any row with assigned_to='codex', and .gitattributes now forces LF on all text files. Branch protection on main (PR required, no direct pushes, applies to everyone including the operator and Claude) lands in the same change.
+
+**Reasoning:** GPT-6 Astra (released 2026-09-03) closes the capability gap that justified Codex as reviewer-only. This activates a lane rather than rewriting rules — the July decisions already allowed outside-model builds on isolated branches, and reciprocal QC has existed since 2026-07-05. What burned us on the 2026-08-01 Codex collision was hygiene and process (direct push to main, whole-file rewrites that mangled UTF-8 into mojibake, a dropped decisions.md entry, CRLF churn), not intelligence — and two of the guardrails that should have caught it were missing: main had no branch protection, and the LF-normalization fix never landed. Leaving David to keep Codex and Claude apart manually is founder-dependent and doesn't scale.
+
+**Consequence:** Files changed: lib/liaison-workflows.ts, lib/mcp-tools.ts, scripts/dispatcher.mjs, scripts/lib/planned-claim.mjs, tests/planned-claim.test.ts, .gitattributes, AGENTS.md, specs/2026-09-05-codex-builder-lane.md. Branch protection means all persistence commits now travel via a short-lived branch + PR that Claude merges immediately, including Claude's own session-end decisions.md pushes — no more direct pushes to main by anyone. The Hermes path is unchanged: rows assigned null/claude/hermes behave exactly as before. Unattended Codex builds are deferred (the adapter seam in scripts/lib/claude-executor-adapter.mjs is where that would plug in later). Codex's hygiene track record under this lane is to be judged over its first few PRs, not assumed fixed by process alone.
+
+**Made by:** David (GPT-6 Astra release + branch protection rollout) / Claude.
