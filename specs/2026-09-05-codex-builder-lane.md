@@ -9,6 +9,7 @@ Paste-ready handoff for a Codex session picking up build work directly against M
 - `mc_submit_request` accepts `preferred_worker: 'codex'` — creates a queued row with `assigned_to='codex'`.
 - The rig dispatcher (`scripts/dispatcher.mjs`) skips any row with `assigned_to='codex'` in `claimOne`, `claimPlannedOne`, and the Hermes plan-nudge (`isDispatcherRow` in `scripts/lib/planned-claim.mjs`).
 - `.gitattributes` forces LF line endings on all text files.
+- `supabase/migrations/027_codex_preferred_worker.sql` widens the `preferred_worker` CHECK to include `codex` (must be applied before the lane is used).
 - `main` is now branch-protected: PR required, no direct pushes, applies to everyone including the operator and Claude.
 - Invariant: nobody merges their own unreviewed work to main. Canonical persistence (merge to main, `decisions.md`, vault, `mc_update_project_status`) stays a single reviewed lane run by Claude Code.
 
@@ -18,7 +19,9 @@ You are a builder with write access to Mission Control via the full-token HTTP e
 
 ## The Hermes-skipped flow (step by step)
 
-1. **Get the build intent.** Either David hands it to you directly, or you pick up an existing queued row assigned to you.
+1. **Get the build intent — two cases, never both.**
+   - **Case A: David hands you the intent directly.** No MC row exists yet. You create one in step 2.
+   - **Case B: a queued row already exists, assigned to `codex`.** Check with `mc_get_request_status`, or David tells you the `request_id`. Do NOT call `mc_submit_request` — that would create a duplicate row. Go straight to `mc_claim_request(request_id, worker: 'codex')` and continue at step 2's PR/branch work.
 
 2. **Write the spec and open a draft PR.**
    ```
@@ -30,8 +33,8 @@ You are a builder with write access to Mission Control via the full-token HTTP e
    gh pr create --draft --title "<topic>" --body "Spec for review."
    ```
    Then call:
-   - `mc_submit_request(request_text: '<one-paragraph summary> — branch codex/<topic>, spec at specs/YYYY-MM-DD-<topic>.md', title: '<topic>', preferred_worker: 'codex', source: 'codex')` — returns `request_id`. Keep it; every later call needs it.
-   - `mc_claim_request(request_id, worker: 'codex')`
+   - `mc_submit_request(request_text: '<one-paragraph summary> — branch codex/<topic>, spec at specs/YYYY-MM-DD-<topic>.md', title: '<topic>', preferred_worker: 'codex', source: 'codex')` — Case A only; returns `request_id`. Keep it; every later call needs it.
+   - `mc_claim_request(request_id, worker: 'codex')` — Case A only (Case B already claimed the row in step 1).
    - `mc_post_progress(request_id, progress: 'SPEC READY FOR CLAUDE REVIEW: codex/<topic> specs/YYYY-MM-DD-<topic>.md')`
 
    Do not call `mc_request_approval` — that state is reserved for dispatcher-built attempts and there is no way back out of it for an interactive worker (v1 limitation, tracked).
@@ -69,7 +72,7 @@ You are a builder with write access to Mission Control via the full-token HTTP e
 ## Hygiene checklist before every push
 
 - LF line endings only — no CRLF churn.
-- No mojibake: `git diff origin/main...HEAD | grep -c $'\xc3\xa2\xe2\x82\xac'` must be `0`.
+- Mojibake quick check (a smoke check for the most common corruption pattern, not a complete encoding validation — also eyeball the diff for any non-ASCII garbage): `git diff origin/main...HEAD | grep -c $'\xc3\xa2\xe2\x82\xac'` must be `0`.
 - PowerShell equivalent: `(git diff origin/main...HEAD | Select-String -Pattern 'â€' -AllMatches).Matches.Count` must be `0`.
 - Surgical diffs — no whole-file rewrites.
 - Tests green.
@@ -89,3 +92,29 @@ You are a builder with write access to Mission Control via the full-token HTTP e
 - Your row shows status `awaiting_approval`: stop and flag David — that state cannot be exited by a worker tool.
 - You're asked to touch main, force-push, or edit `decisions.md`/`CLAUDE.md`/`AGENTS.md`: refuse and flag it — those are Claude's persistence lane, not yours.
 - You're asked to work in VZT outside this full gate: refuse and flag it.
+
+## Branch protection (verify / restore)
+
+Verify current protection on `main`:
+
+```
+gh api repos/davidbillera-lab/personal-os/branches/main/protection -q '{admins: .enforce_admins.enabled, pr: .required_pull_request_reviews.required_approving_review_count, force: .allow_force_pushes.enabled}'
+```
+
+Expect `admins: true`, `pr: 0`, `force: false`.
+
+Restore if it ever drifts, using a `protection.json` of:
+
+```json
+{"required_status_checks":null,"enforce_admins":true,"required_pull_request_reviews":{"required_approving_review_count":0},"restrictions":null,"allow_force_pushes":false,"allow_deletions":false,"required_linear_history":false}
+```
+
+```
+gh api -X PUT repos/davidbillera-lab/personal-os/branches/main/protection --input protection.json
+```
+
+## Known v1 limits (tracked follow-ups)
+
+- Codex uses the shared full-scope MC token; the hard rules above are prompt-level until a scoped `builder` key (allowlist: submit/claim/progress/blocked/status/vault-write only) exists — per-worker keys are already a Phase 2 hardening item from the 2026-07-30 decision.
+- No Telegram ping for this lane; approval is human, in chat or on the PR.
+- The dispatcher guard is unit-tested at the helper level only; there is no mocked-Supabase claim test yet.

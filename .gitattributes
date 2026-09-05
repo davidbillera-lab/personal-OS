@@ -1,8 +1,8 @@
+# Normalize line endings: every text file is LF in the repo. Stops the CRLF churn that
+# whole-file rewrites from other harnesses introduced (2026-08-01 collision).
+* text=auto eol=lf
+
 # Never apply CRLF conversion to CA certs — a security artifact the executor image
 # installs into its trust store. Keep byte-for-byte across platforms/clones.
 *.crt -text
 *.pem -text
-
-# Normalize line endings: every text file is LF in the repo. Stops the CRLF churn that
-# whole-file rewrites from other harnesses introduced (2026-08-01 collision).
-* text=auto eol=lf

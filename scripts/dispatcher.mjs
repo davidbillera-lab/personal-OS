@@ -44,7 +44,7 @@ import { notifyAwaitingApproval, notifyClassifierHold, notifyBuildFailed, notify
 import { pickAdapter } from './lib/claude-executor-adapter.mjs'
 import { classifyOps } from './lib/ops-classifier.mjs'
 import { sanitizeForMC } from './lib/sanitize-result.mjs'
-import { isClaimablePlanned, isDispatcherRow } from './lib/planned-claim.mjs'
+import { isClaimablePlanned, isDispatcherRow, DISPATCHER_ROW_FILTER } from './lib/planned-claim.mjs'
 import { needsPlanNudge, planNudgeKey, PLAN_NUDGE_AFTER_MS } from './lib/plan-nudge.mjs'
 import { resolveCloneTarget, cloneAllowlist } from './lib/clone-target.mjs'
 import { workSetEmpty, shouldSleep } from './lib/idle-sleep.mjs'
@@ -178,11 +178,11 @@ const clearResult = (requestId, attemptId) => clearAttemptResult(BUILDS_DIR, req
 
 // ---- Path A: atomic claim ----
 async function claimOne(sb) {
-  // Codex builder lane rows (assigned_to='codex') are claimed by Codex itself, never here;
-  // everything else (null/'claude'/'hermes') is unchanged dispatcher territory.
+  // Only null/claude/hermes rows are dispatcher territory; every other worker identity
+  // (codex, codex-qc, future lanes) claims its own rows, never here.
   const { data: candidates, error: selErr } = await sb
     .from('mc_requests').select('id, assigned_to')
-    .eq('status', 'queued').or('assigned_to.is.null,assigned_to.neq.codex').order('created_at', { ascending: true }).limit(1)
+    .eq('status', 'queued').or(DISPATCHER_ROW_FILTER).order('created_at', { ascending: true }).limit(1)
   if (selErr) throw new Error(`claim select failed: ${selErr.message}`)
   if (!candidates || candidates.length === 0) return null
   if (!isDispatcherRow(candidates[0])) return null
@@ -192,6 +192,7 @@ async function claimOne(sb) {
     .from('mc_requests')
     .update({ status: 'claimed', assigned_to: 'claude', phase: 'building', attempt_id: attemptId, updated_at: nowISO() })
     .eq('id', candidateId).eq('status', 'queued') // conditional: 0 rows ⇒ already claimed
+    .or(DISPATCHER_ROW_FILTER)
     .select('*').maybeSingle()
   if (updErr) throw new Error(`claim update failed: ${updErr.message}`)
   if (!claimed) { console.log(`[claim] lost race on ${candidateId} (already claimed) — backing off`); return null }
@@ -211,7 +212,7 @@ async function claimPlannedOne(sb) {
   const { data: candidates, error: selErr } = await sb
     .from('mc_requests').select('*')
     .eq('status', 'submitted').eq('phase', 'planned').not('plan', 'is', null)
-    .or('assigned_to.is.null,assigned_to.neq.codex')
+    .or(DISPATCHER_ROW_FILTER)
     .order('created_at', { ascending: true }).limit(1)
   if (selErr) throw new Error(`claim(planned) select failed: ${selErr.message}`)
   if (!candidates || candidates.length === 0) return null
@@ -226,6 +227,7 @@ async function claimPlannedOne(sb) {
     // assigned_to='claude', attempt_id set, updated_at bumped.
     .update({ status: 'claimed', assigned_to: 'claude', phase: 'building', attempt_id: attemptId, updated_at: nowISO() })
     .eq('id', candidate.id).eq('status', 'submitted').eq('phase', 'planned') // conditional: 0 rows ⇒ already claimed
+    .or(DISPATCHER_ROW_FILTER)
     .select('*').maybeSingle()
   if (updErr) throw new Error(`claim(planned) update failed: ${updErr.message}`)
   if (!claimed) { console.log(`[claim] lost race on planned ${candidate.id} (already claimed) — backing off`); return null }
@@ -521,8 +523,8 @@ async function nudgeUnplanned(sb) {
   if (error) { console.log(`[nudge] query failed: ${error.message}`); return }
 
   const now = new Date()
-  // codex-lane rows plan themselves; never nudge Hermes for them.
-  const waiting = (rows || []).filter((r) => r.assigned_to !== 'codex' && needsPlanNudge(r, now, PLAN_NUDGE_AFTER_MS))
+  // Rows owned by another worker lane plan themselves; never nudge Hermes for them.
+  const waiting = (rows || []).filter((r) => isDispatcherRow(r) && needsPlanNudge(r, now, PLAN_NUDGE_AFTER_MS))
   if (waiting.length === 0) return
 
   // Read the ledger once. A read failure degrades to "announce anyway" — same fail-safe

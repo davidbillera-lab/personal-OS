@@ -279,8 +279,8 @@ Codex is a full builder with parity to Claude Code, not just a reviewer. One inv
 
 The Hermes-skipped flow:
 
-1. David hands Codex a build intent, or Codex claims an existing queued row assigned to it.
-2. Codex writes a spec at `specs/YYYY-MM-DD-<topic>.md` on its own branch `codex/<topic>` in the real repo, pushes it, opens a draft PR, then calls `mc_submit_request(request_text, title, preferred_worker:'codex', source:'codex')` (returns `request_id`), `mc_claim_request(request_id, worker:'codex')`, and `mc_post_progress(request_id, progress: 'SPEC READY FOR CLAUDE REVIEW: ...')`. Do not call `mc_request_approval` — that state is reserved for dispatcher-built attempts and has no way out for an interactive worker (v1 limitation, tracked).
+1. Two cases, never both. Case A: David hands Codex a build intent directly — no MC row exists yet, Codex creates one in step 2. Case B: a queued row already exists assigned to `codex` (check `mc_get_request_status`, or David gives the `request_id`) — do NOT call `mc_submit_request` (it would create a duplicate row); go straight to `mc_claim_request(request_id, worker:'codex')` and continue at step 2's PR/branch work.
+2. Codex writes a spec at `specs/YYYY-MM-DD-<topic>.md` on its own branch `codex/<topic>` in the real repo, pushes it, opens a draft PR, then calls `mc_submit_request(request_text, title, preferred_worker:'codex', source:'codex')` — Case A only; returns `request_id` — `mc_claim_request(request_id, worker:'codex')` — Case A only — and `mc_post_progress(request_id, progress: 'SPEC READY FOR CLAUDE REVIEW: ...')`. Do not call `mc_request_approval` — that state is reserved for dispatcher-built attempts and has no way out for an interactive worker (v1 limitation, tracked).
 3. Claude reviews the spec against repo reality and comments on the PR or via `mc_post_progress`. Codex revises. Approval in v1 is human: David approves in the Codex chat or as a PR comment (the Telegram ping does not fire for this lane — David sees the draft PR via GitHub notifications).
 4. Codex builds on the same branch — surgical edits, one commit per piece, conventional messages, tests run, UTF-8/LF preserved, never touches main, never force-pushes, never edits `decisions.md`/`CLAUDE.md`/`AGENTS.md`. Codex marks the PR ready and calls `mc_post_progress(request_id, progress: 'PR READY FOR CLAUDE REVIEW: <PR url>')`.
 5. Claude reviews the PR diff (findings only, including an encoding/line-ending check) and Codex fixes on its branch, looping until clean. Approval in v1 is human: David gives final approval in the Codex chat or as a PR comment.
@@ -295,6 +295,14 @@ Rules for Codex:
 - If its row shows status `awaiting_approval`, stop and flag David — that state cannot be exited by a worker tool.
 
 Why not the dispatcher: the dispatcher is the unattended voice lane (Claude executor, sandbox repo, greenfield only, never clones) — Codex is an interactive session working directly in the real repo with the full MC token, which the dispatcher's sandbox model doesn't fit. Unattended Codex builds are a separate future trust decision; the adapter seam (`pickAdapter` in `scripts/lib/claude-executor-adapter.mjs`) is where that would plug in.
+
+What changed: `supabase/migrations/027_codex_preferred_worker.sql` widens the `preferred_worker` CHECK to include `codex` (must be applied before the lane is used).
+
+Hygiene: the mojibake check (`grep -c $'\xc3\xa2\xe2\x82\xac'` / PowerShell equivalent) is a quick smoke check for the most common corruption pattern, not a complete encoding validation — also eyeball the diff for any non-ASCII garbage.
+
+Branch protection (verify / restore): verify with `gh api repos/davidbillera-lab/personal-os/branches/main/protection -q '{admins: .enforce_admins.enabled, pr: .required_pull_request_reviews.required_approving_review_count, force: .allow_force_pushes.enabled}'` — expect `admins: true, pr: 0, force: false`. Restore with `gh api -X PUT repos/davidbillera-lab/personal-os/branches/main/protection --input protection.json` where `protection.json` is `{"required_status_checks":null,"enforce_admins":true,"required_pull_request_reviews":{"required_approving_review_count":0},"restrictions":null,"allow_force_pushes":false,"allow_deletions":false,"required_linear_history":false}`.
+
+Known v1 limits (tracked follow-ups): Codex uses the shared full-scope MC token, so the hard rules above are prompt-level until a scoped `builder` key (allowlist: submit/claim/progress/blocked/status/vault-write only) exists — a Phase 2 hardening item from the 2026-07-30 decision; no Telegram ping for this lane, approval is human in chat or on the PR; the dispatcher guard is unit-tested at the helper level only, with no mocked-Supabase claim test yet.
 
 See `specs/2026-09-05-codex-builder-lane.md` and `decisions.md` 2026-09-05.
 
