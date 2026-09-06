@@ -299,7 +299,7 @@ export const MCP_TOOLS: McpTool[] = [
         request_text:      { type: 'string', description: 'What Mission Control should do, in plain language.' },
         title:             { type: 'string', description: 'Optional short title for the request.' },
         priority:          { type: 'string', description: 'low | normal | high | urgent (default normal).' },
-        preferred_worker:  { type: 'string', description: 'auto | hermes | claude (default auto).' },
+        preferred_worker:  { type: 'string', description: 'auto | hermes | claude | codex (default auto).' },
         source:            { type: 'string', description: 'Origin, e.g. chatgpt_voice or chatgpt_text (default chatgpt_liaison).' },
         client_request_id: { type: 'string', description: 'Optional idempotency key — resubmitting the same id returns the existing request instead of a duplicate.' },
       },
@@ -458,7 +458,7 @@ export const MCP_TOOLS: McpTool[] = [
       type: 'object',
       properties: {
         request_id: { type: 'string', description: 'Exact Mission Control request UUID.' },
-        worker: { type: 'string', description: 'One of hermes, claude, or codex-qc.' },
+        worker: { type: 'string', description: 'One of hermes, claude, codex, or codex-qc.' },
       },
       required: ['request_id', 'worker'],
     },
@@ -500,7 +500,7 @@ export const MCP_TOOLS: McpTool[] = [
       type: 'object',
       properties: {
         request_id: { type: 'string', description: 'Request to claim.' },
-        worker:     { type: 'string', description: 'Claiming worker identity (e.g. claude, codex-qc).' },
+        worker:     { type: 'string', description: 'Claiming worker identity (e.g. claude, codex, codex-qc).' },
       },
       required: ['request_id', 'worker'],
     },
@@ -513,7 +513,7 @@ export const MCP_TOOLS: McpTool[] = [
       type: 'object',
       properties: {
         request_id: { type: 'string', description: 'Request to reassign.' },
-        worker:     { type: 'string', description: 'New assignee (hermes, claude, codex-qc).' },
+        worker:     { type: 'string', description: 'New assignee (hermes, claude, codex, codex-qc).' },
       },
       required: ['request_id', 'worker'],
     },
@@ -1273,7 +1273,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
 
     const title = args.title?.slice(0, 200) ?? null
     const priority = ['low', 'normal', 'high', 'urgent'].includes(args.priority ?? '') ? args.priority : 'normal'
-    const preferred_worker = ['auto', 'hermes', 'claude'].includes(args.preferred_worker ?? '') ? args.preferred_worker : 'auto'
+    const preferred_worker = ['auto', 'hermes', 'claude', 'codex'].includes(args.preferred_worker ?? '') ? args.preferred_worker : 'auto'
     const source = args.source?.slice(0, 40) ?? 'chatgpt_liaison'
     const client_request_id = args.client_request_id ?? null
 
