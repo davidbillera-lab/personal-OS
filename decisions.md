@@ -694,3 +694,15 @@ Also removed the reason that test had to race module side effects at all. Import
 **Consequence:** Files changed: lib/liaison-workflows.ts, lib/mcp-tools.ts, scripts/dispatcher.mjs, scripts/lib/planned-claim.mjs, tests/planned-claim.test.ts, .gitattributes, AGENTS.md, specs/2026-09-05-codex-builder-lane.md, supabase/migrations/027_codex_preferred_worker.sql. Branch protection means all persistence commits now travel via a short-lived branch + PR that Claude merges immediately, including Claude's own session-end decisions.md pushes — no more direct pushes to main by anyone. The ownership model is now an explicit allowlist (rows assigned to null/claude/hermes are dispatcher territory, everything else including codex/codex-qc is not), enforced in both the select and the atomic conditional update, closing the earlier select-then-update race. The Hermes path is unchanged: rows assigned null/claude/hermes behave exactly as before. Three tracked follow-ups: (1) Codex still uses the shared full-scope MC token pending a scoped builder key, (2) no Telegram ping for this lane, approval is human, (3) the dispatcher guard is unit-tested at the helper level only, no mocked-Supabase claim test yet. Unattended Codex builds are deferred (the adapter seam in scripts/lib/claude-executor-adapter.mjs is where that would plug in later). Codex's hygiene track record under this lane is to be judged over its first few PRs, not assumed fixed by process alone.
 
 **Made by:** David (GPT-6 Astra release + branch protection rollout) / Claude.
+
+---
+
+## 2026-09-05 — GitHub Pro purchased; branch protection rolled out portfolio-wide
+
+**Decision:** Upgrade the davidbillera-lab account to GitHub Pro so private repos can carry branch protection, then apply one rule set to every portfolio trunk: PR required (0 approvals), enforced for admins, no force-push, no deletion. Applied 2026-09-05 to `vendor-zen-tool/main` (VZT, first), `haunted-threads/master`, `FlipRadar/master`, `liquidation-motivation-portal/main`, and `personal-OS/main` (earlier the same day). `video-optimizer-app` deliberately left alone (not a portfolio asset); `moms-morning-light` pending operator call.
+
+**Reasoning:** The Codex builder lane replaces "the operator keeps agents apart by memory" with mechanical enforcement, and that only holds if every trunk is protected. Before this, VZT — the protected Tier 1 project — was guarded by a sentence in a markdown file. $4/month is cheaper than one more 2026-08-01-style collision.
+
+**Consequence:** Nobody pushes to a trunk directly, including Claude at session end; persistence commits travel via a short-lived branch + PR (this entry is the first). Verify/restore commands are in `specs/2026-09-05-codex-builder-lane.md`. **Open flag:** `vendor-zen-tool` has its GitHub default branch set to the stale `claude/debug-doa-automation-6YiEc` (last commit 2026-07-02) while the real trunk is `main` (2026-08-22); new PRs there default to the wrong base. Not changed here because the default branch can drive Vercel production — fix deliberately in a VZT session.
+
+**Made by:** operator + agent
