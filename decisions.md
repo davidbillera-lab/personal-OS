@@ -740,3 +740,17 @@ Also removed the reason that test had to race module side effects at all. Import
 **Held back deliberately (Codex should-fix, not blocking):**
 - **Fully non-blocking dispatch.** The call is still `await`ed (bounded to 3s by the timeout). Making it genuinely fire-and-forget in a Vercel serverless function needs `waitUntil()` — otherwise the runtime can kill the request before an unawaited background call completes. More machinery than justified for a single, rare, already-bounded 3s worst case.
 - **Extracting Telegram delivery into its own module.** One call site doesn't yet justify a shared abstraction; revisit if a third caller shows up.
+
+### 2026-09-10 — Second MCP_API_KEY leak: rotated, revoked by deletion, guardrails moved to the enforced layer
+
+**Decision:** Rotated `MCP_API_KEY`, deleted all 7 superseded production deployments to actually revoke the old value, and moved secret-handling enforcement from the prompt layer to `permissions.deny` in `.claude/settings.local.json`. Added a `secret-hygiene` skill and an auto-memory entry as backstops, explicitly not as the control.
+
+**Reasoning:** Claude Code ran `cat .claude/settings.local.json` to read the `permissions` block; the file's `env` block carries `MCP_API_KEY`, so a full-write MC token — one that also reaches `mc_get_credential` and therefore the whole credential vault — landed in the session transcript. Second occurrence of this class after the 2026-08-23 `service_role` leak.
+
+The uncomfortable part is that global rule #10, written after the first leak and naming this exact pattern, was loaded in context when it happened. The rule does not fire because the agent is thinking about the unrelated task, not about secrets; the whole-file read is the reflex. A prompt-layer rule is therefore not a control here. Every mechanism that actually stopped something during the incident was mechanical — the auto-mode classifier blocked the vault-token decrypt, `supabase projects create`, self-granting a permission rule, and `vercel remove`. `permissions.deny` is the same kind of mechanism, so the deny list (including a rule against reading this very file) is the real remediation and the skill is documentation.
+
+Containment confirmed end to end: new key generated client-side via CSPRNG and never transiting a transcript; Vercel env rotated (Production-only, Preview/Development confirmed absent); MC vault credential row updated; redeploy verified live at `personal-os-six-topaz.vercel.app` → `personal-msctxd4il-jsg1`; 7 stale production deployments deleted, leaving exactly one. Deployment enumeration was checked for a second page — the 2026-08-23 sweep missed deployments because `vercel ls` paginates. The 13 preview deployments were left alone: `MCP_API_KEY` does not exist in the Preview environment, so `requireBearer` returns 503 there rather than authenticating.
+
+**Still open, and the actual fix:** `lib/api-auth.ts:11-17` remains a static `process.env.MCP_API_KEY` compare, so every key issued is unrevocable by design — closing this leak required a rotation, a redeploy, and seven deletions rather than one statement. Phase 2 of `specs/2026-08-23-mc-security-hardening.md` (datastore-backed keys with `revoked_at`) has now been deferred through two incidents. Prioritize it above feature work.
+
+**Made by:** operator + agent
