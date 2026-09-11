@@ -20,7 +20,7 @@ export function lookupApiKey(token: string): Promise<KeyLookup> {
 }
 
 export function bearerToken(req: Request): string {
-  return (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '')
+  return /^Bearer\s+(\S+)$/i.exec(req.headers.get('authorization') || '')?.[1] ?? ''
 }
 
 /**
