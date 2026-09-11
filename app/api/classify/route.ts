@@ -4,7 +4,7 @@ import { requireBearer } from '@/lib/api-auth'
 import { classifyBrainDump } from '@/lib/classify'
 
 export async function POST(req: Request) {
-  const denied = requireBearer(req)
+  const denied = await requireBearer(req)
   if (denied) return denied
 
   let body: unknown

@@ -4,7 +4,7 @@ import { requireBearer } from '@/lib/api-auth'
 import type { KillVerdict } from '@/lib/types'
 
 export async function POST(req: NextRequest) {
-  const denied = requireBearer(req)
+  const denied = await requireBearer(req)
   if (denied) return denied
 
   try {

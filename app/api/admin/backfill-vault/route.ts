@@ -1,5 +1,6 @@
 ﻿import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabaseClient } from '@/lib/supabase'
+import { requireBearer } from '@/lib/api-auth'
 import { captureToVault } from '@/lib/vault'
 import type { VaultItemType } from '@/lib/types'
 
@@ -27,12 +28,8 @@ async function existingSourceIds(
 }
 
 export async function POST(req: NextRequest) {
-  // Simple admin auth — same pattern as the MCP + seed-skills routes.
-  const auth = req.headers.get('Authorization') ?? ''
-  const token = auth.replace('Bearer ', '')
-  if (token !== process.env.MCP_API_KEY) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  const denied = await requireBearer(req)
+  if (denied) return denied
 
   const supabase = createAdminSupabaseClient()
   const results: Record<string, TableResult> = {}

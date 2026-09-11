@@ -4,7 +4,7 @@ import { requireBearer } from '@/lib/api-auth'
 import { routeTask } from '@/lib/models/router'
 
 export async function POST(req: Request) {
-  const denied = requireBearer(req)
+  const denied = await requireBearer(req)
   if (denied) return denied
 
   let body: unknown
