@@ -754,3 +754,17 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 **Still open, and the actual fix:** `lib/api-auth.ts:11-17` remains a static `process.env.MCP_API_KEY` compare, so every key issued is unrevocable by design — closing this leak required a rotation, a redeploy, and seven deletions rather than one statement. Phase 2 of `specs/2026-08-23-mc-security-hardening.md` (datastore-backed keys with `revoked_at`) has now been deferred through two incidents. Prioritize it above feature work.
 
 **Made by:** operator + agent
+
+### 2026-09-10 follow-up — MCP API keys are now datastore-backed and revocable with one UPDATE
+
+**Decision:** Shipped Phase 2 (M0) of `specs/2026-08-23-mc-security-hardening.md` §3.2. New table `mcp_api_keys` (migration 027) stores only the SHA-256 of each key plus scope, actor, `expires_at`, `revoked_at`; RLS on, no policies, service role only. Every caller that trusted `MCP_API_KEY` — `/api/mcp`, `classify`, `kill-criteria`, `route-task`, and the three admin routes — now goes through `lookupApiKey` in `lib/api-auth.ts`, backed by a 60s per-hash cache (`lib/mcp-key-cache.ts`). Revoke is `UPDATE mcp_api_keys SET revoked_at = now() WHERE name = '…'`.
+
+**Reasoning / rules of the lookup:** A row for the presented hash decides. An active row grants its scope; a revoked or expired row is rejected even if an env compare would match, so revoking the seeded row kills the current key on every current deployment even while the fallback exists. The env compares (`MCP_API_KEY` and the three per-agent JSON maps) run only when no row exists — that is the M0 fallback, kept so Hermes's orchestrator/read keys keep working until they are seeded. If the datastore is unreachable, fail closed with 503 and no env fallback: every MCP tool needs the DB anyway, and an outage must not reopen the unrevocable path.
+
+**Verified on a live deployment** (`personal-l4r4dhbbf-jsg1`, preview of `696805b`; Preview has no `MCP_API_KEY`, so the datastore was the only path): a throwaway read-scope test key returned 200/21 tools; the seeded row for the current full key returned 200/41 tools, proving the seed matches the key clients use; after `revoked_at` was set, the same test key returned 401 once the 60s cache window passed.
+
+**Side effect to know:** preview deployments used to 503 on every MCP call (no env key); they now honor datastore keys. They remain behind Deployment Protection.
+
+**Still open:** M1 — seed or re-mint Hermes's orchestrator/read keys and Codex's key as rows, then mint fresh keys that live only as hashes. M2 — delete the env fallback branch and remove `MCP_API_KEY` from Vercel env, only after every client is confirmed green on a row. `last_used_at` and `/api/mcp` rate limiting (F8) were deliberately left out of this cut.
+
+**Made by:** operator + agent
