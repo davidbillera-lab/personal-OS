@@ -1136,6 +1136,169 @@ export const runbooks: Runbook[] = [
       notes: 'The OS is a swappable command layer — repos are the source of truth. If Mission Control becomes a liability (too fragile, too expensive, better tool emerges), the context survives in git.',
     },
   },
+
+  {
+    slug: 'haunted-threads',
+    name: 'Haunted Threads After Dark',
+    tagline: 'Nicole\'s on-camera horror storytelling channel, editorial dashboard, and daily delivery system.',
+    description:
+      'A horror storytelling channel on TikTok and YouTube Shorts, plus the private tool that feeds it. Every morning an automated crawl finds scary stories, scores them, and emails Nicole a digest. She reviews them in a private dashboard, picks what she likes, and performs them on camera herself. The channel is the asset; the app is its production multiplier.',
+    tier: 3,
+    stage: 'active',
+    emoji: '🕯️',
+    revenue_model: 'Pre-monetization channel growth asset',
+    chapters: [
+      {
+        id: 'what',
+        icon: '🕯️',
+        title: 'What Is Haunted Threads After Dark?',
+        type: 'text',
+        content:
+          'Haunted Threads After Dark is a horror storytelling channel on TikTok and YouTube Shorts. Nicole reads every story herself, ON CAMERA, in her own voice. It is not a faceless voiceover channel — that distinction matters, because it means the story text is a SCRIPT she performs, not an article. It has to sound natural spoken aloud by a real person on screen.\n\nSupporting the channel is a private editorial tool. Every morning it crawls approved sources (Reddit, the Creepypasta Wiki, and Wikisource), filters out blacklisted genres, scores what is left, checks each story against a 10-minute reading budget, generates a content kit (video title, 3-second hook, hashtags, and a one-line "why this hits"), and emails Nicole a digest. She logs into a password-protected dashboard, reads the picks, and banks, passes, or posts them.\n\nNothing is ever published automatically. There is no code path from "story selected" to "video live," and there must never be one. Every post is a deliberate human act by Nicole.\n\nThe channel is the asset. The app is its production multiplier and is not marketable as SaaS — the advisory board settled that in July 2026. The binding constraint on the business is followers (a 10k gate for monetization), not views and not tooling.',
+      },
+      {
+        id: 'roles',
+        icon: '👥',
+        title: 'Who Does What',
+        type: 'roles',
+        roles: [
+          {
+            who: 'Nicole',
+            does: 'Editorial lead and on-camera performer. Reviews every story, decides what gets banked, passed, or posted, records and publishes to TikTok/YouTube, and sets her own channel preferences. She is the only person who decides what goes out.',
+            level: 'full',
+          },
+          {
+            who: 'David',
+            does: 'Owner and architect. Sole approval authority for deploys, credential changes, source decisions, merges, and spend. Every escalation path in the system currently terminates here.',
+            level: 'full',
+          },
+          {
+            who: 'JJ (emergency maintainer)',
+            does: 'Technical diagnosis and emergency response if David is unavailable. Reads logs, verifies deploys, restores auth. Does not rotate credentials, change sources, or deploy without David.',
+            level: 'limited',
+          },
+          {
+            who: 'Vinnie (execution cover)',
+            does: 'Follows the click-by-click runbooks in the repo. Collects evidence and escalates. Changes no code, configuration, credential, or permission — ever.',
+            level: 'limited',
+          },
+          {
+            who: 'AI systems (Haiku, Gemini Flash)',
+            does: 'Score and filter candidate stories, clean text lightly without rewriting it, generate content kits, transcribe video, and answer library lookups. They select and prepare. They never write the channel\'s published voice and never publish anything.',
+            level: 'view-only',
+          },
+        ],
+      },
+      {
+        id: 'flow',
+        icon: '📋',
+        title: 'The Daily Editorial Flow',
+        type: 'steps',
+        intro:
+          'Two completely separate things email Nicole every day, and confusing them is the most common way to debug the wrong system. Steps 1–5 are the source/digest pipeline this repo owns. Step 6 is an entirely different, externally-run workflow.',
+        steps: [
+          {
+            title: 'The morning crawl runs',
+            detail: 'Around 6am Mountain, the pipeline pulls candidate stories from Reddit, the Creepypasta Wiki, and Wikisource, filters the genre blacklist, scores what is left, picks roughly 3 fresh stories plus 1–2 all-time greats, and generates a content kit for each.',
+            warning: 'The crawl runs from David\'s Windows machine on a scheduled task, not from the cloud — the story source blocks data-center IPs. If that machine is off or asleep overnight, no crawl happens and the cloud cron does NOT cover for it. This is the single largest bus-factor risk in the system.',
+          },
+          {
+            title: 'Nicole gets a digest email',
+            detail: 'A dark-styled email listing the day\'s picks with a link to the dashboard. If it does not arrive, the stories may still be in the dashboard — email and crawl fail independently, so always check the dashboard before concluding the crawl failed.',
+            tip: 'If the email lands in spam, mark it Not Spam and tell David — that is worth knowing.',
+          },
+          {
+            title: 'She reviews in the dashboard',
+            detail: 'Today\'s Haunt opens on the newest crawl only — usually 5–9 stories. Older untriaged stories fold into an "Earlier — not yet triaged" section. For each story she reads the hook, expands the full text and reads a few lines out loud, checks the timing breakdown against the 10-minute ceiling, and reviews the content kit.',
+            tip: 'The ⏸ marks in the story text are her re-record points — when a take goes wrong she restarts from the nearest one instead of the top.',
+          },
+          {
+            title: 'She gives every story a decision',
+            detail: 'To Post Today, Bank for Later, Posted, or Pass. Thumbs up/down plus a note steers future crawls. Nothing is ever deleted and every decision is reversible — a passed story lives in the Passed section and can always come back.',
+          },
+          {
+            title: 'She records and posts manually',
+            detail: 'Nicole performs the story on camera and publishes to TikTok and/or YouTube herself. Then she pastes the real video link into the Drafts view, which is what moves it to the public archive.',
+            warning: 'Nothing reaches the public archive until she pastes a real video link. No video is ever published by this system.',
+          },
+          {
+            title: 'Separately: original-fiction PDF drafts arrive',
+            detail: 'A different, externally-run workflow emails Nicole PDF drafts of ORIGINAL FICTION written for the channel. These never enter the app, never appear in the dashboard, and are never posted automatically. They are review-only drafts — she decides use, hold, revise, or reject.',
+            warning: 'Never conflate this with the story digest. Different system, different sender, different failure domain. "No PDF today" does not block the channel; "no digest today" is a different problem entirely. And original fiction is never presented as a real account or case file — that is a reject, not a revise.',
+          },
+        ],
+      },
+      {
+        id: 'scenarios',
+        icon: '🔀',
+        title: 'Common Situations',
+        type: 'scenarios',
+        scenarios: [
+          {
+            if: 'Nicole did not get the daily email',
+            then: 'Check spam first, then check the dashboard — that is the step that tells you what actually broke. If today\'s stories ARE in the dashboard, only the email failed and she can work normally. If the newest story is from yesterday or older, the crawl did not run (often because David\'s machine was off overnight). Collect evidence and report. Do NOT trigger, re-run, or reschedule anything.',
+            who: 'Nicole or Vinnie diagnoses; David repairs. Full steps in the repo at docs/runbooks/02-daily-delivery-missing-or-wrong.md',
+          },
+          {
+            if: 'A story is unsafe — gore, a child harmed, or a real identifiable person',
+            then: 'STOP FIRST, PRESERVE, THEN ESCALATE. Do not record it, do not post it, and do not delete or edit anything — deleting destroys the evidence that protects the channel. Screenshot everything with timestamps, then mark the story Pass, then call David and JJ. If a real person is already exposed publicly, that is CRITICAL and time-sensitive.',
+            who: 'Anyone can and should invoke this. It overrides every other procedure and every schedule.',
+          },
+          {
+            if: 'Nicole cannot log in',
+            then: 'Retype the password rather than trusting autofill, try a private window, try another device. If it still fails, ask David for the current password — do NOT reset it and do NOT change who is allowed to log in. Meanwhile she can still record and post from stories already reviewed; losing dashboard access for a day does not stop the channel.',
+            who: 'Nicole or Vinnie; only David can restore access',
+          },
+          {
+            if: 'The dashboard opens with NO login required',
+            then: 'Security incident — stop working immediately. Screenshot it, do not sign out, do not reset anything, and call David. This happened in July 2026: a change removed login from the whole app and live story data sat publicly reachable and Google-indexed for eight days. Auth now has two independent guards specifically so it cannot recur quietly.',
+            who: 'Anyone who notices → David immediately, JJ in parallel',
+          },
+          {
+            if: 'Someone claims copyright, or an author asks for a story to be taken down',
+            then: 'Preserve the entire message and do not reply — not even an apology. Mark the story Pass if it is not yet published. If it IS published, screenshot it before anything else and do not delete it yet. Escalate to David and JJ.',
+            who: 'David decides the response. Never reply on the channel\'s behalf.',
+          },
+          {
+            if: 'The crawl keeps coming back dry, or the stories are consistently weak',
+            then: 'Do not add a source, scrape, or work around a rate limit — a dry source is an escalation, not an engineering problem. Several weak days in the SAME way is a scoring or steering problem, not bad luck. Report it. Nicole works from Banked in the meantime; that is what the bank is for.',
+            who: 'David decides on any source change',
+          },
+          {
+            if: 'David is unreachable for more than 24 hours',
+            then: 'Almost nothing here is urgent. Nicole keeps working from Banked, holds anything uncertain, and stops rather than improvising. Never deploy, rotate a credential, change who can log in, turn off auth, change a source, or send anything external. Keep one running evidence document. The only genuine emergency is the dashboard becoming publicly reachable — that goes to JJ immediately.',
+            who: 'JJ. NOTE: no backup approver is currently named — this is the largest open gap in the succession plan.',
+          },
+        ],
+      },
+      {
+        id: 'stop',
+        icon: '🛑',
+        title: 'When to Stop and Escalate',
+        type: 'text',
+        content:
+          'Stopping is always allowed, never needs approval, and is never the wrong call. Nobody is ever in trouble for stopping — people are in trouble for continuing.\n\nSTOP IMMEDIATELY AND CALL DAVID if: the dashboard is reachable without logging in; an editorial page turns up in a Google search; someone claims copyright or asks for a takedown; a story involves gore, a child being harmed, or a real identifiable person; content was published by mistake; or you suspect someone unauthorized has access.\n\nNEVER DO THESE WITHOUT DAVID, no matter how urgent it feels: deploy or merge anything; change, reset, or rotate any password, key, or secret; reveal or paste a credential anywhere, even to someone helping; change who can log in; turn login off, even briefly; add, remove, or work around a story source; change a scheduled task; send a mass email or reply to a submitter on the channel\'s behalf; publish content that has not been cleared; delete a story, post, submission, or message; or spend money.\n\nIf the only remaining option is on that list, the correct action is to stop and wait.\n\nTWO RULES THAT APPLY EVERYWHERE. First: preserve before you repair — screenshot and write it down BEFORE changing anything, because a repair that destroys the evidence turns a one-hour diagnosis into a week of guessing. Second: no secret ever goes into a report, screenshot, message, document, or commit — and if one has already leaked, say so immediately and unprompted.\n\nThe system was built so nothing is ever lost: stories are never deleted, decisions are reversible, and the library is permanent. That design holds in an emergency too. Hold, do not guess. A quiet week costs the channel almost nothing; one irreversible mistake can cost it everything.',
+      },
+    ],
+    technical: {
+      stack: ['Next.js 16 (App Router)', 'Tailwind CSS v4', 'Supabase (Postgres + Auth + Storage)', 'Vercel', 'TypeScript'],
+      integrations: [
+        'Anthropic Claude API (Haiku only — scoring, filtering, cleaning, content kits, library lookups)',
+        'Google Gemini Flash (video/TikTok transcription only — the one approved non-Haiku exception)',
+        'Resend (daily digest email + public submission notifications)',
+        'Reddit RSS (primary source — official OAuth API access was applied for and permanently denied)',
+        'Creepypasta Wiki via MediaWiki API (CC-BY-SA, attribution required)',
+        'Wikisource via MediaWiki API (public domain classics)',
+        'Windows Task Scheduler on David\'s machine (runs the real daily crawl from a residential IP)',
+      ],
+      how_it_works:
+        'Next.js on Vercel with Supabase behind it. The daily pipeline (lib/pipeline.ts) is triggered by GET /api/cron/daily, gated by a bearer secret. It reads Nicole\'s preferences and feedback as steering, fetches from three sources, filters the genre blacklist, dedupes, scores and selects with Haiku, then cleans the text, computes the timing budget, and generates a content kit before upserting to Supabase and sending the digest via Resend.\n\nThe public surface is exactly three things: the landing page, the archive of posted videos, and the story submission endpoint. Everything else — the whole dashboard and every other API route — requires an allowlisted Supabase session or the cron secret. Auth is enforced twice on purpose: the Next.js proxy gates page routes, and the dashboard layout re-checks server-side and never fetches data before the check. The allowlist FAILS CLOSED — if it is unset, nobody gets in.\n\nA note a successor must not miss: the Vercel cron exists but is likely a no-op, because Reddit RSS blocks data-center IPs. The crawl that actually runs is a Windows scheduled task on David\'s machine that boots the app locally, hits the cron route from a residential IP, and writes to production. A watchdog retries at 8am, noon, and 4pm if the morning failed.',
+      owner: 'David (architecture + approvals) + Nicole (editorial, on-camera, publishing)',
+      repo: 'github.com/davidbillera-lab/haunted-threads',
+      notes:
+        'The full succession package lives in the repo: docs/operator/ for JJ-tier technical maintenance (system overview, editorial production and quality, exit readiness and recovery map, runbook maintenance policy) and docs/runbooks/ for click-by-click execution-only recovery (daily operation, missing delivery, login and submissions, rights and safety stop, emergency handover). Start at docs/runbooks/README.md.\n\nThis card contains no credentials and never will. Credential NAMES and their vault locations are inventoried in docs/operator/exit-readiness-and-recovery-map.md; values live in Vercel project settings and David\'s password manager.\n\nOpen gaps flagged 2026-09-12, all requiring David: no backup approver is named; JJ\'s actual access to GitHub/Vercel/Supabase is unconfirmed; Supabase backup and restore are unverified; a hardcoded bearer token sits in scripts/run-daily-local.ps1; the daily crawl depends on one physical machine staying awake; and the external six-lane original-fiction workflow has no artifact in any repository. Next review: 2026-12-12.',
+    },
+  },
 ]
 
 export function getRunbook(slug: string): Runbook | undefined {
