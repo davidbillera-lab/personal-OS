@@ -1173,8 +1173,8 @@ export const runbooks: Runbook[] = [
             level: 'full',
           },
           {
-            who: 'JJ (emergency maintainer)',
-            does: 'Technical diagnosis and emergency response if David is unavailable. Reads logs, verifies deploys, restores auth. Does not rotate credentials, change sources, or deploy without David.',
+            who: 'JJ (emergency maintainer + backup approver)',
+            does: 'Technical diagnosis and emergency response. Designated backup approver as of 2026-09-12: once David has been unreachable more than 24 hours, JJ can approve restoring auth, responding to a copyright or safety incident, and taking down content that exposes a real person. Credential rotation, source changes, spend, and new access still wait for David.',
             level: 'limited',
           },
           {
@@ -1267,7 +1267,7 @@ export const runbooks: Runbook[] = [
           {
             if: 'David is unreachable for more than 24 hours',
             then: 'Almost nothing here is urgent. Nicole keeps working from Banked, holds anything uncertain, and stops rather than improvising. Never deploy, rotate a credential, change who can log in, turn off auth, change a source, or send anything external. Keep one running evidence document. The only genuine emergency is the dashboard becoming publicly reachable — that goes to JJ immediately.',
-            who: 'JJ. NOTE: no backup approver is currently named — this is the largest open gap in the succession plan.',
+            who: 'JJ — designated backup approver as of 2026-09-12. He can approve restoring auth and responding to a safety or copyright incident; credential rotation, source changes, and spend still wait for David. NOTE: JJ\'s actual access is not yet confirmed and a backup dashboard login has not been provisioned, so the designation is currently on paper only.',
           },
         ],
       },
@@ -1296,7 +1296,7 @@ export const runbooks: Runbook[] = [
       owner: 'David (architecture + approvals) + Nicole (editorial, on-camera, publishing)',
       repo: 'github.com/davidbillera-lab/haunted-threads',
       notes:
-        'The full succession package lives in the repo: docs/operator/ for JJ-tier technical maintenance (system overview, editorial production and quality, exit readiness and recovery map, runbook maintenance policy) and docs/runbooks/ for click-by-click execution-only recovery (daily operation, missing delivery, login and submissions, rights and safety stop, emergency handover). Start at docs/runbooks/README.md.\n\nThis card contains no credentials and never will. Credential NAMES and their vault locations are inventoried in docs/operator/exit-readiness-and-recovery-map.md; values live in Vercel project settings and David\'s password manager.\n\nOpen gaps flagged 2026-09-12, all requiring David: no backup approver is named; JJ\'s actual access to GitHub/Vercel/Supabase is unconfirmed; Supabase backup and restore are unverified; a hardcoded bearer token sits in scripts/run-daily-local.ps1; the daily crawl depends on one physical machine staying awake; and the external six-lane original-fiction workflow has no artifact in any repository. Next review: 2026-12-12.',
+        'The full succession package lives in the repo: docs/operator/ for JJ-tier technical maintenance (system overview, editorial production and quality, exit readiness and recovery map, runbook maintenance policy) and docs/runbooks/ for click-by-click execution-only recovery (daily operation, missing delivery, login and submissions, rights and safety stop, emergency handover). Start at docs/runbooks/README.md.\n\nThis card contains no credentials and never will. Credential NAMES and their vault locations are inventoried in docs/operator/exit-readiness-and-recovery-map.md; values live in Vercel project settings and David\'s password manager.\n\nStatus of the gaps flagged 2026-09-12. RESOLVED: JJ is the designated backup approver. STILL OPEN, all requiring David: JJ\'s actual access to GitHub/Vercel/Supabase is unconfirmed, and a backup dashboard login for him is approved in principle but not yet provisioned, so the designation is currently on paper only; Supabase backup and restore are unverified, and the stories library is the only part of this system that could not be rebuilt in a weekend; the hardcoded bearer token in scripts/run-daily-local.ps1 was confirmed to be the LIVE local cron secret rather than a stale placeholder (mitigating context: private repo, one commit of history, and the production endpoint correctly rejects unauthenticated requests); the daily crawl still depends on one physical machine staying awake, with a VPS migration under consideration; and the external six-lane original-fiction workflow has no artifact in any repository. Next review: 2026-12-12.',
     },
   },
 ]
