@@ -3,8 +3,13 @@ import Anthropic from '@anthropic-ai/sdk'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { calcCost } from '@/lib/models/pricing'
 import { captureToVault } from '@/lib/vault'
+import { requireEnv } from '@/lib/env'
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+let _anthropic: Anthropic | null = null
+function anthropicClient() {
+  if (!_anthropic) _anthropic = new Anthropic({ apiKey: requireEnv('ANTHROPIC_API_KEY') })
+  return _anthropic
+}
 const MODEL = 'claude-sonnet-4-6'
 
 const SYSTEM_PROMPT = `You are the Advisory Board for a solo AI-native holdco operator. Four personas respond together to every message.
@@ -133,7 +138,7 @@ Brain dump (type: ${dump.classified_type ?? 'unclassified'}):
       }
     }
 
-    const response = await anthropic.messages.create({
+    const response = await anthropicClient().messages.create({
       model: MODEL,
       max_tokens: 2048,
       system: SYSTEM_PROMPT,

@@ -1,9 +1,10 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import type { AdapterResponse } from './anthropic'
+import { requireEnv } from '@/lib/env'
 
 let _client: GoogleGenerativeAI | null = null
 function client() {
-  if (!_client) _client = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY!)
+  if (!_client) _client = new GoogleGenerativeAI(requireEnv('GOOGLE_AI_API_KEY'))
   return _client
 }
 

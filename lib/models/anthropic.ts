@@ -1,10 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { requireEnv } from '@/lib/env'
 
 export type AdapterResponse = { text: string; tokens_in: number; tokens_out: number }
 
 let _client: Anthropic | null = null
 function client() {
-  if (!_client) _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  if (!_client) _client = new Anthropic({ apiKey: requireEnv('ANTHROPIC_API_KEY') })
   return _client
 }
 

@@ -1,9 +1,10 @@
 import OpenAI from 'openai'
 import type { AdapterResponse } from './anthropic'
+import { requireEnv } from '@/lib/env'
 
 let _client: OpenAI | null = null
 function client() {
-  if (!_client) _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  if (!_client) _client = new OpenAI({ apiKey: requireEnv('OPENAI_API_KEY') })
   return _client
 }
 

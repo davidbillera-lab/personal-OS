@@ -1,11 +1,12 @@
 ﻿import OpenAI from 'openai'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { encrypt } from '@/lib/crypto'
+import { requireEnv } from '@/lib/env'
 import type { VaultItem, VaultItemType } from '@/lib/types'
 
 let _openai: OpenAI | null = null
 function openaiClient() {
-  if (!_openai) _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  if (!_openai) _openai = new OpenAI({ apiKey: requireEnv('OPENAI_API_KEY') })
   return _openai
 }
 

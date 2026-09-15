@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
+import { cleanEnv } from '@/lib/env'
 import { callTool, toolsForScope, isToolAllowed, type McpTokenScope } from '@/lib/mcp-tools'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 
@@ -24,23 +25,23 @@ function auditRequestId(args: Record<string, string | undefined>): string | null
     : null
 }
 
-const MCP_API_KEY = process.env.MCP_API_KEY
+const MCP_API_KEY = cleanEnv('MCP_API_KEY')
 // Legacy single read-only token. When set, it grants access to read-scoped tools
 // only and is now mapped to the actor "hermes" (its original consumer). Kept for
 // back-compat so Hermes never breaks; new per-agent keys live in MCP_READONLY_KEYS.
-const MCP_READONLY_API_KEY = process.env.MCP_READONLY_API_KEY
+const MCP_READONLY_API_KEY = cleanEnv('MCP_READONLY_API_KEY')
 // Per-agent read-only keys as a JSON object of { actor: key }, e.g.
 // {"hermes":"...","chatgpt-liaison":"..."}. Each key grants the read scope; the
 // matched actor name is stamped into the audit log so we can tell callers apart.
-const MCP_READONLY_KEYS = process.env.MCP_READONLY_KEYS
+const MCP_READONLY_KEYS = cleanEnv('MCP_READONLY_KEYS')
 // Per-agent liaison keys as a JSON object of { actor: key }. A liaison key grants
 // the narrow 'liaison' scope (request-queue tools only) — the ChatGPT chief-of-
 // staff surface. Same shape as MCP_READONLY_KEYS.
-const MCP_LIAISON_KEYS = process.env.MCP_LIAISON_KEYS
+const MCP_LIAISON_KEYS = cleanEnv('MCP_LIAISON_KEYS')
 // Per-agent orchestrator keys as a JSON object of { actor: key }. An orchestrator
 // key grants the 'orchestrator' scope — every read tool plus exactly the two
 // routing writes (claim + reassign). Hermes's dispatcher role. Same shape.
-const MCP_ORCHESTRATOR_KEYS = process.env.MCP_ORCHESTRATOR_KEYS
+const MCP_ORCHESTRATOR_KEYS = cleanEnv('MCP_ORCHESTRATOR_KEYS')
 
 // Parse a JSON { actor: key } env var into a map, once at module load. Must be a
 // plain object: a bare string or array would make Object.entries() emit
