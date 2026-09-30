@@ -1,8 +1,10 @@
 ﻿import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import type { KillVerdict } from '@/lib/types'
+import { requireUser } from '@/lib/api-auth'
 
 export async function POST(req: NextRequest) {
+  const denied = await requireUser(); if (denied) return denied
   try {
     const body = await req.json()
     const { project_id, functionality_score, efficiency_score, scalability_score, time_to_revenue_score, notes } = body

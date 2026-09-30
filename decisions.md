@@ -91,6 +91,14 @@ Canonical log of meaningful decisions and why. Append-only. Every architectural 
 
 ## Build-Time Decisions
 
+### 2026-09-30 — API routes require a session
+
+**Decision:** `/api/route-task`, `/api/classify`, `/api/advisory-board` and `/api/kill-criteria` now call `requireUser()` (`lib/api-auth.ts`, Supabase `getUser()`) and return 401 without a session.
+**Reasoning:** `proxy.ts` excludes `/api/*`, and these four routes checked nothing, so they were publicly callable via the unprotected git-main alias (route-task runs any model tier on our API keys). Prerequisite for turning off Vercel Authentication on production.
+**Made by:** operator + agent
+
+---
+
 ### 2026-05-07 — Route group `(app)` pattern for auth-protected layout
 
 **Decision:** Authenticated pages live under `app/(app)/` using Next.js route group convention. Root `app/layout.tsx` is the bare shell (fonts, globals, Toaster). `app/(app)/layout.tsx` runs the server-side auth check and renders Nav. `app/login/` lives outside the group, unprotected.
