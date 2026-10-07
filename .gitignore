@@ -78,6 +78,10 @@ nextinit/
 # Claude Code local settings (machine-specific permissions)
 .claude/
 
+# Codex local session checkpoint + locally installed Codex skills
+.Codex/
+.agents/
+
 # Supabase CLI temp files
 supabase/.temp/
 
