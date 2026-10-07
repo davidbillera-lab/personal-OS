@@ -58,6 +58,14 @@ const SKILL_TAGS = {
   'session-context':      ['workflow', 'session-start', 'context', 'vault', 'credentials'],
   'skill-invocation-scope': ['meta', 'routing', 'skills', 'workflow', 'complexity'],
   'vault-recall':         ['workflow', 'session-start', 'vault', 'memory', 'recall', 'mcp'],
+  // Third-party (Nate Herk), pinned copies — see memory third-party-skills-installed
+  'scroll-craft':           ['third-party', 'nate-herk', 'web-design', 'scroll-animation', 'landing-page'],
+  'gsap':                   ['third-party', 'nate-herk', 'hyperframes', 'video', 'animation'],
+  'hyperframes':            ['third-party', 'nate-herk', 'hyperframes', 'video', 'motion-graphics'],
+  'hyperframes-cli':        ['third-party', 'nate-herk', 'hyperframes', 'video', 'render'],
+  'hyperframes-registry':   ['third-party', 'nate-herk', 'hyperframes', 'video'],
+  'hyperframes-video-beats': ['third-party', 'nate-herk', 'hyperframes', 'video', 'motion-graphics'],
+  'website-to-hyperframes': ['third-party', 'nate-herk', 'hyperframes', 'video', 'website'],
 }
 
 function parseFrontmatter(text) {
