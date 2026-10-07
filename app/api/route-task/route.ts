@@ -1,8 +1,10 @@
 ﻿import { NextResponse } from 'next/server'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
+import { requireUser } from '@/lib/api-auth'
 
 export async function POST(req: Request) {
+  const denied = await requireUser(); if (denied) return denied
   let body: unknown
   try {
     body = await req.json()
