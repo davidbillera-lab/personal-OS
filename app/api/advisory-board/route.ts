@@ -3,6 +3,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { calcCost } from '@/lib/models/pricing'
 import { captureToVault } from '@/lib/vault'
+import { requireUser } from '@/lib/api-auth'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 const MODEL = 'claude-sonnet-4-6'
@@ -43,6 +44,7 @@ CRITICAL FORMAT RULES — follow exactly, no deviation:
 - Always include all four personas and the Agreed Recommendation in every response.`
 
 export async function POST(req: NextRequest) {
+  const denied = await requireUser(); if (denied) return denied
   try {
     const { brain_dump_id, user_message, rerun } = await req.json() as {
       brain_dump_id: string

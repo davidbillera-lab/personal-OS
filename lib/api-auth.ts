@@ -1,5 +1,6 @@
 import crypto from 'crypto'
-import { createAdminSupabaseClient } from '@/lib/supabase'
+import { NextResponse } from 'next/server'
+import { createAdminSupabaseClient, createServerSupabaseClient } from '@/lib/supabase'
 import { hashCode } from '@/lib/oauth'
 import { createKeyLookup, type KeyLookup, type KeyRow } from '@/lib/mcp-key-cache'
 
@@ -47,4 +48,21 @@ export async function requireBearer(req: Request): Promise<Response | null> {
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return json({ error: 'unauthorized' }, 401)
 
   return null
+}
+
+// Returns null when a valid Supabase session exists, else a 401 response. /api/* is excluded from proxy.ts, so routes call this themselves.
+export async function requireUser(): Promise<NextResponse | null> {
+  // createServerSupabaseClient is used only for the session check, never for data reads.
+  const supabase = await createServerSupabaseClient()
+  // getUser() revalidates the token against Supabase auth (same check as proxy.ts), not just decoding the cookie.
+  const { data: { user } } = await supabase.auth.getUser()
+  return user ? null : NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+}
+
+/**
+ * Gate for routes called by both the browser UI (session cookie) and servers (Bearer key).
+ * A presented key decides alone: revoked or lookup outage never falls through to the session.
+ */
+export async function requireUserOrBearer(req: Request): Promise<Response | null> {
+  return bearerToken(req) ? requireBearer(req) : requireUser()
 }

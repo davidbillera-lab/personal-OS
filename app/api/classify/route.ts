@@ -1,10 +1,10 @@
 ﻿import { NextResponse } from 'next/server'
 import { createAdminSupabaseClient } from '@/lib/supabase'
-import { requireBearer } from '@/lib/api-auth'
+import { requireUserOrBearer } from '@/lib/api-auth'
 import { classifyBrainDump } from '@/lib/classify'
 
 export async function POST(req: Request) {
-  const denied = await requireBearer(req)
+  const denied = await requireUserOrBearer(req)
   if (denied) return denied
 
   let body: unknown

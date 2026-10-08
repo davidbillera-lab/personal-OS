@@ -44,7 +44,7 @@ import { notifyAwaitingApproval, notifyClassifierHold, notifyBuildFailed, notify
 import { pickAdapter } from './lib/claude-executor-adapter.mjs'
 import { classifyOps } from './lib/ops-classifier.mjs'
 import { sanitizeForMC } from './lib/sanitize-result.mjs'
-import { isClaimablePlanned } from './lib/planned-claim.mjs'
+import { isClaimablePlanned, isDispatcherRow, DISPATCHER_ROW_FILTER } from './lib/planned-claim.mjs'
 import { needsPlanNudge, planNudgeKey, PLAN_NUDGE_AFTER_MS } from './lib/plan-nudge.mjs'
 import { resolveCloneTarget, cloneAllowlist } from './lib/clone-target.mjs'
 import { workSetEmpty, shouldSleep } from './lib/idle-sleep.mjs'
@@ -178,17 +178,21 @@ const clearResult = (requestId, attemptId) => clearAttemptResult(BUILDS_DIR, req
 
 // ---- Path A: atomic claim ----
 async function claimOne(sb) {
+  // Only null/claude/hermes rows are dispatcher territory; every other worker identity
+  // (codex, codex-qc, future lanes) claims its own rows, never here.
   const { data: candidates, error: selErr } = await sb
-    .from('mc_requests').select('id')
-    .eq('status', 'queued').order('created_at', { ascending: true }).limit(1)
+    .from('mc_requests').select('id, assigned_to')
+    .eq('status', 'queued').or(DISPATCHER_ROW_FILTER).order('created_at', { ascending: true }).limit(1)
   if (selErr) throw new Error(`claim select failed: ${selErr.message}`)
   if (!candidates || candidates.length === 0) return null
+  if (!isDispatcherRow(candidates[0])) return null
   const candidateId = candidates[0].id
   const attemptId = crypto.randomUUID()
   const { data: claimed, error: updErr } = await sb
     .from('mc_requests')
     .update({ status: 'claimed', assigned_to: 'claude', phase: 'building', attempt_id: attemptId, updated_at: nowISO() })
     .eq('id', candidateId).eq('status', 'queued') // conditional: 0 rows ⇒ already claimed
+    .or(DISPATCHER_ROW_FILTER)
     .select('*').maybeSingle()
   if (updErr) throw new Error(`claim update failed: ${updErr.message}`)
   if (!claimed) { console.log(`[claim] lost race on ${candidateId} (already claimed) — backing off`); return null }
@@ -208,6 +212,7 @@ async function claimPlannedOne(sb) {
   const { data: candidates, error: selErr } = await sb
     .from('mc_requests').select('*')
     .eq('status', 'submitted').eq('phase', 'planned').not('plan', 'is', null)
+    .or(DISPATCHER_ROW_FILTER)
     .order('created_at', { ascending: true }).limit(1)
   if (selErr) throw new Error(`claim(planned) select failed: ${selErr.message}`)
   if (!candidates || candidates.length === 0) return null
@@ -222,6 +227,7 @@ async function claimPlannedOne(sb) {
     // assigned_to='claude', attempt_id set, updated_at bumped.
     .update({ status: 'claimed', assigned_to: 'claude', phase: 'building', attempt_id: attemptId, updated_at: nowISO() })
     .eq('id', candidate.id).eq('status', 'submitted').eq('phase', 'planned') // conditional: 0 rows ⇒ already claimed
+    .or(DISPATCHER_ROW_FILTER)
     .select('*').maybeSingle()
   if (updErr) throw new Error(`claim(planned) update failed: ${updErr.message}`)
   if (!claimed) { console.log(`[claim] lost race on planned ${candidate.id} (already claimed) — backing off`); return null }
@@ -512,12 +518,13 @@ async function reconcile(sb) {
 // Deduped through mc_alert_sends so a still-unplanned row is announced once, not every sweep.
 async function nudgeUnplanned(sb) {
   const { data: rows, error } = await sb.from('mc_requests')
-    .select('id, title, status, phase, plan, updated_at, created_at')
+    .select('id, title, status, phase, plan, assigned_to, updated_at, created_at')
     .eq('status', 'submitted').is('phase', null).is('plan', null)
   if (error) { console.log(`[nudge] query failed: ${error.message}`); return }
 
   const now = new Date()
-  const waiting = (rows || []).filter((r) => needsPlanNudge(r, now, PLAN_NUDGE_AFTER_MS))
+  // Rows owned by another worker lane plan themselves; never nudge Hermes for them.
+  const waiting = (rows || []).filter((r) => isDispatcherRow(r) && needsPlanNudge(r, now, PLAN_NUDGE_AFTER_MS))
   if (waiting.length === 0) return
 
   // Read the ledger once. A read failure degrades to "announce anyway" — same fail-safe
