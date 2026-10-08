@@ -201,7 +201,7 @@ See `decisions.md` for the canonical log. Summary of pre-build decisions:
 4. The OS itself follows its own rules. It has a `kill-criteria.md`. It logs decisions. It reports its own model costs.
 5. **Invoke `davids-way` before any non-trivial build task.** Every session.
 6. **Invoke `session-context` or `vault-recall` before reading code.** Don't re-derive what the vault already knows.
-7. **Session end protocol:** push to GitHub → `mc_update_project_status` → run `decisions-sync` if architecture changed.
+7. **Session end protocol:** push to GitHub → `mc_update_project_status` → run `decisions-sync` if architecture changed. **Write vault records last.** A `mc_write_vault` record created mid-session freezes a stale snapshot that later work invalidates; if you wrote one early, `mc_update_vault` it and read it back before closing.
 8. **Never use `createServerSupabaseClient()` in server actions or API routes.** Always use `createAdminSupabaseClient()`.
 
 ---

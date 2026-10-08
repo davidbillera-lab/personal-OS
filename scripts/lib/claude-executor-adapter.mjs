@@ -345,8 +345,12 @@ export function toDockerMountPath(p) {
   return resolve(p)
 }
 
+export function dockerSpawnOptions(opts = {}) {
+  return { encoding: 'utf8', windowsHide: true, ...opts }
+}
+
 function docker(args, opts = {}) {
-  return spawnSync(DOCKER_BIN(), args, { encoding: 'utf8', ...opts })
+  return spawnSync(DOCKER_BIN(), args, dockerSpawnOptions(opts))
 }
 
 // Fail loud and actionable BEFORE we spin a build: a missing daemon or image is

@@ -1,5 +1,6 @@
 ﻿import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabaseClient } from '@/lib/supabase'
+import { requireBearer } from '@/lib/api-auth'
 import { embedVaultItem } from '@/lib/vault'
 
 const SKILLS = [
@@ -768,12 +769,8 @@ Recall before you build. If the vault already answers "why is this like this?" o
 ]
 
 export async function POST(req: NextRequest) {
-  // Simple admin auth — same pattern as MCP route
-  const auth = req.headers.get('Authorization') ?? ''
-  const token = auth.replace('Bearer ', '')
-  if (token !== process.env.MCP_API_KEY) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  const denied = await requireBearer(req)
+  if (denied) return denied
 
   const supabase = createAdminSupabaseClient()
 
