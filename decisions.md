@@ -800,3 +800,15 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 **Still open:** M1 — seed or re-mint Hermes's orchestrator/read keys and Codex's key as rows, then mint fresh keys that live only as hashes. M2 — delete the env fallback branch and remove `MCP_API_KEY` from Vercel env, only after every client is confirmed green on a row. `last_used_at` and `/api/mcp` rate limiting (F8) were deliberately left out of this cut.
 
 **Made by:** operator + agent
+
+### 2026-10-07 — PR #5 + PR #6 combined: session OR full-scope key on the shared routes
+
+**Decision:** Merged main (PR #6 session auth) into PR #5 (datastore-backed keys) via a new `requireUserOrBearer(req)` in `lib/api-auth.ts`: a presented Bearer key decides alone (read scope 403, revoked 401, lookup outage 503 — never falls through to the session); with no key, the Supabase session decides. `classify`, `kill-criteria` and `route-task` accept a session OR a full-scope key; `advisory-board` stays session-only; `/api/mcp` and the admin routes stay key-only.
+
+**Correction:** The 2026-08-23 note calling the `/api/kill-criteria` dashboard button "dormant", and the 2026-08-26 note grouping it with the "zero current callers" routes, are stale: the browser UI (`components/ProjectWorkspaceTabs.tsx`) calls it with a session cookie, which a key-only gate would have broken.
+
+**Verified on preview `personal-824816u2u-jsg1`:** no auth → 401 on all 5 routes; read-scope key → `/api/mcp` 200 (21 tools), the 3 combined routes 403, `advisory-board` 401.
+
+**Known wrinkle:** the keys migration shares the `027` prefix with `027_codex_preferred_worker.sql`. Both are applied live and the live DB records migrations by timestamp version, so this is cosmetic; renumbering is an operator follow-up.
+
+**Made by:** operator + agent
