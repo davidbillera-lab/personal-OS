@@ -1,4 +1,4 @@
-import { beforeEach, describe, it, expect, vi } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 
 const { admin, getUser, state } = vi.hoisted(() => {
   const state: { user: object | null; row: object | null; dbError: boolean } = { user: null, row: null, dbError: false }
@@ -108,5 +108,33 @@ describe('requireUserOrBearer', () => {
 
   it('returns 401 with neither a session nor a key', async () => {
     expect((await gate())?.status).toBe(401)
+  })
+
+  it.each(['Basic x', 'Bearer', 'Bearer a b'])('treats a malformed header (%s) as no key', async (authorization) => {
+    const { requireUserOrBearer } = await import('../lib/api-auth')
+    const malformed = () => new Request('http://localhost/api/x', { method: 'POST', headers: { authorization } })
+    expect((await requireUserOrBearer(malformed()))?.status).toBe(401)
+    state.user = { id: 'u1' }
+    expect(await requireUserOrBearer(malformed())).toBeNull()
+    expect(admin).not.toHaveBeenCalled()
+  })
+})
+
+describe('requireBearer env fallback', () => {
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('passes an unknown key that matches the env key', async () => {
+    const token = key()
+    vi.stubEnv('MCP_API_KEY', token)
+    const { requireBearer } = await import('../lib/api-auth')
+    expect(await requireBearer(req(token))).toBeNull()
+  })
+
+  it('rejects the env key once its row is revoked', async () => {
+    const token = key()
+    vi.stubEnv('MCP_API_KEY', token)
+    state.row = row('full', '2026-01-01T00:00:00Z')
+    const { requireBearer } = await import('../lib/api-auth')
+    expect((await requireBearer(req(token)))?.status).toBe(401)
   })
 })
