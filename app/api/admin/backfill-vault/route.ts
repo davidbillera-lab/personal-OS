@@ -2,6 +2,7 @@
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { requireBearer } from '@/lib/api-auth'
 import { captureToVault } from '@/lib/vault'
+import { fetchAllRows } from '@/lib/paginate'
 import type { VaultItemType } from '@/lib/types'
 
 // One-time idempotent backfill: mirror historical source-table rows into vault_items.
@@ -11,20 +12,26 @@ import type { VaultItemType } from '@/lib/types'
 // source_id), so the master vault view fills retroactively. Safe to re-run — existing
 // rows are skipped. No schema change; the vault page already shows the full union.
 
-type TableResult = { seeded: number; skipped: number }
+type TableResult = { seeded: number; skipped: number; failed: number }
+
+const MAX_ERRORS = 50
 
 // Fetch the set of source_ids already mirrored for a given source_table, so we skip them.
 async function existingSourceIds(
   supabase: ReturnType<typeof createAdminSupabaseClient>,
   sourceTable: string
 ): Promise<Set<string>> {
-  const { data } = await supabase
-    .from('vault_items')
-    .select('source_id')
-    .eq('source_table', sourceTable)
-    .not('source_id', 'is', null)
+  const rows = await fetchAllRows<{ id: string; source_id: string | null }>(`vault_items:${sourceTable}`, (from, to) =>
+    supabase
+      .from('vault_items')
+      .select('id, source_id')
+      .eq('source_table', sourceTable)
+      .not('source_id', 'is', null)
+      .order('id', { ascending: true })
+      .range(from, to)
+  )
 
-  return new Set((data ?? []).map(r => r.source_id as string))
+  return new Set(rows.map(r => r.source_id as string))
 }
 
 export async function POST(req: NextRequest) {
@@ -33,11 +40,12 @@ export async function POST(req: NextRequest) {
 
   const supabase = createAdminSupabaseClient()
   const results: Record<string, TableResult> = {}
+  const errors: string[] = []
 
   // Helper: backfill one source table given a row→capture mapper.
   async function backfill<T extends { id: string }>(
     sourceTable: string,
-    rows: T[] | null,
+    fetchPage: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
     map: (row: T) => {
       type: VaultItemType
       title: string
@@ -48,30 +56,39 @@ export async function POST(req: NextRequest) {
       metadata?: Record<string, unknown>
     }
   ): Promise<void> {
+    // Read errors throw (caught in POST -> 500); we never continue as if a read succeeded.
+    const rows = await fetchAllRows<T>(sourceTable, fetchPage)
     const existing = await existingSourceIds(supabase, sourceTable)
     let seeded = 0
     let skipped = 0
+    let failed = 0
 
-    for (const row of rows ?? []) {
+    for (const row of rows) {
       if (existing.has(row.id)) { skipped++; continue }
       const m = map(row)
-      await captureToVault({
+      const ok = await captureToVault({
         ...m,
         source_table: sourceTable,
         source_id: row.id,
       })
-      seeded++
+      if (ok) seeded++
+      else {
+        failed++
+        if (errors.length < MAX_ERRORS) errors.push(`${sourceTable} ${row.id}: vault insert failed`)
+      }
     }
 
-    results[sourceTable] = { seeded, skipped }
+    results[sourceTable] = { seeded, skipped, failed }
   }
 
+  try {
   // --- agent_handoffs → agent_session ---
-  const { data: handoffs } = await supabase
-    .from('agent_handoffs')
-    .select('id, project_id, task_id, agent_name, task_description, outcome, github_commit_url, status, started_at, completed_at, created_at')
-
-  await backfill('agent_handoffs', handoffs, h => ({
+  await backfill('agent_handoffs', (from, to) =>
+    supabase
+      .from('agent_handoffs')
+      .select('id, project_id, task_id, agent_name, task_description, outcome, github_commit_url, status, started_at, completed_at, created_at')
+      .order('id', { ascending: true })
+      .range(from, to), h => ({
     type: 'agent_session',
     title: `${h.agent_name ?? 'agent'}: ${(h.task_description ?? '').slice(0, 80)}`.trim(),
     content: [
@@ -87,11 +104,12 @@ export async function POST(req: NextRequest) {
   }))
 
   // --- brain_dumps → brain_dump_mirror ---
-  const { data: dumps } = await supabase
-    .from('brain_dumps')
-    .select('id, raw_text, classified_type, project_id, status, ai_summary, source, created_at')
-
-  await backfill('brain_dumps', dumps, d => ({
+  await backfill('brain_dumps', (from, to) =>
+    supabase
+      .from('brain_dumps')
+      .select('id, raw_text, classified_type, project_id, status, ai_summary, source, created_at')
+      .order('id', { ascending: true })
+      .range(from, to), d => ({
     type: 'brain_dump_mirror',
     title: (d.ai_summary ?? d.raw_text ?? '').slice(0, 80) || 'Brain dump',
     content: d.raw_text ?? '',
@@ -102,11 +120,12 @@ export async function POST(req: NextRequest) {
   }))
 
   // --- decisions → decision_log ---
-  const { data: decisions } = await supabase
-    .from('decisions')
-    .select('id, project_id, decision, reasoning, decision_date, made_by, created_at')
-
-  await backfill('decisions', decisions, d => ({
+  await backfill('decisions', (from, to) =>
+    supabase
+      .from('decisions')
+      .select('id, project_id, decision, reasoning, decision_date, made_by, created_at')
+      .order('id', { ascending: true })
+      .range(from, to), d => ({
     type: 'decision_log',
     title: (d.decision ?? '').slice(0, 80) || 'Decision',
     content: [
@@ -122,12 +141,13 @@ export async function POST(req: NextRequest) {
   // --- tasks (with a generated spec) → build_spec ---
   // Only mirror tasks that actually have a spec — that's what 'build_spec' means and
   // mirrors the forward-capture path in orchestrate/inbox actions.
-  const { data: tasks } = await supabase
-    .from('tasks')
-    .select('id, project_id, title, description, generated_spec, status, recommended_tool, recommended_model, complexity_tier')
-    .not('generated_spec', 'is', null)
-
-  await backfill('tasks', tasks, t => ({
+  await backfill('tasks', (from, to) =>
+    supabase
+      .from('tasks')
+      .select('id, project_id, title, description, generated_spec, status, recommended_tool, recommended_model, complexity_tier')
+      .not('generated_spec', 'is', null)
+      .order('id', { ascending: true })
+      .range(from, to), t => ({
     type: 'build_spec',
     title: `Spec: ${(t.title ?? '').slice(0, 80)}`,
     content: t.generated_spec ?? t.description ?? t.title ?? '',
@@ -138,11 +158,12 @@ export async function POST(req: NextRequest) {
   }))
 
   // --- projects → knowledge (no native 'project' type in the CHECK constraint) ---
-  const { data: projects } = await supabase
-    .from('projects')
-    .select('id, name, slug, tier, stage, status, description, next_action, blockers, repo_url')
-
-  await backfill('projects', projects, p => ({
+  await backfill('projects', (from, to) =>
+    supabase
+      .from('projects')
+      .select('id, name, slug, tier, stage, status, description, next_action, blockers, repo_url')
+      .order('id', { ascending: true })
+      .range(from, to), p => ({
     type: 'knowledge',
     title: p.name ?? 'Project',
     content: [
@@ -157,8 +178,17 @@ export async function POST(req: NextRequest) {
     metadata: { slug: p.slug, tier: p.tier, stage: p.stage, repo_url: p.repo_url },
   }))
 
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: (e as Error).message, results, errors }, { status: 500 })
+  }
+
   const totalSeeded = Object.values(results).reduce((a, r) => a + r.seeded, 0)
   const totalSkipped = Object.values(results).reduce((a, r) => a + r.skipped, 0)
 
-  return NextResponse.json({ ok: true, totalSeeded, totalSkipped, results })
+  const totalFailed = Object.values(results).reduce((a, r) => a + r.failed, 0)
+
+  return NextResponse.json(
+    { ok: totalFailed === 0, totalSeeded, totalSkipped, totalFailed, results, errors },
+    { status: totalFailed === 0 ? 200 : 207 }
+  )
 }
