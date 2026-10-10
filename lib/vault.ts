@@ -44,7 +44,7 @@ export async function captureToVault(params: {
   tags?: string[]
   metadata?: Record<string, unknown>
   encrypted?: boolean
-}): Promise<void> {
+}): Promise<boolean> {
   try {
     const supabase = createAdminSupabaseClient()
     const {
@@ -75,7 +75,7 @@ export async function captureToVault(params: {
 
     if (error || !data) {
       console.error('[captureToVault] insert failed:', error?.message ?? 'no data returned', { type: params.type, title: params.title, capture_source: params.capture_source })
-      return
+      return false
     }
 
     try {
@@ -87,8 +87,10 @@ export async function captureToVault(params: {
     } catch (embErr) {
       console.error('[captureToVault] embedding failed (non-fatal):', embErr)
     }
+    return true
   } catch (err) {
     console.error('[captureToVault] unexpected error:', err)
+    return false
   }
 }
 
