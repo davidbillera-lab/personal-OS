@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, it, expect, vi } from 'vitest'
 
 const { admin, getUser, state } = vi.hoisted(() => {
   const state: { user: object | null; row: object | null; dbError: boolean } = { user: null, row: null, dbError: false }
@@ -24,6 +24,13 @@ vi.mock('@/lib/models/router', () => ({ routeTask: vi.fn() }))
 vi.mock('@/lib/classify', () => ({ classifyBrainDump: vi.fn() }))
 vi.mock('@/lib/vault', () => ({ captureToVault: vi.fn() }))
 vi.mock('@anthropic-ai/sdk', () => ({ default: class {} }))
+
+// The first dynamic import of a route cold-transforms next/server and the route graph: ~0.9s alone,
+// 2-5s under full-suite load, which blows the 5s default on whichever test imports first.
+// Warm the module cache once, with a generous hook timeout, so test timing never depends on load.
+beforeAll(async () => {
+  await Promise.all([import('../app/api/route-task/route'), import('../lib/api-auth')])
+}, 60_000)
 
 beforeEach(() => {
   vi.clearAllMocks()
