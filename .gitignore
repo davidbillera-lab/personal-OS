@@ -97,3 +97,6 @@ builds/
 
 # rig boot recovery log (local operational artifact)
 rig-boot.log
+
+# Local agent configs that hold credentials
+.codex/

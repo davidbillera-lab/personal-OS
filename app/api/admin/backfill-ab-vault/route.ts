@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { captureToVault } from '@/lib/vault'
+import { requireBearer } from '@/lib/api-auth'
 
 export async function POST(req: NextRequest) {
-  const auth = req.headers.get('authorization') ?? ''
-  if (auth !== `Bearer ${process.env.MCP_API_KEY}`) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  const denied = await requireBearer(req)
+  if (denied) return denied
 
   const supabase = createAdminSupabaseClient()
 

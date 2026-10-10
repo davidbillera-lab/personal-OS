@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
 import { callTool, toolsForScope, isToolAllowed, type McpTokenScope } from '@/lib/mcp-tools'
 import { createAdminSupabaseClient } from '@/lib/supabase'
+import { bearerToken, lookupApiKey } from '@/lib/api-auth'
 
 export const runtime = 'nodejs' // needs Node crypto for the timing-safe token check
 
@@ -11,7 +12,12 @@ export const runtime = 'nodejs' // needs Node crypto for the timing-safe token c
 async function logAudit(actor: string, tool: string, ok: boolean, error?: string, requestId?: string | null) {
   try {
     const supabase = createAdminSupabaseClient()
-    await supabase.from('mcp_audit_log').insert({ actor, tool, ok, error: error ?? null, request_id: requestId ?? null })
+    const { error: auditError } = await supabase
+      .from('mcp_audit_log')
+      .insert({ actor, tool, ok, error: error ?? null, request_id: requestId ?? null })
+    // PostgREST reports failures in the response rather than throwing, so a bare await
+    // would drop audit rows silently while the route still claims a complete trail.
+    if (auditError) console.error('[mcp] audit log write rejected (non-fatal):', auditError.message)
   } catch (err) {
     console.error('[mcp] audit log write failed (non-fatal):', err)
   }
@@ -86,9 +92,9 @@ function unauthorized() {
 }
 
 function misconfigured() {
-  // Fail CLOSED: if no key is configured on the server, refuse everything
-  // rather than silently serving an open endpoint.
-  console.error('[mcp] MCP_API_KEY not set — refusing all requests')
+  // Fail CLOSED: if the key datastore is unreachable, refuse everything rather
+  // than falling back to an unrevocable env compare.
+  console.error('[mcp] mcp_api_keys lookup unavailable — refusing request')
   return NextResponse.json(
     { jsonrpc: '2.0', id: null, error: { code: -32002, message: 'Server auth not configured' } },
     { status: 503 }
@@ -103,18 +109,63 @@ function forbidden(id: unknown, message: string) {
 }
 
 // Constant-time bearer comparison (avoids leaking the token via response timing).
+// Startup guard: the same secret pasted into two scope env vars silently grants the
+// higher scope on every request. Detect and report it. Resolution behavior is
+// deliberately unchanged — a misconfiguration must not be able to take MC down.
+;(() => {
+  const seen = new Map<string, string[]>()
+  const note = (scope: string, value?: string | null) => {
+    if (!value) return
+    const fp = crypto.createHash('sha256').update(value).digest('hex').slice(0, 10)
+    seen.set(fp, [...(seen.get(fp) ?? []), scope])
+  }
+  note('MCP_API_KEY', MCP_API_KEY)
+  note('MCP_READONLY_API_KEY', MCP_READONLY_API_KEY)
+  const maps: Array<[string, string | undefined]> = [
+    ['MCP_READONLY_KEYS', MCP_READONLY_KEYS],
+    ['MCP_LIAISON_KEYS', MCP_LIAISON_KEYS],
+    ['MCP_ORCHESTRATOR_KEYS', MCP_ORCHESTRATOR_KEYS],
+  ]
+  for (const [name, raw] of maps) {
+    if (!raw) continue
+    try {
+      for (const [actor, key] of Object.entries(JSON.parse(raw) as Record<string, string>)) {
+        note(name + ':' + actor, key)
+      }
+    } catch {
+      // malformed JSON is surfaced by the existing parser
+    }
+  }
+  for (const [fp, scopes] of seen) {
+    if (scopes.length > 1) {
+      console.error('[mcp] SCOPE COLLISION: one key is configured in ' + scopes.length + ' scopes (' + scopes.join(', ') + ') fingerprint ' + fp + ' — the highest scope wins on every request')
+    }
+  }
+})()
+
 function bearerMatches(req: NextRequest, key: string): boolean {
   const presented = Buffer.from(req.headers.get('authorization') ?? '')
   const expected = Buffer.from(`Bearer ${key}`)
   return presented.length === expected.length && crypto.timingSafeEqual(presented, expected)
 }
 
-// Resolve the privilege the presented token grants:
+// Resolve the privilege the presented token grants. The mcp_api_keys row decides
+// when one exists for the token's hash (a revoked/expired row rejects outright);
+// the env compares below are the M0 fallback for keys not yet seeded (spec §3.5).
+async function resolveAuth(req: NextRequest): Promise<ResolvedAuth | null | 'unavailable'> {
+  const key = await lookupApiKey(bearerToken(req))
+  if (key.status === 'error') return 'unavailable'
+  if (key.status === 'active') return { scope: key.scope, actor: key.actor }
+  if (key.status === 'revoked') return null
+  return resolveEnvAuth(req)
+}
+
+// Env-var fallback:
 //   { scope: 'full', actor: 'full' }        — MCP_API_KEY, every tool
 //   { scope: 'read', actor: <name> }        — a per-agent read key, read-scoped tools only
 //   null                                     — no match, reject
 // Every comparison runs (no early break) so timing doesn't reveal which token matched.
-function resolveAuth(req: NextRequest): ResolvedAuth | null {
+function resolveEnvAuth(req: NextRequest): ResolvedAuth | null {
   const isFull = MCP_API_KEY ? bearerMatches(req, MCP_API_KEY) : false
   // Orchestrator keys — 'orchestrator' scope (read tools + claim/reassign only).
   let orchestratorActor: string | null = null
@@ -151,9 +202,9 @@ function jsonrpcResult(id: unknown, result: unknown) {
 }
 
 export async function POST(req: NextRequest) {
-  // Auth — fail closed. No full key configured -> refuse everything.
-  if (!MCP_API_KEY) return misconfigured()
-  const auth = resolveAuth(req)
+  // Auth — fail closed. Key datastore unreachable -> refuse everything.
+  const auth = await resolveAuth(req)
+  if (auth === 'unavailable') return misconfigured()
   if (!auth) return unauthorized()
   const { scope, actor } = auth
 
