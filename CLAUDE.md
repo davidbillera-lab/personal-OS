@@ -71,7 +71,7 @@ When an idea graduates from inbox to build:
 - **GitHub API:** for repo context loading and project file sync
 - **Auth:** Supabase auth (operator + Vinnie roles eventually)
 - **Vault:** `vault_items` table — cross-session memory. Stores decisions, specs, agent sessions, brain dumps. OpenAI `text-embedding-3-small` for semantic search. Auto-captured via `captureToVault()` in `lib/vault.ts`. Queried via `mc_get_vault_context` (semantic, 200-char previews) or `mc_browse_vault` (browse by type/recency), with `mc_get_vault_item` for full single-item fetch.
-- **MCP server:** `/api/mcp` endpoint deployed on Vercel. Agents connect via `Bearer MCP_API_KEY` (token in `.mcp.json` + `.claude/settings.local.json`). Exposes: project context, tasks, vault, credentials, skills. On Windows, always source MCP_API_KEY from `settings.local.json` — OS env propagation is unreliable.
+- **MCP server:** `/api/mcp` endpoint deployed on Vercel. Agents connect via `Bearer MCP_API_KEY` (token in `.mcp.json` + `.claude/settings.local.json`). Exposes: project context, tasks, vault, credentials, skills. The server validates keys only against hashed rows in `mcp_api_keys` (no env-var fallback since M2, 2026-10-11). On Windows, always source MCP_API_KEY from `settings.local.json` — OS env propagation is unreliable.
 
 **Supabase pattern:** All server-side calls use `createAdminSupabaseClient()` (service role key, bypasses RLS). Never use `createServerSupabaseClient()` in server actions or API routes — it silently fails behind RLS.
 

@@ -473,7 +473,7 @@ Add it to your MCP config (\`.mcp.json\` or \`mcp_config.json\`):
 }
 \`\`\`
 
-\`MCP_API_KEY\` is set in the personal-os \`.env.local\`. Get it from the operator.
+\`MCP_API_KEY\` is a per-client key the operator mints (stored server-side only as a hash). Get it from the operator.
 
 ### Available MCP Tools
 

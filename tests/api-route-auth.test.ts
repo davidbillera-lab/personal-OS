@@ -10,7 +10,9 @@ const { admin, getUser, state } = vi.hoisted(() => {
             state.dbError ? { data: null, error: { message: 'db down' } } : { data: state.row, error: null },
         }),
       }),
+      insert: async () => ({ error: null }),
     }),
+    rpc: async () => ({ data: true, error: null }),
   }))
   const getUser = vi.fn(async () => ({ data: { user: state.user } }))
   return { admin, getUser, state }
@@ -120,14 +122,14 @@ describe('requireUserOrBearer', () => {
   })
 })
 
-describe('requireBearer env fallback', () => {
+describe('requireBearer has no env fallback (M2)', () => {
   afterEach(() => vi.unstubAllEnvs())
 
-  it('passes an unknown key that matches the env key', async () => {
+  it('rejects an unknown key that matches the env key', async () => {
     const token = key()
     vi.stubEnv('MCP_API_KEY', token)
     const { requireBearer } = await import('../lib/api-auth')
-    expect(await requireBearer(req(token))).toBeNull()
+    expect((await requireBearer(req(token)))?.status).toBe(401)
   })
 
   it('rejects the env key once its row is revoked', async () => {
@@ -136,5 +138,84 @@ describe('requireBearer env fallback', () => {
     state.row = row('full', '2026-01-01T00:00:00Z')
     const { requireBearer } = await import('../lib/api-auth')
     expect((await requireBearer(req(token)))?.status).toBe(401)
+  })
+})
+
+const mcpReq = (token: string | undefined, method: string, params?: object) =>
+  new Request('http://localhost/api/mcp', {
+    method: 'POST',
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  })
+const toolNames = (body: { result: { tools: { name: string }[] } }) => body.result.tools.map(t => t.name)
+
+describe('/api/mcp accepts table keys only (M2)', () => {
+  afterEach(() => vi.unstubAllEnvs())
+
+  // Fresh module load after stubbing, so a regression that reads env at import time is caught.
+  const mcp = async (token: string | undefined, method = 'tools/list', params?: object) => {
+    vi.resetModules()
+    const { POST } = await import('../app/api/mcp/route')
+    return POST(mcpReq(token, method, params) as never)
+  }
+
+  it.each(['MCP_API_KEY', 'MCP_READONLY_API_KEY'])('rejects a key matching %s with no row (401)', async (name) => {
+    const token = key()
+    vi.stubEnv(name, token)
+    expect((await mcp(token)).status).toBe(401)
+  })
+
+  it.each(['MCP_ORCHESTRATOR_KEYS', 'MCP_READONLY_KEYS', 'MCP_LIAISON_KEYS'])('rejects a %s map key with no row (401)', async (name) => {
+    const token = key()
+    vi.stubEnv(name, JSON.stringify({ hermes: token }))
+    expect((await mcp(token)).status).toBe(401)
+  })
+
+  it.each(['full', 'read', 'liaison', 'orchestrator'] as const)('a %s table key lists exactly its scope tools', async (scope) => {
+    state.row = row(scope)
+    const res = await mcp(key())
+    expect(res.status).toBe(200)
+    const { toolsForScope } = await import('../lib/mcp-tools')
+    expect(toolNames(await res.json())).toEqual(toolsForScope(scope).map(t => t.name))
+  })
+
+  it('a read table key is still refused a write tool (403)', async () => {
+    state.row = row('read')
+    expect((await mcp(key(), 'tools/call', { name: 'mc_write_vault', arguments: {} })).status).toBe(403)
+  })
+
+  it('rejects revoked and expired rows (401)', async () => {
+    state.row = row('full', '2026-01-01T00:00:00Z')
+    expect((await mcp(key())).status).toBe(401)
+    state.row = { ...row('full'), expires_at: '2026-01-01T00:00:00Z' }
+    expect((await mcp(key())).status).toBe(401)
+  })
+
+  it('fails closed with 503 on a key lookup error', async () => {
+    state.dbError = true
+    expect((await mcp(key())).status).toBe(503)
+  })
+
+  it('rejects a missing bearer without a lookup (401)', async () => {
+    expect((await mcp(undefined)).status).toBe(401)
+    expect(admin).not.toHaveBeenCalled()
+  })
+})
+
+describe('OAuth liaison path (/api/mcp-liaison) is unaffected by M2', () => {
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('a valid liaison JWT lists the liaison tools with no MCP key env vars set', async () => {
+    vi.stubEnv('OAUTH_ISSUER', 'https://mc.test')
+    vi.stubEnv('MCP_RESOURCE_URL', 'https://mc.test/api/mcp-liaison')
+    vi.stubEnv('OAUTH_JWT_SECRET', 'test-signing-value-not-a-real-one-0123456789')
+    vi.resetModules()
+    const { getOAuthConfig, signAccessToken } = await import('../lib/oauth')
+    const { token } = signAccessToken(getOAuthConfig())
+    const { POST } = await import('../app/api/mcp-liaison/route')
+    const res = await POST(mcpReq(token, 'tools/list') as never)
+    expect(res.status).toBe(200)
+    const { toolsForScope } = await import('../lib/mcp-tools')
+    expect(toolNames(await res.json())).toEqual(toolsForScope('liaison').map(t => t.name))
   })
 })
