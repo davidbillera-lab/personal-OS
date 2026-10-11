@@ -12,7 +12,7 @@ export interface KeyRow {
 
 export type KeyLookup =
   | { status: 'active'; scope: KeyScope; actor: string }
-  | { status: 'revoked' } // revoked or expired — rejected even if an env fallback would match
+  | { status: 'revoked' } // revoked or expired
   | { status: 'unknown' } // no row for this hash
   | { status: 'error' } // datastore unreachable — callers fail closed (503)
 

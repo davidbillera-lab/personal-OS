@@ -290,7 +290,7 @@ export default function GuidePage() {
               <div>{'}'}</div>
             </div>
             <p className="mt-2 text-[10px] text-gray-600">
-              API key: Vault → Credentials → <span className="text-purple-400">MCP_API_KEY</span>
+              API key: Each client receives its own key from the operator; configure it under <span className="text-purple-400">MCP_API_KEY</span> in your client config.
             </p>
           </div>
 

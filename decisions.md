@@ -812,3 +812,15 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 **Known wrinkle:** the keys migration shares the `027` prefix with `027_codex_preferred_worker.sql`. Both are applied live and the live DB records migrations by timestamp version, so this is cosmetic; renumbering is an operator follow-up.
 
 **Made by:** operator + agent
+
+### 2026-10-11 — M2: MCP and admin keys are table-only; env-var fallback removed
+
+**Decision:** Shipped M2 of `specs/2026-08-23-mc-security-hardening.md` §3.5. Deleted the env-var key fallback in both places it lived: the `MCP_API_KEY` compare in `requireBearer` (`lib/api-auth.ts`), and in `/api/mcp` `resolveAuth` the compares and JSON maps for `MCP_API_KEY`, `MCP_READONLY_API_KEY`, `MCP_READONLY_KEYS`, `MCP_LIAISON_KEYS` and `MCP_ORCHESTRATOR_KEYS` (plus their parser and the startup scope-collision guard). An active `mcp_api_keys` row is now the only way in on those routes: unknown, revoked or expired key → 401; key lookup error → 503, never a fallback. Table-key scope semantics (full, read, liaison, orchestrator) are unchanged. `mcp-server.mjs` (local stdio) is out of scope and untouched.
+
+**Reasoning:** Env vars bake into immutable Vercel deployments and can't be revoked (see 2026-08-23 and 2026-09-10). M1 (completed 2026-10-11) moved Codex, Hermes and Claude Code onto table-only keys and revoked the old shared full key's row. With every client on a row, the fallback was pure attack surface.
+
+**Gate — ChatGPT is unaffected:** the ChatGPT connector never touches `/api/mcp`. It authenticates on the separate `/api/mcp-liaison` route with an OAuth HS256 JWT (`verifyAccessToken` in `lib/oauth.ts`, configured by `OAUTH_*` + `MCP_RESOURCE_URL`), and its actor `chatgpt-liaison` is hard-coded there. Nothing on that path reads `MCP_LIAISON_KEYS`. The OAuth facade is unchanged.
+
+**Operator steps after merge:** (1) remove the `MCP_*` key vars (`MCP_API_KEY`, `MCP_READONLY_API_KEY`, `MCP_READONLY_KEYS`, `MCP_LIAISON_KEYS`, `MCP_ORCHESTRATOR_KEYS`) from Vercel env. Keep `MCP_RESOURCE_URL`, which OAuth needs. (2) Delete pre-M2 deployments or put them behind Deployment Protection (spec §3.3). They still accept the keys baked into them, and removing the env vars does not change a deployment that already exists.
+
+**Made by:** operator + agent

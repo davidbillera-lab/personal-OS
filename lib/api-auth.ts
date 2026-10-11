@@ -1,4 +1,3 @@
-import crypto from 'crypto'
 import { NextResponse } from 'next/server'
 import { createAdminSupabaseClient, createServerSupabaseClient } from '@/lib/supabase'
 import { hashCode } from '@/lib/oauth'
@@ -37,17 +36,8 @@ export async function requireBearer(req: Request): Promise<Response | null> {
   const key = await lookupApiKey(presented)
   if (key.status === 'error') return json({ error: 'auth unavailable' }, 503)
   if (key.status === 'active') return key.scope === 'full' ? null : json({ error: 'forbidden' }, 403)
-  if (key.status === 'revoked') return json({ error: 'unauthorized' }, 401)
-
-  // M0 fallback (spec §3.5): the env key is honored only when no row exists for its
-  // hash, so revoking its row still kills it. Delete this branch at M2.
-  const expected = process.env.MCP_API_KEY
-  if (!expected) return json({ error: 'unauthorized' }, 401)
-  const a = Buffer.from(presented)
-  const b = Buffer.from(expected)
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return json({ error: 'unauthorized' }, 401)
-
-  return null
+  // Unknown, revoked or expired. No env-var fallback since M2 (spec §3.5).
+  return json({ error: 'unauthorized' }, 401)
 }
 
 // Returns null when a valid Supabase session exists, else a 401 response. /api/* is excluded from proxy.ts, so routes call this themselves.

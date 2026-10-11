@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
-import crypto from 'crypto'
 import { callTool, toolsForScope, isToolAllowed, type McpTokenScope } from '@/lib/mcp-tools'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { bearerToken, lookupApiKey } from '@/lib/api-auth'
 
-export const runtime = 'nodejs' // needs Node crypto for the timing-safe token check
+export const runtime = 'nodejs' // needs Node crypto to hash the presented key
 
 // Append-only audit stamp for every tool call through this HTTP route. Records the
 // resolved actor, the tool, and whether it succeeded. Non-fatal: an audit failure
@@ -30,55 +29,7 @@ function auditRequestId(args: Record<string, string | undefined>): string | null
     : null
 }
 
-const MCP_API_KEY = process.env.MCP_API_KEY
-// Legacy single read-only token. When set, it grants access to read-scoped tools
-// only and is now mapped to the actor "hermes" (its original consumer). Kept for
-// back-compat so Hermes never breaks; new per-agent keys live in MCP_READONLY_KEYS.
-const MCP_READONLY_API_KEY = process.env.MCP_READONLY_API_KEY
-// Per-agent read-only keys as a JSON object of { actor: key }, e.g.
-// {"hermes":"...","chatgpt-liaison":"..."}. Each key grants the read scope; the
-// matched actor name is stamped into the audit log so we can tell callers apart.
-const MCP_READONLY_KEYS = process.env.MCP_READONLY_KEYS
-// Per-agent liaison keys as a JSON object of { actor: key }. A liaison key grants
-// the narrow 'liaison' scope (request-queue tools only) — the ChatGPT chief-of-
-// staff surface. Same shape as MCP_READONLY_KEYS.
-const MCP_LIAISON_KEYS = process.env.MCP_LIAISON_KEYS
-// Per-agent orchestrator keys as a JSON object of { actor: key }. An orchestrator
-// key grants the 'orchestrator' scope — every read tool plus exactly the two
-// routing writes (claim + reassign). Hermes's dispatcher role. Same shape.
-const MCP_ORCHESTRATOR_KEYS = process.env.MCP_ORCHESTRATOR_KEYS
-
-// Parse a JSON { actor: key } env var into a map, once at module load. Must be a
-// plain object: a bare string or array would make Object.entries() emit
-// per-character/per-index entries — turning a paste mistake into a set of
-// one-character keys. Reject anything else, loudly. Fails closed (empty map).
-function parseKeyMap(raw: string | undefined, envName: string): Record<string, string> {
-  const map: Record<string, string> = {}
-  if (!raw) return map
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    console.error(`[mcp] ${envName} is not valid JSON — ignoring`)
-    return map
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    console.error(`[mcp] ${envName} must be a JSON object of {actor: key} — ignoring`)
-    return map
-  }
-  for (const [actor, key] of Object.entries(parsed as Record<string, unknown>)) {
-    if (typeof key === 'string' && key) map[actor] = key
-  }
-  return map
-}
-// Legacy MCP_READONLY_API_KEY is deliberately NOT merged into READONLY_KEYS — it
-// is checked independently in resolveAuth so a map entry can never shadow it.
-const READONLY_KEYS = parseKeyMap(MCP_READONLY_KEYS, 'MCP_READONLY_KEYS')
-const LIAISON_KEYS = parseKeyMap(MCP_LIAISON_KEYS, 'MCP_LIAISON_KEYS')
-const ORCHESTRATOR_KEYS = parseKeyMap(MCP_ORCHESTRATOR_KEYS, 'MCP_ORCHESTRATOR_KEYS')
-
 // What a resolved token grants: a scope plus the actor name for the audit trail.
-// Full-token callers (Claude Code, the dashboard) share one identity: "full".
 interface ResolvedAuth {
   scope: McpTokenScope
   actor: string
@@ -108,88 +59,13 @@ function forbidden(id: unknown, message: string) {
   )
 }
 
-// Constant-time bearer comparison (avoids leaking the token via response timing).
-// Startup guard: the same secret pasted into two scope env vars silently grants the
-// higher scope on every request. Detect and report it. Resolution behavior is
-// deliberately unchanged — a misconfiguration must not be able to take MC down.
-;(() => {
-  const seen = new Map<string, string[]>()
-  const note = (scope: string, value?: string | null) => {
-    if (!value) return
-    const fp = crypto.createHash('sha256').update(value).digest('hex').slice(0, 10)
-    seen.set(fp, [...(seen.get(fp) ?? []), scope])
-  }
-  note('MCP_API_KEY', MCP_API_KEY)
-  note('MCP_READONLY_API_KEY', MCP_READONLY_API_KEY)
-  const maps: Array<[string, string | undefined]> = [
-    ['MCP_READONLY_KEYS', MCP_READONLY_KEYS],
-    ['MCP_LIAISON_KEYS', MCP_LIAISON_KEYS],
-    ['MCP_ORCHESTRATOR_KEYS', MCP_ORCHESTRATOR_KEYS],
-  ]
-  for (const [name, raw] of maps) {
-    if (!raw) continue
-    try {
-      for (const [actor, key] of Object.entries(JSON.parse(raw) as Record<string, string>)) {
-        note(name + ':' + actor, key)
-      }
-    } catch {
-      // malformed JSON is surfaced by the existing parser
-    }
-  }
-  for (const [fp, scopes] of seen) {
-    if (scopes.length > 1) {
-      console.error('[mcp] SCOPE COLLISION: one key is configured in ' + scopes.length + ' scopes (' + scopes.join(', ') + ') fingerprint ' + fp + ' — the highest scope wins on every request')
-    }
-  }
-})()
-
-function bearerMatches(req: NextRequest, key: string): boolean {
-  const presented = Buffer.from(req.headers.get('authorization') ?? '')
-  const expected = Buffer.from(`Bearer ${key}`)
-  return presented.length === expected.length && crypto.timingSafeEqual(presented, expected)
-}
-
-// Resolve the privilege the presented token grants. The mcp_api_keys row decides
-// when one exists for the token's hash (a revoked/expired row rejects outright);
-// the env compares below are the M0 fallback for keys not yet seeded (spec §3.5).
+// Resolve the privilege the presented token grants. Only an active mcp_api_keys row
+// grants access; an unknown, revoked or expired key is rejected. No env-var fallback
+// since M2 (spec §3.5) — env vars bake into immutable deployments and can't be revoked.
 async function resolveAuth(req: NextRequest): Promise<ResolvedAuth | null | 'unavailable'> {
   const key = await lookupApiKey(bearerToken(req))
   if (key.status === 'error') return 'unavailable'
   if (key.status === 'active') return { scope: key.scope, actor: key.actor }
-  if (key.status === 'revoked') return null
-  return resolveEnvAuth(req)
-}
-
-// Env-var fallback:
-//   { scope: 'full', actor: 'full' }        — MCP_API_KEY, every tool
-//   { scope: 'read', actor: <name> }        — a per-agent read key, read-scoped tools only
-//   null                                     — no match, reject
-// Every comparison runs (no early break) so timing doesn't reveal which token matched.
-function resolveEnvAuth(req: NextRequest): ResolvedAuth | null {
-  const isFull = MCP_API_KEY ? bearerMatches(req, MCP_API_KEY) : false
-  // Orchestrator keys — 'orchestrator' scope (read tools + claim/reassign only).
-  let orchestratorActor: string | null = null
-  for (const [actor, key] of Object.entries(ORCHESTRATOR_KEYS)) {
-    if (bearerMatches(req, key)) orchestratorActor = actor
-  }
-  // Liaison keys — narrow 'liaison' scope (request-queue tools only).
-  let liaisonActor: string | null = null
-  for (const [actor, key] of Object.entries(LIAISON_KEYS)) {
-    if (bearerMatches(req, key)) liaisonActor = actor
-  }
-  let readActor: string | null = null
-  // Legacy single read key — checked independently so the per-agent map can never
-  // shadow or disable it. Maps to the "hermes" actor (its original consumer).
-  if (MCP_READONLY_API_KEY && bearerMatches(req, MCP_READONLY_API_KEY)) readActor = 'hermes'
-  // Per-agent read keys. No early break: every comparison runs so timing doesn't
-  // reveal which key (if any) matched.
-  for (const [actor, key] of Object.entries(READONLY_KEYS)) {
-    if (bearerMatches(req, key)) readActor = actor
-  }
-  if (isFull) return { scope: 'full', actor: 'full' }
-  if (orchestratorActor) return { scope: 'orchestrator', actor: orchestratorActor }
-  if (liaisonActor) return { scope: 'liaison', actor: liaisonActor }
-  if (readActor) return { scope: 'read', actor: readActor }
   return null
 }
 
