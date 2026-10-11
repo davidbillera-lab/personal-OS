@@ -310,7 +310,7 @@ See `specs/2026-09-05-codex-builder-lane.md` and `decisions.md` 2026-09-05.
 
 Hermes is Mission Control's ambient layer — always-on alert delivery + Telegram replies, not a peer builder. Operational boundary for Codex sessions:
 
-- Hermes connects to MC over the **read-scope** token only (HTTPS `/api/mcp`, `MCP_READONLY_API_KEY`). It cannot call `mc_get_credential` or any write tool. Do not grant it the full token or broaden its access without an explicit operator decision (see `decisions.md` 2026-07-12 + 2026-07-16).
+- Hermes uses its own per-client MC key (orchestrator scope) issued as a table row (HTTPS `/api/mcp`). It cannot call `mc_get_credential` or any write tool. Do not grant it broader scope without an explicit operator decision (see `decisions.md` 2026-07-12 + 2026-07-16).
 - Alert **delivery** is serverless (Vercel cron → `/api/alerts/digest` → Telegram) and has no Hermes dependency. Do not move delivery into Hermes.
 - Detail: `specs/2026-07-16-hermes-ambient-layer-design.md`.
 

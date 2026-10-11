@@ -212,7 +212,7 @@ Hermes (multi-model agent, local desktop app) is the portfolio's **ambient layer
 
 - **Alert delivery is serverless.** Vercel cron → `/api/alerts/digest` → Telegram, once daily, only when a project is failing/blocked/stale >14d (silence = all-clear). Fires even when the local rig is off — this is what makes Standing Rule #3 enforceable. `CRON_SECRET`-gated.
 - **Replies are Hermes's job.** Reply to an alert in Telegram and Hermes answers from the vault (best-effort — needs the rig up).
-- **Hermes uses the MC read-scope token**, not the full token: its `mission-control` server points at the HTTPS endpoint `personal-os-git-main-jsg1.vercel.app/api/mcp` with `MCP_READONLY_API_KEY` (NOT the apex `personal-os.vercel.app`, which is behind Deployment Protection). It cannot reach `mc_get_credential` or any write tool (403). The key is injected into its profile config — Hermes can't self-serve it.
+- **Hermes uses its own per-client MC key** (orchestrator scope) issued as a table row, not a shared token. Its `mission-control` server points at the HTTPS endpoint `personal-os-git-main-jsg1.vercel.app/api/mcp`. It cannot reach `mc_get_credential` or any write tool (403). The key is injected into its profile config — Hermes can't self-serve it.
 - Detail + trust ladder (inbound capture / autonomous cron are future, each needs more trust): `specs/2026-07-16-hermes-ambient-layer-design.md`, `decisions.md` 2026-07-16.
 
 ## Last Updated
