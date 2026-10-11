@@ -120,13 +120,18 @@ Vault item types include:
 
 Credentials live in the `credentials` table, encrypted with AES-256-GCM. The key is `CREDENTIAL_ENCRYPTION_KEY` in environment only. Losing that key makes stored credentials unreadable.
 
+**Global rule 10 governs all credential work.** It lives in `~/.codex/AGENTS.md` (the same rule is rule 10 in `~/.claude/CLAUDE.md`) and includes the secret-handling playbook: ask David before any step that touches a credential, one key per project, record where every key lives, keys move by operator-run script, scan both project roots, and delete the old key last. Read it before touching any key. Codex and Hermes have no deny hook, so for them that rule is the only control.
+
 Rules:
 
 - Never copy raw secrets into docs, commits, AGENTS.md, `decisions.md`, or vault content.
-- Never store credential values in `vault_items`.
+- Never store credential values in `vault_items` through an agent. `mc_write_vault` stores content as plain text and sends it out for embedding.
 - Use `mc_get_credential` only when a credential is explicitly needed, MCP-accessible, and appropriate for the current task. It is a privileged/write-scoped tool because it returns secrets.
 - Use `mc_capture_credential` for credential storage through MCP; it writes encrypted credential rows, not vault rows.
-- `.env.local`, `.mcp.json`, and `.claude/settings.local.json` may contain sensitive operational configuration. Read only when needed; do not print values.
+- `.env.local`, `.mcp.json`, and `.claude/settings.local.json` hold live keys. Never read them whole and never print a value. Ask David first; retrieve names only.
+- The `/vault` page shows two secret stores that look alike. The `credentials` table is the only one `mc_get_credential` reads, and `key_name` is unique there. `vault_items` of type `credential` are entered by the operator in the UI, encrypted, and never MCP-accessible. Keep one entry per key, and record every place the key is used in that entry's notes (setting name and place, never the value).
+- Check vault changes with SQL on names and dates only (`updated_at` proves whether an edit landed). Never select `value` or `content`.
+- Known bug (2026-10-10): editing a `credentials` value from the `/vault` UI does not save. Until it is fixed, delete the entry and add it again.
 - On Windows, MCP token propagation through OS environment variables can be unreliable. Claude's setup stores MCP API key material in local settings. For Codex, respect whatever connector/tooling is available in the session.
 
 ## MCP Tools
