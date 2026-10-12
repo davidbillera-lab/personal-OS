@@ -168,7 +168,7 @@ The Claude environment stores workflow skills in `~/.claude/skills/` and syncs t
 - `mission-control`: read MC context at start; update MC status at close.
 - `decisions-sync`: if architecture changed, update `decisions.md`, commit/push as appropriate, and sync MC.
 - `checkpoint`: maintain resumable state around multi-step work and compaction.
-- `CodexQC`: independent GPT-5.x second-opinion review before merge or via `/CodexQC`; reports only. Reciprocal: when Codex builds, Claude reviews (see Codex Builder Lane).
+- `CodexQC`: independent GPT-6.1 Sol second-opinion review before merge or via `/CodexQC`; reports only. Reciprocal: when Codex builds, Claude reviews (see Codex Builder Lane).
 - `advisoryboard`: accountability panel for pivots and business decisions; verdict first.
 - `handoff`: produce project handoff briefs from MC/vault/checkpoint.
 - `phase-relay`: serial multi-agent relay for long phased builds.

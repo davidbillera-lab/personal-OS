@@ -824,3 +824,13 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 **Operator steps after merge:** (1) remove the `MCP_*` key vars (`MCP_API_KEY`, `MCP_READONLY_API_KEY`, `MCP_READONLY_KEYS`, `MCP_LIAISON_KEYS`, `MCP_ORCHESTRATOR_KEYS`) from Vercel env. Keep `MCP_RESOURCE_URL`, which OAuth needs. (2) Delete pre-M2 deployments or put them behind Deployment Protection (spec §3.3). They still accept the keys baked into them, and removing the env vars does not change a deployment that already exists.
 
 **Made by:** operator + agent
+
+### 2026-10-12 — CodexQC reviewer upgraded from GPT-5.5 to GPT-6.1 Sol
+
+**Decision:** `/CodexQC` now reviews with `gpt-6.1-sol`. The script (`~/.claude/skills/CodexQC/codex-qc.mjs`) previously only considered `gpt-5*` model ids, so a GPT-6 model could not be selected even with `--model`; the filter now admits `gpt-5*` and `gpt-6*`, and `gpt-6.1-sol` leads the preference list. The GPT-5.5 entries stay as the automatic fallback when a key lacks 6.1 Sol access. The cost estimate default moved from $1.25 to $2.00 per MTok input (output unchanged at $10).
+
+**Reasoning:** Operator call. The reviewer's value is an independent, current-generation second opinion; GPT-5.5 is a generation behind the models now doing the building.
+
+**Consequence:** The rig dispatcher's host QC calls the same script, so autonomous builds get the new reviewer too. Input cost per review rises about 60% (a typical diff review stays in the cents). `gpt-6.1-sol-pro` is deliberately never auto-picked (cost). **Not changed:** the in-app `runCodexQC` server action (`app/(app)/projects/[id]/actions.ts`) still calls `gpt-4o`; that is a separate path. **Open:** price and endpoint support come from third-party listings, not OpenAI's own pricing page, and the live key's access to `gpt-6.1-sol` is confirmed only once the operator runs `codex-qc.mjs --models` (credential step, rule 10).
+
+**Made by:** David / Claude
