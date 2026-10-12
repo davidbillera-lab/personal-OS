@@ -217,4 +217,4 @@ Hermes (multi-model agent, local desktop app) is the portfolio's **ambient layer
 
 ## Last Updated
 
-Initial draft: May 2026. Skills + vault + MCP server documented: June 2026. Agent roster added: June 2026. Context trim + `lean-code` skill: July 2026. Hermes ambient layer + MC health digest: July 2026. Update on every meaningful decision.
+Initial draft: May 2026. Skills + vault + MCP server documented: June 2026. Agent roster added: June 2026. Context trim + `lean-code` skill: July 2026. Hermes ambient layer + MC health digest: July 2026. CodexQC reviewer GPT-5.5 → GPT-6.1 Sol: October 2026. Update on every meaningful decision.
