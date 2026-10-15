@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { callTool, toolsForScope, isToolAllowed, type McpTokenScope } from '@/lib/mcp-tools'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { bearerToken, lookupApiKey } from '@/lib/api-auth'
+import { hashCode } from '@/lib/oauth'
 
 export const runtime = 'nodejs' // needs Node crypto to hash the presented key
 
@@ -63,10 +64,31 @@ function forbidden(id: unknown, message: string) {
 // grants access; an unknown, revoked or expired key is rejected. No env-var fallback
 // since M2 (spec §3.5) — env vars bake into immutable deployments and can't be revoked.
 async function resolveAuth(req: NextRequest): Promise<ResolvedAuth | null | 'unavailable'> {
-  const key = await lookupApiKey(bearerToken(req))
+  const token = bearerToken(req)
+  const key = await lookupApiKey(token)
   if (key.status === 'error') return 'unavailable'
   if (key.status === 'active') return { scope: key.scope, actor: key.actor }
+  logRejected(req, token, key.status)
   return null
+}
+
+// TEMP diagnostic (2026-10-14, Rio 401 hunt) — remove once resolved.
+// Logs a 10-char SHA-256 prefix (not reversible) plus header shape. Never logs the raw header or token.
+function logRejected(req: NextRequest, token: string, status: string) {
+  const header = (req.headers.get('authorization') || '').trim()
+  const parts = header ? header.split(/\s+/) : []
+  const last = parts[parts.length - 1] || ''
+  console.warn('[mcp] rejected ' + JSON.stringify({
+    status,
+    fp: token ? hashCode(token).slice(0, 10) : null,
+    fpLastPart: !token && last ? hashCode(last).slice(0, 10) : null,
+    scheme: parts.length > 1 ? parts[0] : null,
+    parts: parts.length,
+    tokenLen: token.length || last.length,
+    authHeaders: [...req.headers.keys()].filter(h => /auth|key|token/i.test(h)),
+    host: req.headers.get('host'),
+    ua: (req.headers.get('user-agent') || '').slice(0, 60),
+  }))
 }
 
 function jsonrpcError(id: unknown, code: number, message: string) {
