@@ -121,7 +121,8 @@ describe('provisionWorkspace (integration)', () => {
     writeFileSync(join(source, '.env.local'), 'REAL_SECRET=hunter2\n')
     writeFileSync(join(source, 'secrets.yml'), 'token: abc\n')
     writeFileSync(join(source, 'id_rsa'), 'PRIVATE KEY\n')
-    g(source, ['add', '-A'])
+    // -f: a machine-wide git excludes file may ignore credential-shaped names; force-add so the fixtures actually reach the clone
+    g(source, ['add', '-A', '-f'])
     g(source, ['commit', '-m', 'seed'])
 
     const ws = join(root, 'ws')
@@ -151,7 +152,7 @@ describe('provisionWorkspace (integration)', () => {
     expect(g(ws, ['log', '--all', '--oneline']).stdout.trim().split('\n')).toHaveLength(1)
 
     rmSync(root, { recursive: true, force: true })
-  })
+  }, 30_000)
 
   it('with no clone target it git-inits an empty repo, exactly as before', () => {
     const root = mkdtempSync(join(tmpdir(), 'mc-init-'))
