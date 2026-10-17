@@ -18,7 +18,7 @@ Replacement, chosen by David:
 | Question | Choice | Accepted tradeoff |
 |---|---|---|
 | Who gets pinged | David, not an auto-build | Work waits for a human relay |
-| Rio key scope | `liaison` | The key can also submit, assign and approve requests. Only Rio's instructions stop it, not the key. |
+| Rio key | Keep the existing `orchestrator` key. No rotation, no scope change. | Orchestrator gets every `read` tool, vault search included, plus claim, reassign and submit-plan. Only Rio's instructions keep it watch-only, not the key. |
 | Stuck-jobs Telegram sweep | Keep as backstop | Occasional double ping (Rio + Telegram) for the same item |
 
 ## Gaps this build closes
@@ -44,18 +44,15 @@ Replacement, chosen by David:
    - A fresh `blocked` row shows `waiting_minutes` under 60.
    - `mc_get_request` includes `plan`.
    - Run the suite from an uppercase-drive cwd: `cd /c/Users/david/Documents/personal-os && npx vitest run`. Vitest breaks on a lowercase `c:\` cwd. Baseline is 293/293.
-5. **Remove the temporary 401 diagnostic.** This is `logRejected` in `app/api/mcp/route.ts`, added in PR #16. Remove it once Rio has made one successful call with its new key. Do it in this PR if that has already happened by build time, otherwise in a separate tiny PR.
+5. **Remove the temporary 401 diagnostic.** This is `logRejected` in `app/api/mcp/route.ts`, added in PR #16. Rio has been connecting successfully since 2026-10-16, so remove it in this PR.
 
 **Out of scope:** autonomous builds, dispatcher changes, new key scopes, the Hermes vault-read discrepancy (see Open).
 
-## Operator steps (David only; credential work, never an agent)
+## Operator step (David)
 
-1. **Issue a `liaison` key** for actor `rio`, using the M1 runbook (vault `b97edee2`).
-   - Paste it straight into Rio's MC connection setting in Muse. Never into chat or a repo file.
-2. **Confirm Rio connects:** one `mc_queue_status` call should succeed.
-   - Then revoke Rio's other live key, the `full`-scope one issued 2026-10-15 01:30 UTC.
-   - The key Rio was sending (issued 01:59 UTC, revoked 02:09 UTC) stays revoked. Nothing records why it was revoked.
-3. **Set up Rio's schedule:** paste the instructions below into Muse and schedule them hourly.
+Paste the instructions below into Muse and schedule them hourly. No key work is needed.
+
+Rio already connects with its existing `orchestrator` key. That is the key issued 2026-10-15 01:59 UTC, re-activated at orchestrator scope on 2026-10-16. The spare `full` key was revoked the same day. `mcp_audit_log` shows Rio making successful `mc_queue_status` and `mc_whats_stalled` calls. All three tools Rio needs are `read` tools, which orchestrator includes.
 
 ## Rio's instructions (paste into Muse)
 

@@ -840,16 +840,16 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 **Decision:**
 - The rig dispatcher stays off.
 - Rio, David's Meta Muse agent, checks MC once an hour through `mc_whats_stalled` and messages **David**. David relays to Claude Code or Hermes. There are no autonomous builds.
-- Rio gets a `liaison`-scope key.
+- Rio keeps the `orchestrator`-scope key it already has. There's no rotation and no scope change.
 - The twice-daily serverless stuck-jobs Telegram sweep stays on as a backstop.
 - Build spec: `specs/2026-10-17-rio-watcher.md`. It makes `mc_whats_stalled` use the sweep's `alertBucket()` classifier, returns the plan from `mc_get_request`, and exposes both tools on the local stdio server.
 
 **Reasoning:** The dispatcher checked MC every 5 seconds and ran Docker builds, and the churn got bad enough that David shut it off. Its Hermes nudge was also one-shot, so an ignored nudge went silent for good. David wants to stay the human in the loop, and relaying "work is waiting" is a cheap trade. Rio's hourly clock also fills a gap: Vercel's Hobby plan lets each cron run at most once a day.
 
-**Root cause found along the way:** Rio's 401 (2026-10-14) was not a code bug. The TEMP diagnostic from PR #16 showed Rio sending a well-formed `rio` key that had been revoked 10 minutes after it was issued, while a different `rio` key was still active. The fix is a fresh key, issued by David.
+**Root cause found along the way:** Rio's 401 (2026-10-14) was not a code bug. The TEMP diagnostic from PR #16 showed Rio sending a well-formed `rio` key that had been revoked 10 minutes after it was issued, while a different `rio` key was still active. This was resolved on 2026-10-16: that key was re-activated at `orchestrator` scope and the spare `full` key was revoked. Rio has connected successfully since.
 
 **Consequence:**
-- `liaison` can also submit, assign and approve requests. Only Rio's instructions keep it read-only. David chose that over a new narrow scope (which needed a migration) and over `read` (which includes vault search).
+- Rio's key can search the vault and can claim, reassign and submit plans. Only Rio's instructions keep it watch-only. David chose not to touch a working key over tightening its access.
 - Expect occasional double pings (Rio + Telegram) for the same item.
 - Until the spec is built, Rio can't see the main case, a ready Hermes plan (`submitted` + `planned`).
 
