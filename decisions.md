@@ -854,3 +854,19 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 - Until the spec is built, Rio can't see the main case, a ready Hermes plan (`submitted` + `planned`).
 
 **Made by:** David / Claude
+
+### 2026-10-17 — Outside builders (Lovable, Manus) work through GitHub only
+
+**Decision:** Lovable and Manus are viable build partners for project repos, working outside Mission Control:
+- They work only in GitHub, on a branch, never on `main`.
+- Claude Code or Codex reviews each pull request before merge. A builder never reviews its own work.
+- They never receive Mission Control keys or credentials. MC picks up their work from the repo.
+- Unchanged: the OS itself (`personal-os`) still excludes Lovable.
+
+**Reasoning:** Least privilege. GitHub is already the source of truth, so outside tools can contribute without being handed MC permissions.
+
+**Consequence:**
+- Lovable's GitHub sync has historically committed straight to the default branch. A Lovable-connected repo must route its work to a branch, or it will collide with PR-only `main`.
+- The Lovable and Manus lines in the global `~/.claude/CLAUDE.md` Tool Routing section ("prototypes only" and "not for core dependencies") are now stale. David updates them.
+
+**Made by:** David / Claude
