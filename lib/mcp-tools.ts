@@ -27,7 +27,7 @@ export type McpScope = 'read' | 'write'
 // deposit a planning artifact on its own submitted work, but never execute,
 // complete, fail, promote to queued, or touch the vault/credentials. Execution
 // stays with real workers.
-export type McpTokenScope = 'full' | 'read' | 'liaison' | 'orchestrator'
+export type McpTokenScope = 'full' | 'read' | 'liaison' | 'orchestrator' | 'sync'
 
 // The only write tools an 'orchestrator' token adds on top of the read set.
 // Widen ONLY by adding a name here — never by loosening the checks below.
@@ -35,6 +35,17 @@ export const ORCHESTRATOR_EXTRA_TOOLS = new Set<string>([
   'mc_claim_request',
   'mc_reassign_request',
   'mc_submit_plan',
+])
+
+// The only write tools a 'sync' token adds on top of the read set — the
+// Mission Control session bookends for the claude.ai connector: claim a task,
+// complete it, update project status. Widen ONLY by adding a name here, never
+// by loosening the checks below. Credential reads stay impossible:
+// mc_get_credential is write-scoped and deliberately not in this set.
+export const SYNC_EXTRA_TOOLS = new Set<string>([
+  'mc_claim_task',
+  'mc_complete_task',
+  'mc_update_project_status',
 ])
 
 // The exact tool set a 'liaison' token may see and call. Deliberately tiny:
@@ -607,6 +618,7 @@ export function toolsForScope(tokenScope: McpTokenScope): McpTool[] {
   if (tokenScope === 'full') return MCP_TOOLS
   if (tokenScope === 'liaison') return MCP_TOOLS.filter(t => LIAISON_TOOLS.has(t.name))
   if (tokenScope === 'orchestrator') return MCP_TOOLS.filter(t => t.scope === 'read' || ORCHESTRATOR_EXTRA_TOOLS.has(t.name))
+  if (tokenScope === 'sync') return MCP_TOOLS.filter(t => t.scope === 'read' || SYNC_EXTRA_TOOLS.has(t.name))
   return MCP_TOOLS.filter(t => t.scope === 'read')
 }
 
@@ -616,6 +628,7 @@ export function isToolAllowed(name: string, tokenScope: McpTokenScope): boolean 
   if (tokenScope === 'liaison') return LIAISON_TOOLS.has(name)
   const tool = MCP_TOOLS.find(t => t.name === name)
   if (tokenScope === 'orchestrator') return tool?.scope === 'read' || ORCHESTRATOR_EXTRA_TOOLS.has(name)
+  if (tokenScope === 'sync') return tool?.scope === 'read' || SYNC_EXTRA_TOOLS.has(name)
   return tool?.scope === 'read'
 }
 

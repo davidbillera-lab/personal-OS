@@ -13,7 +13,7 @@ export function GET() {
     {
       resource: cfg.resource,
       authorization_servers: [cfg.issuer],
-      scopes_supported: ['liaison'],
+      scopes_supported: ['liaison', 'sync'],
       bearer_methods_supported: ['header'],
       resource_documentation: `${cfg.issuer}/oauth/authorize`,
     },

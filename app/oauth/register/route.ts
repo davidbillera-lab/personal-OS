@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getOAuthConfig, isRegistrableRedirectUri, createOAuthClient, checkRateLimit, rateKey } from '@/lib/oauth'
+import { getOAuthConfig, isRegistrableRedirectUri, createOAuthClient, checkRateLimit, rateKey, connectorForRedirects, CONNECTOR_GRANTS } from '@/lib/oauth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -11,8 +11,9 @@ function clientIp(req: NextRequest): string {
 // Dynamic Client Registration (RFC 7591). ChatGPT posts its client metadata
 // (chiefly redirect_uris) and gets back a client_id. We are a public PKCE
 // authorization server: no client_secret is issued. Registration is guarded so
-// only callbacks under the ChatGPT connector domain (or the exact configured
-// CHATGPT_REDIRECT_URI) can register — nothing else can obtain a client_id.
+// only the exact claude.ai callbacks, or callbacks under the ChatGPT connector
+// domain (or the exact configured CHATGPT_REDIRECT_URI), can register — nothing
+// else can obtain a client_id. The client's scope is fixed here by connector.
 export async function POST(req: NextRequest) {
   const cfg = getOAuthConfig()
 
@@ -65,9 +66,18 @@ export async function POST(req: NextRequest) {
     )
   }
 
+  const connector = connectorForRedirects(redirectUris as string[])
+  if (!connector) {
+    return NextResponse.json(
+      { error: 'invalid_redirect_uri', error_description: 'redirect_uris must all belong to a single connector' },
+      { status: 400 }
+    )
+  }
+
   const client = await createOAuthClient({
     redirect_uris: redirectUris as string[],
     client_name: typeof body.client_name === 'string' ? body.client_name : undefined,
+    scope: CONNECTOR_GRANTS[connector].scope,
   })
 
   // RFC 7591 registration response for a public client.
@@ -78,7 +88,7 @@ export async function POST(req: NextRequest) {
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       token_endpoint_auth_method: 'none',
-      scope: 'liaison offline_access',
+      scope: `${client.scope} offline_access`,
     },
     { status: 201, headers: { 'Cache-Control': 'no-store' } }
   )

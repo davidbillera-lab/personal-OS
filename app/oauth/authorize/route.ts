@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getOAuthConfig, getOAuthClient, insertAuthCode, safeEqual, checkRateLimit, rateKey, type OAuthConfig } from '@/lib/oauth'
+import { getOAuthConfig, getOAuthClient, insertAuthCode, safeEqual, checkRateLimit, rateKey, grantForClientScope, KNOWN_REQUEST_SCOPES, type OAuthConfig, type OAuthClient, type OAuthTokenScope } from '@/lib/oauth'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 
 function clientIp(req: NextRequest): string {
@@ -18,14 +18,32 @@ export const dynamic = 'force-dynamic'
 // match our MCP resource; redirect_uri is validated EXACTLY against the registered client.
 
 // Deny framing — an approval page must not be clickjackable. form-action allows
-// 'self' (the POST) AND chatgpt.com, because approval 302-redirects the auth code
-// back to ChatGPT's callback; a bare 'self' silently blocks that cross-origin
-// redirect (the browser spins and the flow dies).
+// 'self' (the POST) AND the connector hosts, because approval 302-redirects the
+// auth code back to the connector's callback; a bare 'self' silently blocks that
+// cross-origin redirect (the browser spins and the flow dies).
 const SECURITY_HEADERS = {
   'Content-Type': 'text/html; charset=utf-8',
   'Cache-Control': 'no-store',
   'X-Frame-Options': 'DENY',
-  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://chatgpt.com; frame-ancestors 'none'",
+  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://chatgpt.com https://claude.ai https://claude.com; frame-ancestors 'none'",
+}
+
+// Consent-screen wording per connector grant.
+const CONSENT_COPY: Record<OAuthTokenScope, { title: string; can: string[] }> = {
+  liaison: {
+    title: 'Authorize ChatGPT liaison',
+    can: [
+      "Read Mission Control status (recent requests, what's stalled, results)",
+      'Submit requests into the queue for a worker to pick up',
+    ],
+  },
+  sync: {
+    title: 'Authorize Claude (Mission Control sync)',
+    can: [
+      'Read Mission Control (projects, tasks, queue, vault knowledge)',
+      'Claim and complete tasks, and update project status',
+    ],
+  },
 }
 
 interface AuthParams {
@@ -80,7 +98,8 @@ function redirectError(redirectUri: string, state: string, error: string, descri
 // Render the consent screen. All OAuth params ride through as hidden fields so
 // the POST approval carries exactly what was validated. `errorMsg` shows a failed
 // passcode attempt inline.
-function renderConsent(p: AuthParams, cfg: OAuthConfig, status = 200, errorMsg = ''): NextResponse {
+function renderConsent(p: AuthParams, cfg: OAuthConfig, clientScope: OAuthTokenScope, status = 200, errorMsg = ''): NextResponse {
+  const copy = CONSENT_COPY[clientScope]
   const hidden = (['response_type', 'client_id', 'redirect_uri', 'scope', 'state', 'code_challenge', 'code_challenge_method', 'resource'] as const)
     .map(k => `<input type="hidden" name="${k}" value="${esc(p[k])}">`)
     .join('\n')
@@ -88,15 +107,14 @@ function renderConsent(p: AuthParams, cfg: OAuthConfig, status = 200, errorMsg =
     ? `<p style="color:#b00020;margin:.5rem 0">${esc(errorMsg)}</p>`
     : ''
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Authorize ChatGPT liaison</title></head>
+<title>${esc(copy.title)}</title></head>
 <body style="font-family:system-ui;max-width:34rem;margin:3rem auto;padding:0 1.25rem;color:#1a1a1a">
-  <h1 style="font-size:1.25rem;margin-bottom:.25rem">Authorize ChatGPT liaison</h1>
+  <h1 style="font-size:1.25rem;margin-bottom:.25rem">${esc(copy.title)}</h1>
   <p style="color:#555;margin-top:0">Mission Control · ${esc(cfg.issuer)}</p>
   <div style="border:1px solid #e2e2e2;border-radius:10px;padding:1rem 1.25rem;margin:1.25rem 0;background:#fafafa">
     <p style="margin:.25rem 0"><strong>This connection can:</strong></p>
     <ul style="margin:.5rem 0 .25rem;padding-left:1.1rem;line-height:1.6">
-      <li>Read Mission Control status (recent requests, what's stalled, results)</li>
-      <li>Submit requests into the queue for a worker to pick up</li>
+      ${copy.can.map(line => `<li>${esc(line)}</li>`).join('\n      ')}
     </ul>
     <p style="margin:.75rem 0 .25rem;color:#777"><strong>It cannot:</strong> run code, deploy, read credentials, or spend money.</p>
   </div>
@@ -116,7 +134,7 @@ function renderConsent(p: AuthParams, cfg: OAuthConfig, status = 200, errorMsg =
 // Validate hard preconditions (client + redirect) that gate everything else.
 async function validateClientAndRedirect(
   p: AuthParams
-): Promise<{ ok: true } | { ok: false; page: NextResponse }> {
+): Promise<{ ok: true; client: OAuthClient } | { ok: false; page: NextResponse }> {
   if (!p.client_id) return { ok: false, page: fatalPage('missing client_id') }
   const client = await getOAuthClient(p.client_id)
   if (!client) return { ok: false, page: fatalPage('unknown client_id') }
@@ -125,20 +143,21 @@ async function validateClientAndRedirect(
   if (!client.redirect_uris.includes(p.redirect_uri)) {
     return { ok: false, page: fatalPage('redirect_uri does not match the registered client') }
   }
-  return { ok: true }
+  return { ok: true, client }
 }
 
 // Validate the remaining OAuth params. Failures here are safe to redirect back.
-function validateRequest(p: AuthParams, cfg: OAuthConfig): NextResponse | null {
+function validateRequest(p: AuthParams, cfg: OAuthConfig, clientScope: OAuthTokenScope): NextResponse | null {
   if (p.response_type !== 'code') return redirectError(p.redirect_uri, p.state, 'unsupported_response_type', 'only response_type=code is supported', cfg.issuer)
   if (!p.code_challenge) return redirectError(p.redirect_uri, p.state, 'invalid_request', 'code_challenge is required (PKCE)', cfg.issuer)
   if (p.code_challenge_method !== 'S256') return redirectError(p.redirect_uri, p.state, 'invalid_request', 'code_challenge_method must be S256', cfg.issuer)
-  // Always validate scope — an empty/omitted scope defaults to 'liaison' rather
-  // than skipping the subset check (H4: a falsy scope must not bypass validation).
-  const requestedScopes = new Set((p.scope || 'liaison').trim().split(/\s+/).filter(Boolean))
-  const hasUnsupportedScope = [...requestedScopes].some(scope => scope !== 'liaison' && scope !== 'offline_access')
-  if (!requestedScopes.has('liaison') || hasUnsupportedScope) {
-    return redirectError(p.redirect_uri, p.state, 'invalid_scope', 'available scopes are liaison and offline_access', cfg.issuer)
+  // Always validate scope — an empty/omitted scope defaults to the client's own
+  // rather than skipping the check (H4: a falsy scope must not bypass validation).
+  // Unknown scopes are rejected. Known ones are tolerated because MCP clients
+  // request every advertised scope; the token still carries ONLY clientScope.
+  const requestedScopes = new Set((p.scope || clientScope).trim().split(/\s+/).filter(Boolean))
+  if ([...requestedScopes].some(scope => !KNOWN_REQUEST_SCOPES.has(scope))) {
+    return redirectError(p.redirect_uri, p.state, 'invalid_scope', `this client's scopes are ${clientScope} and offline_access`, cfg.issuer)
   }
   if (p.resource && p.resource !== cfg.resource) return redirectError(p.redirect_uri, p.state, 'invalid_target', 'resource does not match this MCP server', cfg.issuer)
   return null
@@ -152,10 +171,11 @@ export async function GET(req: NextRequest) {
   const p = readParams(req.nextUrl.searchParams)
   const gate = await validateClientAndRedirect(p)
   if (!gate.ok) return gate.page
-  const paramErr = validateRequest(p, cfg)
+  const clientScope = grantForClientScope(gate.client.scope).scope
+  const paramErr = validateRequest(p, cfg, clientScope)
   if (paramErr) return paramErr
 
-  return renderConsent(p, cfg)
+  return renderConsent(p, cfg, clientScope)
 }
 
 export async function POST(req: NextRequest) {
@@ -177,7 +197,8 @@ export async function POST(req: NextRequest) {
 
   const gate = await validateClientAndRedirect(p)
   if (!gate.ok) return gate.page
-  const paramErr = validateRequest(p, cfg)
+  const clientScope = grantForClientScope(gate.client.scope).scope
+  const paramErr = validateRequest(p, cfg, clientScope)
   if (paramErr) return paramErr
 
   // Operator gate — the resource-owner proof. Wrong/missing passcode re-renders
@@ -190,7 +211,7 @@ export async function POST(req: NextRequest) {
         error: `failed passcode attempt (client ${p.client_id})`,
       })
     } catch { /* audit is best-effort */ }
-    return renderConsent(p, cfg, 401, 'Incorrect passcode.')
+    return renderConsent(p, cfg, clientScope, 401, 'Incorrect passcode.')
   }
 
   // Approved: mint a short-lived, single-use code bound to this client, redirect,
@@ -200,6 +221,7 @@ export async function POST(req: NextRequest) {
     redirect_uri: p.redirect_uri,
     code_challenge: p.code_challenge,
     resource: p.resource || cfg.resource,
+    scope: clientScope,
   })
 
   const u = new URL(p.redirect_uri)
