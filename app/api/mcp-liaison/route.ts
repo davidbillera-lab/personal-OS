@@ -7,23 +7,24 @@ import { LIAISON_INSTRUCTIONS } from '@/lib/liaison-workflows'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-// OAuth-gated MCP endpoint for the ChatGPT liaison.
-// A valid liaison access token (JWT minted by /oauth/token, aud = this resource)
-// resolves to actor 'chatgpt-liaison' + scope 'liaison' — then dispatches through
-// the SAME isToolAllowed / callTool / audit path as the bearer endpoint. Workers,
-// vault, and credential tools are invisible and forbidden (scope 'liaison').
+// OAuth-gated MCP endpoint for the ChatGPT liaison and the claude.ai connector.
+// A valid access token (JWT minted by /oauth/token, aud = this resource) carries
+// its scope and actor: 'liaison' / 'chatgpt-liaison' or 'sync' / 'claude-ai'.
+// Both dispatch through the SAME isToolAllowed / callTool / audit path as the
+// bearer endpoint. Credential tools are invisible and forbidden to both scopes.
 // The bearer worker endpoint (/api/mcp) and the no-auth probe are untouched.
 
 const FALLBACK_PROTOCOL = '2025-06-18'
-const SCOPE = 'liaison' as const
-const ACTOR = 'chatgpt-liaison'
+const SYNC_INSTRUCTIONS =
+  'Mission Control sync for Claude. Read projects, tasks, the request queue and vault knowledge. ' +
+  'The only writes are the session bookends: claim a task, complete it, update project status.'
 
 // Append-only audit stamp — mirrors /api/mcp. Non-fatal: never breaks a response.
-async function logAudit(tool: string, ok: boolean, error?: string, requestId?: string | null) {
+async function logAudit(actor: string, tool: string, ok: boolean, error?: string, requestId?: string | null) {
   try {
     const supabase = createAdminSupabaseClient()
     await supabase.from('mcp_audit_log').insert({
-      actor: ACTOR,
+      actor,
       tool,
       ok,
       error: error ?? null,
@@ -94,6 +95,10 @@ export async function POST(req: NextRequest) {
   // Global revocation kill-switch — reject tokens issued before oauth_config.revoked_before.
   if (await isTokenRevoked(verdict.claims.iat)) return unauthorized('token revoked')
 
+  // Scope and actor come from the verified claims; anything else gets the narrowest.
+  const scope = (verdict.claims.scope === 'sync' ? 'sync' : 'liaison') as 'liaison' | 'sync'
+  const actor = verdict.claims.sub || (scope === 'sync' ? 'claude-ai' : 'chatgpt-liaison')
+
   // Per-token throttle: 60 calls / min / jti. Caps a leaked token's blast radius
   // within its short TTL.
   if (!(await checkRateLimit(rateKey('mcp', verdict.claims.jti), 60, 60))) {
@@ -122,8 +127,8 @@ export async function POST(req: NextRequest) {
       {
         protocolVersion: version,
         capabilities: { tools: {} },
-        serverInfo: { name: 'mission-control-liaison', version: '1.0.0' },
-        instructions: LIAISON_INSTRUCTIONS,
+        serverInfo: { name: scope === 'sync' ? 'mission-control-sync' : 'mission-control-liaison', version: '1.0.0' },
+        instructions: scope === 'sync' ? SYNC_INSTRUCTIONS : LIAISON_INSTRUCTIONS,
       },
       version
     )
@@ -134,7 +139,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (method === 'tools/list') {
-    return jsonrpcResult(id, { tools: toolsForScope(SCOPE) }, version)
+    return jsonrpcResult(id, { tools: toolsForScope(scope) }, version)
   }
 
   if (method === 'tools/call') {
@@ -143,13 +148,13 @@ export async function POST(req: NextRequest) {
     const requestId = auditRequestId(toolArgs)
 
     if (!toolName) {
-      await logAudit('(missing)', false, 'missing tool name')
+      await logAudit(actor, '(missing)', false, 'missing tool name')
       return jsonrpcError(id, -32602, 'Missing tool name')
     }
-    // Scope gate — defense in depth beyond the filtered tools/list. A liaison
-    // token calling a worker/vault/credential tool is denied and audited.
-    if (!isToolAllowed(toolName, SCOPE)) {
-      await logAudit(toolName, false, 'forbidden: out of scope', requestId)
+    // Scope gate — defense in depth beyond the filtered tools/list. A token
+    // calling a tool outside its scope (e.g. credentials) is denied and audited.
+    if (!isToolAllowed(toolName, scope)) {
+      await logAudit(actor, toolName, false, 'forbidden: out of scope', requestId)
       return NextResponse.json(
         { jsonrpc: '2.0', id: id ?? null, error: { code: -32004, message: `Tool not permitted for this scope: ${toolName}` } },
         { status: 403 }
@@ -157,12 +162,12 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-      const text = await callTool(toolName, toolArgs, ACTOR)
-      await logAudit(toolName, true, undefined, requestId)
+      const text = await callTool(toolName, toolArgs, actor)
+      await logAudit(actor, toolName, true, undefined, requestId)
       return jsonrpcResult(id, { content: [{ type: 'text', text }] }, version)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      await logAudit(toolName, false, msg, requestId)
+      await logAudit(actor, toolName, false, msg, requestId)
       return jsonrpcResult(id, { content: [{ type: 'text', text: `Error: ${msg}` }], isError: true }, version)
     }
   }

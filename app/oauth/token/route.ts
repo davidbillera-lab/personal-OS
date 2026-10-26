@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getOAuthConfig, consumeAuthCode, verifyPkceS256, signAccessToken, checkRateLimit, rateKey, issueRefreshToken, consumeRefreshToken } from '@/lib/oauth'
+import { getOAuthConfig, consumeAuthCode, verifyPkceS256, signAccessToken, checkRateLimit, rateKey, issueRefreshToken, consumeRefreshToken, getOAuthClient, grantForClientScope } from '@/lib/oauth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -60,14 +60,16 @@ export async function POST(req: NextRequest) {
       return tokenError(result.code, result.message, result.code === 'server_error' ? 500 : 400)
     }
 
-    const { token, expiresIn } = signAccessToken(cfg)
+    // The grant comes from the registered client, never from the request.
+    const grant = grantForClientScope((await getOAuthClient(clientId))?.scope ?? 'liaison')
+    const { token, expiresIn } = signAccessToken(cfg, grant)
     return NextResponse.json(
       {
         access_token: token,
         token_type: 'Bearer',
         expires_in: expiresIn,
         refresh_token: refreshToken, // non-rotating: unchanged
-        scope: 'liaison',
+        scope: grant.scope,
       },
       { headers: { 'Cache-Control': 'no-store', Pragma: 'no-cache' } }
     )
@@ -110,18 +112,19 @@ export async function POST(req: NextRequest) {
     return tokenError('invalid_target', 'resource does not match the authorization code')
   }
 
-  const { token, expiresIn } = signAccessToken(cfg)
+  const grant = grantForClientScope((await getOAuthClient(consumed.client_id))?.scope ?? 'liaison')
+  const { token, expiresIn } = signAccessToken(cfg, grant)
   let refreshToken: string
   try {
     // Single-purpose server: refresh always issued; offline_access is advertised
     // for client compatibility but not gated (no scope-conditional issuance).
-    refreshToken = await issueRefreshToken({ client_id: consumed.client_id, resource: boundResource })
+    refreshToken = await issueRefreshToken({ client_id: consumed.client_id, resource: boundResource, scope: grant.scope })
   } catch (error) {
     console.error('[oauth] refresh-token issuance failed:', error)
     return tokenError('server_error', 'refresh token issuance failed', 500)
   }
   return NextResponse.json(
-    { access_token: token, token_type: 'Bearer', expires_in: expiresIn, refresh_token: refreshToken, scope: 'liaison' },
+    { access_token: token, token_type: 'Bearer', expires_in: expiresIn, refresh_token: refreshToken, scope: grant.scope },
     { headers: { 'Cache-Control': 'no-store', Pragma: 'no-cache' } }
   )
 }

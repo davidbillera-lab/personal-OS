@@ -1,11 +1,12 @@
 import { createHmac, createHash, randomBytes, timingSafeEqual } from 'crypto'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 
-// OAuth 2.1 + PKCE facade core for the ChatGPT liaison.
-// A valid access token minted here grants ONLY the 'liaison' scope mapped to the
-// 'chatgpt-liaison' identity — the same narrow surface as the static liaison
-// key. Access tokens are stateless signed JWTs (HS256); only DCR clients and
-// short-lived single-use auth codes persist (migration 018).
+// OAuth 2.1 + PKCE facade core for the ChatGPT liaison and the claude.ai connector.
+// The scope a token carries is fixed when its client registers (CONNECTOR_GRANTS):
+// ChatGPT callbacks → 'liaison' ('chatgpt-liaison'), Claude callbacks → 'sync'
+// ('claude-ai'). A request can never widen it. Access tokens are stateless signed
+// JWTs (HS256); only DCR clients and short-lived single-use auth codes persist
+// (migration 018).
 
 // ---- Config (fail closed) --------------------------------------------------
 
@@ -39,6 +40,38 @@ const MIN_PASSCODE_LEN = 16
 // callback URL is known (set via CHATGPT_REDIRECT_URI), DCR accepts only
 // redirect_uris under this prefix so nothing outside ChatGPT can register.
 export const CHATGPT_REDIRECT_PREFIX = 'https://chatgpt.com/connector/oauth/'
+
+// claude.ai connector callbacks. Exact match only — no prefix, no bootstrap mode.
+export const CLAUDE_REDIRECT_URIS = new Set<string>([
+  'https://claude.ai/api/mcp/auth_callback',
+  'https://claude.com/api/mcp/auth_callback',
+])
+
+// What each connector's tokens grant. Decided once, at client registration.
+export const CONNECTOR_GRANTS = {
+  chatgpt: { scope: 'liaison', sub: 'chatgpt-liaison' },
+  claude: { scope: 'sync', sub: 'claude-ai' },
+} as const
+export type ConnectorId = keyof typeof CONNECTOR_GRANTS
+export type OAuthTokenScope = (typeof CONNECTOR_GRANTS)[ConnectorId]['scope']
+export type TokenGrant = (typeof CONNECTOR_GRANTS)[ConnectorId]
+
+// Scopes a client may name in /authorize. Naming one does not grant it: the
+// token always carries the registered client's scope.
+export const KNOWN_REQUEST_SCOPES = new Set<string>(['liaison', 'sync', 'offline_access'])
+
+// The grant for a stored client scope. Unknown or legacy values get the narrowest.
+export function grantForClientScope(scope: string): TokenGrant {
+  return scope === 'sync' ? CONNECTOR_GRANTS.claude : CONNECTOR_GRANTS.chatgpt
+}
+
+// Which connector a set of redirect_uris belongs to. A set straddling both is
+// rejected by /oauth/register.
+export function connectorForRedirects(uris: string[]): ConnectorId | null {
+  if (uris.every(u => CLAUDE_REDIRECT_URIS.has(u))) return 'claude'
+  if (uris.every(u => !CLAUDE_REDIRECT_URIS.has(u))) return 'chatgpt'
+  return null
+}
 
 let cachedConfig: OAuthConfig | null = null
 
@@ -135,14 +168,15 @@ interface AccessTokenClaims {
   jti: string
 }
 
-// Mint a liaison access token bound to the MCP resource audience.
-export function signAccessToken(cfg: OAuthConfig): { token: string; expiresIn: number } {
+// Mint an access token bound to the MCP resource audience, carrying the grant of
+// the client it was issued to (default: the narrow ChatGPT liaison grant).
+export function signAccessToken(cfg: OAuthConfig, grant: TokenGrant = CONNECTOR_GRANTS.chatgpt): { token: string; expiresIn: number } {
   const now = Math.floor(Date.now() / 1000)
   const claims: AccessTokenClaims = {
     iss: cfg.issuer,
-    sub: 'chatgpt-liaison',
+    sub: grant.sub,
     aud: cfg.resource,
-    scope: 'liaison',
+    scope: grant.scope,
     iat: now,
     exp: now + cfg.accessTokenTtl,
     jti: randomToken(12),
@@ -155,7 +189,7 @@ export function signAccessToken(cfg: OAuthConfig): { token: string; expiresIn: n
 
 export interface VerifyResult { valid: boolean; reason?: string; claims?: AccessTokenClaims }
 
-// Verify signature (constant-time), then exp, iss, aud, and liaison scope.
+// Verify signature (constant-time), then exp, iss, aud, and a known connector scope.
 // Rejects any token that isn't a well-formed HS256 JWT we minted for this resource.
 export function verifyAccessToken(token: string, cfg: OAuthConfig): VerifyResult {
   const parts = token.split('.')
@@ -178,7 +212,7 @@ export function verifyAccessToken(token: string, cfg: OAuthConfig): VerifyResult
   if (typeof claims.exp !== 'number' || claims.exp < now) return { valid: false, reason: 'expired' }
   if (claims.iss !== cfg.issuer) return { valid: false, reason: 'wrong issuer' }
   if (claims.aud !== cfg.resource) return { valid: false, reason: 'wrong audience' }
-  if (claims.scope !== 'liaison') return { valid: false, reason: 'insufficient scope' }
+  if (claims.scope !== 'liaison' && claims.scope !== 'sync') return { valid: false, reason: 'insufficient scope' }
   return { valid: true, claims }
 }
 
@@ -203,6 +237,7 @@ export function verifyPkceS256(verifier: string, challenge: string): boolean {
 // is refused UNLESS bootstrap mode is explicitly enabled — in which case any
 // callback under the ChatGPT connector prefix is allowed, purely for first-connect.
 export function isRegistrableRedirectUri(uri: string, cfg: OAuthConfig): boolean {
+  if (CLAUDE_REDIRECT_URIS.has(uri)) return true
   if (cfg.chatgptRedirectUri) return uri === cfg.chatgptRedirectUri
   if (cfg.allowDcrBootstrap) return uri.startsWith(CHATGPT_REDIRECT_PREFIX) && isHttpsUrl(uri)
   return false // fail closed: no exact redirect configured and no bootstrap
@@ -224,6 +259,7 @@ export interface OAuthClient {
 export async function createOAuthClient(params: {
   redirect_uris: string[]
   client_name?: string
+  scope?: OAuthTokenScope
 }): Promise<OAuthClient> {
   const supabase = createAdminSupabaseClient()
   const client_id = randomToken(16)
@@ -237,7 +273,7 @@ export async function createOAuthClient(params: {
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       token_endpoint_auth_method: 'none',
-      scope: 'liaison',
+      scope: params.scope ?? 'liaison',
     })
     .select('client_id, redirect_uris, client_name, scope')
     .single()
@@ -262,6 +298,7 @@ export async function insertAuthCode(params: {
   code_challenge: string
   resource: string | null
   ttlSeconds?: number
+  scope?: OAuthTokenScope
 }): Promise<string> {
   const supabase = createAdminSupabaseClient()
   const code = randomToken(32)
@@ -272,7 +309,7 @@ export async function insertAuthCode(params: {
     redirect_uri: params.redirect_uri,
     code_challenge: params.code_challenge,
     code_challenge_method: 'S256',
-    scope: 'liaison',
+    scope: params.scope ?? 'liaison',
     resource: params.resource,
     expires_at,
   })
@@ -382,6 +419,7 @@ export async function consumeAuthCode(code: string): Promise<ConsumedCode | { er
 export async function issueRefreshToken(params: {
   client_id: string
   resource: string | null
+  scope?: OAuthTokenScope
 }): Promise<string> {
   const supabase = createAdminSupabaseClient()
   const cfg = getOAuthConfig()
@@ -390,7 +428,7 @@ export async function issueRefreshToken(params: {
   const { error } = await supabase.from('oauth_refresh_tokens').insert({
     token_hash: hashCode(token),
     client_id: params.client_id,
-    scope: 'liaison',
+    scope: params.scope ?? 'liaison',
     resource: params.resource,
     expires_at,
   })
