@@ -854,3 +854,16 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 - Until the spec is built, Rio can't see the main case, a ready Hermes plan (`submitted` + `planned`).
 
 **Made by:** David / Claude
+
+### 2026-10-25 — claude.ai Mission Control connector live on a 'sync' OAuth scope
+
+**Decision:** The OAuth facade now serves two connectors. claude.ai registers (DCR, exact-match `claude.ai`/`claude.com` callbacks) as a `sync` client: every read tool plus `mc_claim_task`, `mc_complete_task`, `mc_update_project_status`; no credential or vault-write tools. ChatGPT stays on `liaison`. Canonical OAuth host is `mc.jsgliquidators.com` (`OAUTH_ISSUER`, `MCP_RESOURCE_URL` = `/api/mcp-liaison`), replacing the `personal-os-git-main-jsg1` branch alias. PR #21; spec `specs/2026-08-20-claude-sync-connector.md`.
+
+**Reasoning:** The connector had 502'd since at least August because it pointed at `personal-os.vercel.app` (someone else's app), and the facade only spoke `liaison`. The custom domain survives Vercel renames and transfers with the asset.
+
+**Consequence:**
+- Token scope is fixed by the registered client row, never the request. Deviation from the spec: `/authorize` tolerates any known requested scope, because MCP clients request every advertised scope and the strict check would have broken ChatGPT once `sync` was advertised.
+- `OAUTH_CONSENT_PASSCODE` was reset during go-live (a terminal paste had saved a sub-16-character value, which fails closed). Reconnecting ChatGPT needs the new passphrase.
+- Verified 2026-10-25: Claude client registered 04:50 UTC, sync token issued 04:54 UTC. `/api/mcp` key endpoint (Hermes) unaffected. A few unused `sync` client rows from setup attempts remain; harmless without the passcode.
+
+**Made by:** David / Claude
