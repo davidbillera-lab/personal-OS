@@ -14,9 +14,17 @@ search query. Built once in Mission Control because multiple portfolio apps need
 resale numbers and MC is the shared credential broker. Apps are **thin clients** — they call
 this endpoint, they do **not** build their own scraper.
 
-Data source: eBay public sold-listings search (`LH_Sold=1&LH_Complete=1`) scraped via
-Firecrawl structured extraction. Results cached 7 days in `ebay_sold_comps`; cost logged to
-`model_costs`.
+Data source (v6, 2026-10-31): Apify actor `blackfalcondata~ebay-sold-listings-scraper`, which
+browses eBay's sold search with residential proxies and returns structured rows. **No LLM in
+the path.** Only rows with a real eBay item number and a sale within 120 days are kept.
+Results cached 7 days in `ebay_sold_comps` (`data_source = 'ebay_sold_apify'`); cost logged
+to `model_costs` (about $0.01 per run + $0.0024 per listing).
+
+**Incident, 2026-10-31:** v3–v5 used Firecrawl LLM JSON extraction. eBay 403s automated
+requests, and on a blocked page the LLM invented listings. Every cached sale was dated 2023,
+about 24% carried item id `1234567890`, and titles echoed the query. Rows with
+`data_source = 'ebay_sold'` are those fabrications and are never served. Never route eBay
+pages through an LLM extractor again.
 
 ---
 
@@ -104,10 +112,11 @@ Marketplace Insights) without any consumer change.
 
 ## Operator notes / gotchas
 
-- **Firecrawl timeout:** eBay's sold page is JS-heavy; the request sets `timeout:90000` +
-  `waitFor:2500`. Default (~30s) returns `502 SCRAPE_TIMEOUT`. Don't lower it.
-- **Stale secret = redeploy.** Secrets are module-cached in a `secretsPromise`. Rotating
-  `FIRECRAWL_API_KEY` or the service token in `credentials` requires a redeploy to bust the
-  cache.
-- Cost logged per live scrape: `model_costs` row, `provider:firecrawl`, `cost_usd:0.01`,
+- **Latency:** one synchronous actor run per uncached query, 11–37s in the 2026-10-31 probe
+  (`run-sync-get-dataset-items?timeout=120`).
+- **Secrets:** `EBAY_COMPS_SERVICE_TOKEN` and `APIFY_API_TOKEN` in the MC `credentials` table.
+  They are module-cached in a `secretsPromise`, so rotating either requires a redeploy.
+- **Source code** lives in `personal-os/supabase/functions/ebay-sold-comps/` (first committed
+  2026-10-31; before that it existed only as a direct deploy).
+- Cost logged per live scrape: `model_costs` row, `provider:apify`, `model` = actor id,
   `purpose:ebay_sold_comps`, `project_id` = FlipRadar's MC row.

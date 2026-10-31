@@ -6,8 +6,15 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 // sample listings). Built once, consumed by many (FlipRadar #1, VZT #2).
 //
 // Secrets: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are auto-injected.
-// EBAY_COMPS_SERVICE_TOKEN + FIRECRAWL_API_KEY are read at runtime from the
+// EBAY_COMPS_SERVICE_TOKEN + APIFY_API_TOKEN are read at runtime from the
 // `credentials` table via the service role.
+//
+// v6 (2026-10-31): real sold data, no LLM. v5 had Firecrawl extract listings
+// with an LLM; eBay 403s automated requests, and on a blocked page the LLM
+// invented listings (every cached sale dated 2023, ~24% with item id
+// 1234567890). v6 reads structured rows from an Apify actor that browses eBay
+// with residential proxies, keeps only rows with a real item number and a sale
+// inside MAX_SOLD_AGE_DAYS, and never serves v5's cached rows.
 //
 // v4 (2026-07-05): credentials table rows are now AES-256-GCM encrypted
 // (personal-os lib/crypto.ts format: iv 24hex + authTag 32hex + ciphertext hex).
@@ -23,8 +30,18 @@ const CREDENTIAL_ENCRYPTION_KEY = Deno.env.get("CREDENTIAL_ENCRYPTION_KEY") ?? "
 const FLIPRADAR_PROJECT_ID = "95e468ba-d76b-4329-aef0-3c56289a96fa";
 // Cache freshness window.
 const CACHE_TTL_DAYS = 7;
-// Per-call Firecrawl cost estimate (structured json extraction).
-const FIRECRAWL_CALL_COST_USD = 0.01;
+// Sold-listings source (Apify pay-per-event pricing, checked 2026-10-31).
+// minimal: one actor, no fallback; khadinakbar~ebay-sold-comps-analytics-scraper
+// is the researched backup if this one degrades.
+const APIFY_ACTOR = "blackfalcondata~ebay-sold-listings-scraper";
+const APIFY_COST_PER_RUN_USD = 0.01;
+const APIFY_COST_PER_LISTING_USD = 0.0024;
+// eBay's sold search covers ~90 days; anything older, or without a real item
+// number, is not a sale we can stand behind. Mirrors FlipRadar comps-guard.ts.
+const MAX_SOLD_AGE_DAYS = 120;
+// Cache rows written by this source. v5's rows ("ebay_sold") are fabricated
+// and are never served.
+const DATA_SOURCE = "ebay_sold_apify";
 const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -83,7 +100,7 @@ function loadSecrets() {
     secretsPromise = (async ()=>{
       const { data, error } = await admin.from("credentials").select("key_name, value").in("key_name", [
         "EBAY_COMPS_SERVICE_TOKEN",
-        "FIRECRAWL_API_KEY"
+        "APIFY_API_TOKEN"
       ]);
       if (error) throw new Error(`credential load failed: ${error.message}`);
       const map = new Map((data ?? []).map((r)=>[
@@ -91,97 +108,67 @@ function loadSecrets() {
           r.value
         ]));
       const rawToken = map.get("EBAY_COMPS_SERVICE_TOKEN");
-      const rawFirecrawl = map.get("FIRECRAWL_API_KEY");
-      if (!rawToken || !rawFirecrawl) {
-        throw new Error("missing EBAY_COMPS_SERVICE_TOKEN or FIRECRAWL_API_KEY");
+      const rawApify = map.get("APIFY_API_TOKEN");
+      if (!rawToken || !rawApify) {
+        throw new Error("missing EBAY_COMPS_SERVICE_TOKEN or APIFY_API_TOKEN");
       }
       const serviceToken = await decryptIfNeeded(rawToken);
-      const firecrawlKey = await decryptIfNeeded(rawFirecrawl);
+      const apifyToken = await decryptIfNeeded(rawApify);
       return {
         serviceToken,
-        firecrawlKey
+        apifyToken
       };
     })();
   }
   return secretsPromise;
 }
-class FirecrawlProvider {
-  apiKey;
-  constructor(apiKey){
-    this.apiKey = apiKey;
+// A real eBay sale: positive price, a genuine item number (not a placeholder
+// such as 1234567890), and sold within MAX_SOLD_AGE_DAYS.
+function isPlausibleSold(r) {
+  if (typeof r.price !== "number" || !(r.price > 0) || !r.title) return false;
+  const id = r.url?.match(/ebay\.com\/itm\/(?:[^/?#]+\/)?(\d{9,15})(?:[/?#]|$)/)?.[1];
+  if (!id || /^(\d)\1+$/.test(id) || "01234567890123456789".includes(id) || "98765432109876543210".includes(id)) {
+    return false;
   }
-  async fetchSoldListings(query, limit) {
-    const target = new URL("https://www.ebay.com/sch/i.html");
-    target.searchParams.set("_nkw", query);
-    target.searchParams.set("LH_Sold", "1");
-    target.searchParams.set("LH_Complete", "1");
-    target.searchParams.set("_ipg", "60");
-    target.searchParams.set("_sop", "13"); // recently ended first
-    const res = await fetch("https://api.firecrawl.dev/v1/scrape", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        url: target.toString(),
-        onlyMainContent: true,
-        timeout: 90000,
-        waitFor: 2500,
-        formats: [
-          "json"
-        ],
-        jsonOptions: {
-          prompt: "Extract the SOLD eBay listings on this completed-items search page. " + "Only include items shown as sold (with a sold price). Ignore ads, " + "sponsored blocks, and 'Shop on eBay' placeholders. Return the sold " + "price as a plain number (no currency symbol).",
-          schema: {
-            type: "object",
-            properties: {
-              listings: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    title: {
-                      type: "string"
-                    },
-                    price: {
-                      type: "number"
-                    },
-                    currency: {
-                      type: "string"
-                    },
-                    condition: {
-                      type: "string"
-                    },
-                    url: {
-                      type: "string"
-                    },
-                    soldDate: {
-                      type: "string"
-                    }
-                  },
-                  required: [
-                    "title",
-                    "price"
-                  ]
-                }
-              }
-            },
-            required: [
-              "listings"
-            ]
-          }
-        }
-      })
-    });
-    if (!res.ok) {
-      const txt = await res.text();
-      throw new Error(`Firecrawl scrape failed: ${res.status} ${txt}`);
-    }
-    const payload = await res.json();
-    const rows = payload?.data?.json?.listings ?? [];
-    return rows.filter((r)=>typeof r.price === "number" && r.price > 0 && r.title).slice(0, limit);
+  const sold = Date.parse(r.soldDate ?? "");
+  if (Number.isNaN(sold)) return false;
+  const ageDays = (Date.now() - sold) / 86_400_000;
+  return ageDays >= -2 && ageDays <= MAX_SOLD_AGE_DAYS;
+}
+// One synchronous actor run per query (11-37s in the 2026-10-31 probe). Returns
+// the trusted rows plus how many the actor billed for (cost log).
+async function fetchSoldListings(apiToken, query, limit) {
+  const res = await fetch(`https://api.apify.com/v2/acts/${APIFY_ACTOR}/run-sync-get-dataset-items?timeout=120`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      query,
+      maxResults: limit,
+      soldWithinDays: 90,
+      compact: true
+    })
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Apify sold scrape failed: ${res.status} ${txt.slice(0, 200)}`);
   }
+  const items = await res.json();
+  if (!Array.isArray(items)) throw new Error("Apify sold scrape returned no item list");
+  const rows = items.map((r)=>({
+      title: r.title,
+      price: r.priceValue,
+      currency: r.priceCurrency,
+      condition: r.condition,
+      url: r.canonicalUrl,
+      soldDate: r.soldDate
+    }));
+  return {
+    rows: rows.filter(isPlausibleSold).slice(0, limit),
+    billed: items.length
+  };
 }
 // --- Normalisation + stat logic (ported verbatim from ebay.ts:108-132) ----
 function normQuery(q) {
@@ -272,7 +259,7 @@ Deno.serve(async (req)=>{
   }, 400);
   const qn = normQuery(query);
   // Cache read.
-  const { data: cached } = await admin.from("ebay_sold_comps").select("avg_price, median_price, sample_count, listings, scraped_at").eq("query_norm", qn).maybeSingle();
+  const { data: cached } = await admin.from("ebay_sold_comps").select("avg_price, median_price, sample_count, listings, scraped_at").eq("query_norm", qn).eq("data_source", DATA_SOURCE).maybeSingle();
   if (cached) {
     const ageMs = Date.now() - new Date(cached.scraped_at).getTime();
     if (ageMs < CACHE_TTL_DAYS * 24 * 60 * 60 * 1000) {
@@ -289,10 +276,11 @@ Deno.serve(async (req)=>{
   }
   // Live scrape via provider seam.
   let result;
+  let billed = 0;
   try {
-    const provider = new FirecrawlProvider(secrets.firecrawlKey);
-    const raw = await provider.fetchSoldListings(query, limit);
-    result = aggregate(query, raw);
+    const sold = await fetchSoldListings(secrets.apifyToken, query, limit);
+    billed = sold.billed;
+    result = aggregate(query, sold.rows);
   } catch (e) {
     return json({
       error: `scrape failed: ${String(e)}`
@@ -301,11 +289,11 @@ Deno.serve(async (req)=>{
   // Cost log (real model_costs schema).
   await admin.from("model_costs").insert({
     project_id: FLIPRADAR_PROJECT_ID,
-    provider: "firecrawl",
-    model: "scrape",
+    provider: "apify",
+    model: APIFY_ACTOR,
     tokens_in: 0,
     tokens_out: 0,
-    cost_usd: FIRECRAWL_CALL_COST_USD,
+    cost_usd: Number((APIFY_COST_PER_RUN_USD + billed * APIFY_COST_PER_LISTING_USD).toFixed(4)),
     purpose: "ebay_sold_comps"
   });
   // Cache write (upsert) — only persist non-empty results.
@@ -316,7 +304,7 @@ Deno.serve(async (req)=>{
       median_price: result.medianPrice,
       sample_count: result.count,
       listings: result.listings,
-      data_source: "ebay_sold",
+      data_source: DATA_SOURCE,
       scraped_at: new Date().toISOString()
     });
   }
