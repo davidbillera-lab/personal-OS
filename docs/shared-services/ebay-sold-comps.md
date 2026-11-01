@@ -115,7 +115,10 @@ Marketplace Insights) without any consumer change.
 - **Latency:** one synchronous actor run per uncached query, 11–37s in the 2026-10-31 probe
   (`run-sync-get-dataset-items?timeout=120`).
 - **Secrets:** `EBAY_COMPS_SERVICE_TOKEN` and `APIFY_API_TOKEN` in the MC `credentials` table.
-  They are module-cached in a `secretsPromise`, so rotating either requires a redeploy.
+  They are module-cached in a `secretsPromise`. An Apify 401 clears the cache, so a new
+  `APIFY_API_TOKEN` takes effect on the next call. Rotating the service token still needs a redeploy.
+  The value must be the full key (46 chars, starting `apify_api_`). On 2026-10-31 the vault held
+  36-char values that Apify rejected.
 - **Source code** lives in `personal-os/supabase/functions/ebay-sold-comps/` (first committed
   2026-10-31; before that it existed only as a direct deploy).
 - Cost logged per live scrape: `model_costs` row, `provider:apify`, `model` = actor id,

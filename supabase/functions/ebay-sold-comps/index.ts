@@ -152,6 +152,9 @@ async function fetchSoldListings(apiToken, query, limit) {
     })
   });
   if (!res.ok) {
+    // Rejected key: reload credentials on the next call, so updating the key
+    // in MC takes effect without a redeploy.
+    if (res.status === 401) secretsPromise = null;
     const txt = await res.text();
     throw new Error(`Apify sold scrape failed: ${res.status} ${txt.slice(0, 200)}`);
   }
