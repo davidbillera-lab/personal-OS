@@ -865,8 +865,10 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
   - the handling-time pilot
   - the kill-criteria override control
 - No 2FA at login. Owner auth = existing session + server-side check against a single owner auth UUID (`MC_OWNER_USER_ID`), failing closed.
-- Close only non-active work. "Active" = a dispatcher run (`attempt_id`/`phase` set), or any claim touched in the last 2 hours. No force-close in v1.
-- Reopen lands in `blocked` (the existing held state). Only the existing `mc_resume_request` puts it back in the queue.
+- Close only non-active work. "Active" = a `claimed`/`in_progress` row with a dispatcher run (`attempt_id` set), or any claim touched in the last 2 hours. `phase` alone doesn't count (`planned`/`review` are waiting states). The owner can close ready plans and `awaiting_approval` rows; he is the approver. No force-close in v1. (Refined after Codex round 1, 2026-11-03.)
+- Reopen lands in `blocked` with an `owner-hold:` blocker, and the old plan is cleared into the audit row. Worker tools refuse held rows. Only the existing `mc_resume_request` releases them.
+- Owner reassign can never make a row dispatcher-eligible. It is refused if the result would match either claim path.
+- Supabase new-user sign-ups are disabled (confirmed 2026-11-03), so the owner check is a backstop.
 - `requireOwner()` uses `createServerSupabaseClient()` for `auth.getUser()` only. This is a narrow exception to the project rule, which exists because data reads silently fail behind database access rules. Data stays on the admin client.
 - Owner actions are not exposed through MCP. Agents closing their own requests is a separate future decision.
 - Timebox: 2 build sessions + 1 optional. Miss it, stop and re-estimate.
