@@ -97,7 +97,7 @@ At the time of the repo check, there are 13 non-terminal requests that have not 
   - the kill-criteria override
   - fencing epochs for interactive claims
 - **No 2FA at login.** Owner auth is the existing session plus a server-side owner-UUID check. Accepted risk: a stolen session can close, reopen or reassign requests and edit project status, but cannot merge, deploy or touch credentials.
-- **Close only non-active work.** "Active" is defined as *a dispatcher run in flight* (`attempt_id` or `phase` set), or *any claim touched in the last 2 h*. This is Claude's interpretation, made so that stale interactive claims like 13df18cf can be closed, which the board explicitly wanted. Force-close of active work is out of v1.
+- **Close only non-active work.** "Active" is defined as *a dispatcher run in flight* (`attempt_id` or `phase` set), or *any claim touched in the last 2 h*. David approved this definition on 2026-11-03. It lets stale interactive claims like 13df18cf be closed, which the board explicitly wanted. Force-close of active work is out of v1.
 - **Identity exception:** `createServerSupabaseClient()` is used in `requireOwner()` for `auth.getUser()` only. The project rule exists because data reads silently fail behind database access rules; identity verification needs the session cookie, and no data goes through this client.
 - **Agent parity is not added.** Owner actions are not exposed through MCP. Agents closing their own requests is a separate future decision.
 
