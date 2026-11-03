@@ -871,6 +871,9 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 - Supabase new-user sign-ups are disabled (confirmed 2026-11-03), so the owner check is a backstop.
 - `requireOwner()` uses `createServerSupabaseClient()` for `auth.getUser()` only. This is a narrow exception to the project rule, which exists because data reads silently fail behind database access rules. Data stays on the admin client.
 - Owner actions are not exposed through MCP. Agents closing their own requests is a separate future decision.
+- One request write contract (Codex round 2, 2026-11-03). `updated_at` is the version token, and every `mc_requests` UPDATE compares on it. Migration 029 adds the existing `set_updated_at()` trigger to `mc_requests`. Comparing on status alone misses close → reopen (A→B→A). `mc_submit_plan` checks its Hermes/no-plan precondition inside the UPDATE. Dispatcher writers must meet the contract before it is switched back on.
+- `mc_complete_request` no longer accepts `awaiting_approval`. The caller inventory found no dependency: the dispatcher leaves that state via `mc_respond_approval`, and interactive workers never enter it.
+- The `mc_browse_vault` `is_mcp_accessible` leak (both servers) ships as its own PR, before owner controls merge.
 - Timebox: 2 build sessions + 1 optional. Miss it, stop and re-estimate.
 
 **Reasoning:** One stranded request (8ae41b9f) grew into a four-release, 8–14 session security design. The advisory board (vault `5b4d59c9`, MODIFY, unanimous) cut it back to the real pain. The repo check confirmed that pain: 13 non-terminal requests untouched for more than 24 h, some since August, and no tool that can close a `queued` or `submitted` request. The repo check also showed most of the draft's machinery was unnecessary. `blocked` already works as a held state, `mcp_audit_log` already records actions, and the one real race (`transitionRequest` writes without a compare-and-set) is a one-line fix.
