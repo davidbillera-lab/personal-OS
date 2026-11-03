@@ -854,3 +854,28 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 - Until the spec is built, Rio can't see the main case, a ready Hermes plan (`submitted` + `planned`).
 
 **Made by:** David / Claude
+
+### 2026-11-02 — Owner controls cut to request lifecycle; provider merge/redeploy killed
+
+**Decision:**
+- Mission Control gets owner close, reopen and reassign for requests on the Queue page, and nothing more in v1. Spec: `specs/2026-11-02-mission-control-owner-controls.md`.
+- Killed:
+  - GitHub/Vercel merge and redeploy from MC
+  - per-action step-up receipts
+  - the handling-time pilot
+  - the kill-criteria override control
+- No 2FA at login. Owner auth = existing session + server-side check against a single owner auth UUID (`MC_OWNER_USER_ID`), failing closed.
+- Close only non-active work. "Active" = a dispatcher run (`attempt_id`/`phase` set), or any claim touched in the last 2 hours. No force-close in v1.
+- Reopen lands in `blocked` (the existing held state). Only the existing `mc_resume_request` puts it back in the queue.
+- `requireOwner()` uses `createServerSupabaseClient()` for `auth.getUser()` only. This is a narrow exception to the project rule, which exists because data reads silently fail behind database access rules. Data stays on the admin client.
+- Owner actions are not exposed through MCP. Agents closing their own requests is a separate future decision.
+- Timebox: 2 build sessions + 1 optional. Miss it, stop and re-estimate.
+
+**Reasoning:** One stranded request (8ae41b9f) grew into a four-release, 8–14 session security design. The advisory board (vault `5b4d59c9`, MODIFY, unanimous) cut it back to the real pain. The repo check confirmed that pain: 13 non-terminal requests untouched for more than 24 h, some since August, and no tool that can close a `queued` or `submitted` request. The repo check also showed most of the draft's machinery was unnecessary. `blocked` already works as a held state, `mcp_audit_log` already records actions, and the one real race (`transitionRequest` writes without a compare-and-set) is a one-line fix.
+
+**Consequence:**
+- A stolen session can close, reopen or reassign requests and edit project status. It cannot merge, deploy or touch credentials. Accepted.
+- `mcp_audit_log` gains a nullable `detail` column (migration 029).
+- Three stale `queued` rows (9d2b2a80, ecc57612, 8ae41b9f) would run the day the dispatcher is switched back on. Clear them before that.
+
+**Made by:** David / Claude
