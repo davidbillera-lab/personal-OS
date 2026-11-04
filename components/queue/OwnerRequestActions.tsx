@@ -71,6 +71,7 @@ export function OwnerRequestActions({ id, status, updatedAt, assignedTo, attempt
   }, [action])
 
   function open(next: Action) {
+    if (isPending) return
     setSnap({ status, updatedAt })
     setReason('')
     setEvidence('')
@@ -85,12 +86,18 @@ export function OwnerRequestActions({ id, status, updatedAt, assignedTo, attempt
     if (!action || !snap) return
     const base = { id, expectedStatus: snap.status, expectedUpdatedAt: snap.updatedAt, reason }
     startTransition(async () => {
-      const result =
-        action === 'close'
-          ? await closeRequest({ ...base, outcome, evidence })
-          : action === 'reopen'
-            ? await reopenRequest(base)
-            : await reassignRequest({ ...base, worker })
+      let result
+      try {
+        result =
+          action === 'close'
+            ? await closeRequest({ ...base, outcome, evidence })
+            : action === 'reopen'
+              ? await reopenRequest(base)
+              : await reassignRequest({ ...base, worker })
+      } catch {
+        // Never auto-retry: the change may have been applied.
+        return setError("Couldn't confirm the result (connection or server error). Refresh before retrying; it may have been applied.")
+      }
       if (!result.ok) return setError(result.error)
       setAction(null)
       setReason('')
@@ -124,7 +131,8 @@ export function OwnerRequestActions({ id, status, updatedAt, assignedTo, attempt
 
       <dialog
         ref={dialogRef}
-        onClose={() => setAction(null)}
+        onCancel={e => { if (isPending) e.preventDefault() }}
+        onClose={() => { if (!isPending) setAction(null) }}
         className="m-auto w-[min(32rem,92vw)] rounded-lg border border-border bg-card p-4 text-foreground backdrop:bg-black/50"
       >
         {action && (
@@ -186,7 +194,7 @@ export function OwnerRequestActions({ id, status, updatedAt, assignedTo, attempt
             )}
 
             <div className="flex justify-end gap-2">
-              <Button type="button" variant="ghost" size="sm" onClick={() => setAction(null)}>
+              <Button type="button" variant="ghost" size="sm" disabled={isPending} onClick={() => setAction(null)}>
                 Cancel
               </Button>
               <Button type="submit" size="sm" disabled={isPending || !reason.trim()}>
