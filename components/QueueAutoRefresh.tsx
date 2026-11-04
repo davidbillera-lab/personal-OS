@@ -5,11 +5,15 @@ import { useRouter } from 'next/navigation'
 
 // Polls the server component on an interval so the queue list stays live
 // without wiring Supabase realtime. Simple and reliable.
+// Skips while the tab is hidden or an owner dialog is open: a refresh must never disturb typing.
 export function QueueAutoRefresh() {
   const router = useRouter()
 
   useEffect(() => {
-    const interval = setInterval(() => router.refresh(), 3000)
+    const interval = setInterval(() => {
+      if (document.hidden || document.querySelector('dialog[open]')) return
+      router.refresh()
+    }, 3000)
     return () => clearInterval(interval)
   }, [router])
 

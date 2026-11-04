@@ -854,3 +854,41 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 - Until the spec is built, Rio can't see the main case, a ready Hermes plan (`submitted` + `planned`).
 
 **Made by:** David / Claude
+
+### 2026-11-02 — Owner controls cut to request lifecycle; provider merge/redeploy killed
+
+**Decision:**
+- Mission Control gets owner close, reopen and reassign for requests on the Queue page, and nothing more in v1. Spec: `specs/2026-11-02-mission-control-owner-controls.md`.
+- Killed:
+  - GitHub/Vercel merge and redeploy from MC
+  - per-action step-up receipts
+  - the handling-time pilot
+  - the kill-criteria override control
+- No 2FA at login. Owner auth = existing session + server-side check against a single owner auth UUID (`MC_OWNER_USER_ID`), failing closed.
+- Close only non-active work. "Active" = a `claimed`/`in_progress` row with a dispatcher run (`attempt_id` set), or any claim touched in the last 2 hours. `phase` alone doesn't count (`planned`/`review` are waiting states). The owner can close ready plans and `awaiting_approval` rows; he is the approver. No force-close in v1. (Refined after Codex round 1, 2026-11-03.)
+- Reopen lands in `blocked` with an `owner-hold:` blocker, and the old plan is cleared into the audit row. Worker tools refuse held rows. Only the existing `mc_resume_request` releases them.
+- Owner reassign can never make a row dispatcher-eligible. It is refused if the result would match either claim path.
+- Supabase new-user sign-ups are disabled (confirmed 2026-11-03), so the owner check is a backstop.
+- `requireOwner()` uses `createServerSupabaseClient()` for `auth.getUser()` only. This is a narrow exception to the project rule, which exists because data reads silently fail behind database access rules. Data stays on the admin client.
+- Owner actions are not exposed through MCP. Agents closing their own requests is a separate future decision.
+- One request write contract (Codex round 2, 2026-11-03). `updated_at` is the version token, and every `mc_requests` UPDATE compares on it. Migration 029 adds the existing `set_updated_at()` trigger to `mc_requests`. Comparing on status alone misses close → reopen (A→B→A). `mc_submit_plan` checks its Hermes/no-plan precondition inside the UPDATE. Dispatcher writers must meet the contract before it is switched back on.
+- `mc_complete_request` no longer accepts `awaiting_approval`. The caller inventory found no dependency: the dispatcher leaves that state via `mc_respond_approval`, and interactive workers never enter it.
+- The `mc_browse_vault` `is_mcp_accessible` leak (both servers) ships as its own PR, before owner controls merge.
+- Timebox: 2 build sessions + 1 optional. Miss it, stop and re-estimate.
+
+**Reasoning:** One stranded request (8ae41b9f) grew into a four-release, 8–14 session security design. The advisory board (vault `5b4d59c9`, MODIFY, unanimous) cut it back to the real pain. The repo check confirmed that pain: 13 non-terminal requests untouched for more than 24 h, some since August, and no tool that can close a `queued` or `submitted` request. The repo check also showed most of the draft's machinery was unnecessary. `blocked` already works as a held state, `mcp_audit_log` already records actions, and the one real race (`transitionRequest` writes without a compare-and-set) is a one-line fix.
+
+**Consequence:**
+- A stolen session can close, reopen or reassign requests and edit project status. It cannot merge, deploy or touch credentials. Accepted.
+- `mcp_audit_log` gains a nullable `detail` column (migration 029).
+- Three stale `queued` rows (9d2b2a80, ecc57612, 8ae41b9f) would run the day the dispatcher is switched back on. Clear them before that.
+
+**Made by:** David / Claude
+
+### 2026-11-03 — Resume restores phase=planned when a plan exists
+
+**Decision:** `mc_resume_request` now sets `phase='planned'` when the row resumes to `submitted` and still has a plan, so the reviewed plan is reused. Rows resuming to `queued`, or with no plan, behave as before (phase null).
+
+**Reasoning:** Codex round 2 found a stuck-row bug. Resume sent a Hermes-workflow row back to `submitted` with phase null but kept its plan. `mc_submit_plan` refuses existing plans, dispatcher pickup needs `phase='planned'`, and the plan nudge needs plan null, so nothing could move the row.
+
+**Made by:** David / Claude

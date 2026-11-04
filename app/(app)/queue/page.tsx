@@ -1,5 +1,7 @@
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { QueueAutoRefresh } from '@/components/QueueAutoRefresh'
+import { OwnerRequestActions } from '@/components/queue/OwnerRequestActions'
+import { ownerActionAvailability, type OwnerRequestRow } from '@/lib/owner-requests'
 
 // Minimal local type for mc_requests (supabase/migrations/017_mc_requests.sql + 020_voice_slice.sql).
 // No shared McRequest type exists in lib/types.ts yet — add one there if this table gains more consumers.
@@ -24,6 +26,7 @@ interface McRequest {
   approved_at: string | null
   workspace_ref: string | null
   reviewed_sha: string | null
+  attempt_id: string | null
 }
 
 const statusColors: Record<string, string> = {
@@ -52,16 +55,117 @@ function formatDate(iso: string | null): string {
   })
 }
 
+// Live data and version tokens: never prerender.
+export const dynamic = 'force-dynamic'
+
+const OPEN_LIMIT = 500
+const TERMINAL = '(completed,failed,cancelled)'
+
+function RequestCard({ req, projectName }: { req: McRequest; projectName: string | null }) {
+  const isBlocked = req.status === 'blocked' || !!req.blocker
+  const title = req.title ?? req.request_text.slice(0, 80)
+
+  return (
+    <div className="rounded-lg border border-border bg-card px-4 py-3 flex flex-col gap-1.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${statusColors[req.status] ?? 'bg-slate-100 text-slate-600'}`}>
+          {req.status.replace(/_/g, ' ')}
+        </span>
+        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${priorityColors[req.priority] ?? 'bg-slate-100 text-slate-500'}`}>
+          {req.priority}
+        </span>
+        {projectName && (
+          <span className="text-[10px] text-muted-foreground">{projectName}</span>
+        )}
+        {req.assigned_to && (
+          <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-700">
+            {req.assigned_to}
+          </span>
+        )}
+        <span className="ml-auto text-[10px] text-muted-foreground/60">{formatDate(req.created_at)}</span>
+      </div>
+
+      <p className="text-[11px] font-semibold text-foreground">{title}</p>
+      <p className="text-[11px] text-muted-foreground leading-snug">{req.request_text}</p>
+
+      {(req.phase || req.latest_progress) && (
+        <p className="text-[11px] text-foreground/80">
+          {req.phase && <span className="font-medium">{req.phase}</span>}
+          {req.phase && req.latest_progress && ' — '}
+          {req.latest_progress}
+        </p>
+      )}
+
+      {isBlocked && req.blocker && (
+        <p className="text-[11px] text-orange-700 bg-orange-50 rounded px-2 py-1">
+          Blocked: {req.blocker}
+        </p>
+      )}
+
+      {req.result_summary && (
+        <p className="text-[11px] text-muted-foreground italic">{req.result_summary}</p>
+      )}
+
+      {(req.reviewed_sha || req.workspace_ref || req.approved_by) && (
+        <div className="flex flex-wrap gap-x-3 text-[10px] text-muted-foreground/70">
+          {req.reviewed_sha && <span>sha {req.reviewed_sha.slice(0, 7)}</span>}
+          {req.workspace_ref && <span>{req.workspace_ref}</span>}
+          {req.approved_by && <span>approved by {req.approved_by}{req.approved_at ? ` · ${formatDate(req.approved_at)}` : ''}</span>}
+        </div>
+      )}
+
+      {req.completed_at && (
+        <p className="text-[10px] text-muted-foreground/60">Completed {formatDate(req.completed_at)}</p>
+      )}
+
+      <OwnerRequestActions
+        id={req.id}
+        status={req.status}
+        updatedAt={req.updated_at}
+        assignedTo={req.assigned_to}
+        attemptId={req.attempt_id}
+        phase={req.phase}
+        reviewedSha={req.reviewed_sha}
+        workspaceRef={req.workspace_ref}
+        availability={ownerActionAvailability(req as unknown as OwnerRequestRow, new Date())}
+      />
+    </div>
+  )
+}
+
 export default async function QueuePage() {
   const supabase = createAdminSupabaseClient()
 
-  const [{ data: requests }, { data: projects }] = await Promise.all([
-    supabase.from('mc_requests').select('*').order('created_at', { ascending: false }).limit(50),
+  const [open, closed, { data: projects }] = await Promise.all([
+    // Oldest-touched first so stale work surfaces; terminal rows can never crowd these out.
+    supabase.from('mc_requests').select('*', { count: 'exact' }).not('status', 'in', TERMINAL)
+      .order('updated_at', { ascending: true }).limit(OPEN_LIMIT),
+    supabase.from('mc_requests').select('*').in('status', ['completed', 'failed', 'cancelled'])
+      .order('updated_at', { ascending: false }).limit(50),
     supabase.from('projects').select('id, name'),
   ])
 
+  const loadError = open.error ?? closed.error
+  if (loadError) {
+    return (
+      <div className="flex flex-col gap-6">
+        <h1 className="text-2xl font-bold tracking-tight">Request Queue</h1>
+        <p role="alert" className="text-sm text-red-700">Couldn&apos;t load the queue: {loadError.message}</p>
+      </div>
+    )
+  }
+
   const projectMap = new Map((projects ?? []).map(p => [p.id, p.name]))
-  const items = (requests ?? []) as McRequest[]
+  const openItems = (open.data ?? []) as McRequest[]
+  const closedItems = (closed.data ?? []) as McRequest[]
+  const openTotal = open.count ?? openItems.length
+  const renderList = (items: McRequest[]) => (
+    <div className="flex flex-col gap-2">
+      {items.map(req => (
+        <RequestCard key={req.id} req={req} projectName={req.project_id ? projectMap.get(req.project_id) ?? null : null} />
+      ))}
+    </div>
+  )
 
   return (
     <div className="flex flex-col gap-6">
@@ -70,74 +174,24 @@ export default async function QueuePage() {
         <QueueAutoRefresh />
       </div>
 
-      {items.length === 0 ? (
-        <p className="text-sm text-muted-foreground text-center py-12">
-          No requests in the queue yet.
-        </p>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {items.map(req => {
-            const projectName = req.project_id ? projectMap.get(req.project_id) ?? null : null
-            const isBlocked = req.status === 'blocked' || !!req.blocker
-            const title = req.title ?? req.request_text.slice(0, 80)
+      <section className="flex flex-col gap-2">
+        <h2 className="text-sm font-semibold">Needs attention</h2>
+        {openTotal > OPEN_LIMIT && (
+          <p className="rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
+            Showing {OPEN_LIMIT} of {openTotal} open requests
+          </p>
+        )}
+        {openItems.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-6 text-center">Nothing open.</p>
+        ) : renderList(openItems)}
+      </section>
 
-            return (
-              <div key={req.id} className="rounded-lg border border-border bg-card px-4 py-3 flex flex-col gap-1.5">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${statusColors[req.status] ?? 'bg-slate-100 text-slate-600'}`}>
-                    {req.status.replace(/_/g, ' ')}
-                  </span>
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${priorityColors[req.priority] ?? 'bg-slate-100 text-slate-500'}`}>
-                    {req.priority}
-                  </span>
-                  {projectName && (
-                    <span className="text-[10px] text-muted-foreground">{projectName}</span>
-                  )}
-                  {req.assigned_to && (
-                    <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-700">
-                      {req.assigned_to}
-                    </span>
-                  )}
-                  <span className="ml-auto text-[10px] text-muted-foreground/60">{formatDate(req.created_at)}</span>
-                </div>
-
-                <p className="text-[11px] font-semibold text-foreground">{title}</p>
-                <p className="text-[11px] text-muted-foreground leading-snug">{req.request_text}</p>
-
-                {(req.phase || req.latest_progress) && (
-                  <p className="text-[11px] text-foreground/80">
-                    {req.phase && <span className="font-medium">{req.phase}</span>}
-                    {req.phase && req.latest_progress && ' — '}
-                    {req.latest_progress}
-                  </p>
-                )}
-
-                {isBlocked && req.blocker && (
-                  <p className="text-[11px] text-orange-700 bg-orange-50 rounded px-2 py-1">
-                    Blocked: {req.blocker}
-                  </p>
-                )}
-
-                {req.result_summary && (
-                  <p className="text-[11px] text-muted-foreground italic">{req.result_summary}</p>
-                )}
-
-                {(req.reviewed_sha || req.workspace_ref || req.approved_by) && (
-                  <div className="flex flex-wrap gap-x-3 text-[10px] text-muted-foreground/70">
-                    {req.reviewed_sha && <span>sha {req.reviewed_sha.slice(0, 7)}</span>}
-                    {req.workspace_ref && <span>{req.workspace_ref}</span>}
-                    {req.approved_by && <span>approved by {req.approved_by}{req.approved_at ? ` · ${formatDate(req.approved_at)}` : ''}</span>}
-                  </div>
-                )}
-
-                {req.completed_at && (
-                  <p className="text-[10px] text-muted-foreground/60">Completed {formatDate(req.completed_at)}</p>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      )}
+      <section className="flex flex-col gap-2">
+        <h2 className="text-sm font-semibold">Recently closed</h2>
+        {closedItems.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-6 text-center">No closed requests yet.</p>
+        ) : renderList(closedItems)}
+      </section>
     </div>
   )
 }

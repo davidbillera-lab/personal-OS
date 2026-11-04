@@ -636,25 +636,34 @@ type ToolArgs = Record<string, string | undefined>
 
 // Worker state-machine transition: fetch current status, enforce the allowed
 // source states, apply updates + bump updated_at. Rejects invalid transitions so
-// a worker can't (e.g.) complete a request that was never claimed.
+// a worker can't (e.g.) complete a request that was never claimed. Refuses rows
+// the owner is holding (only mc_resume_request releases them). The UPDATE
+// compares on status + updated_at (the version token), so a row changed since
+// the read (even close then reopen back to the same status) gets 0 rows.
 async function transitionRequest(
   supabase: ReturnType<typeof createAdminSupabaseClient>,
   requestId: string,
   allowedFrom: string[],
   updates: Record<string, unknown>,
 ) {
-  const { data: cur, error } = await supabase.from('mc_requests').select('status').eq('id', requestId).single()
+  const { data: cur, error } = await supabase.from('mc_requests').select('status, updated_at, blocker').eq('id', requestId).single()
   if (error || !cur) throw new Error(`Request not found: ${requestId}`)
   if (!allowedFrom.includes(cur.status)) {
     throw new Error(`Not allowed from status '${cur.status}' (allowed: ${allowedFrom.join(', ')})`)
+  }
+  if (typeof cur.blocker === 'string' && cur.blocker.startsWith('owner-hold:')) {
+    throw new Error('Request is held by the owner; only mc_resume_request releases it')
   }
   const { data, error: uerr } = await supabase
     .from('mc_requests')
     .update({ ...updates, updated_at: new Date().toISOString() })
     .eq('id', requestId)
+    .eq('status', cur.status)
+    .eq('updated_at', cur.updated_at)
     .select('id, status, assigned_to')
-    .single()
-  if (uerr || !data) throw new Error(uerr?.message ?? 'Update failed')
+    .maybeSingle()
+  if (uerr) throw new Error(uerr.message)
+  if (!data) throw new Error('Request changed; re-fetch and retry')
   return data
 }
 
@@ -1455,7 +1464,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
     const allowedStates = ['submitted', 'queued', 'claimed', 'in_progress', 'blocked']
     const { data: current, error: currentError } = await supabase
       .from('mc_requests')
-      .select('status, request_text')
+      .select('status, request_text, updated_at')
       .eq('id', request_id)
       .single()
     if (currentError || !current) throw new Error(`Request not found: ${request_id}`)
@@ -1468,6 +1477,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       .update({ assigned_to: assignedWorker, updated_at: new Date().toISOString() })
       .eq('id', request_id)
       .eq('status', current.status)
+      .eq('updated_at', current.updated_at)
       .select('id, status, assigned_to')
       .maybeSingle()
     if (error) throw new Error(error.message)
@@ -1483,7 +1493,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
 
     const { data: current, error: currentError } = await supabase
       .from('mc_requests')
-      .select('status, request_text, blocker')
+      .select('status, request_text, blocker, plan, updated_at')
       .eq('id', request_id)
       .single()
     if (currentError || !current) throw new Error(`Request not found: ${request_id}`)
@@ -1493,6 +1503,8 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       .from('mc_requests')
       .update({
         ...plan,
+        // A reviewed plan is reused: without 'planned' the row is stuck (submit_plan refuses existing plans).
+        phase: plan.status === 'submitted' && current.plan != null ? 'planned' : plan.phase,
         blocker: null,
         approval_required: false,
         approved_by: null,
@@ -1506,6 +1518,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       })
       .eq('id', request_id)
       .eq('status', current.status)
+      .eq('updated_at', current.updated_at)
       .select('id, status, assigned_to, preferred_worker, latest_progress, updated_at')
       .maybeSingle()
     if (error) throw new Error(error.message)
@@ -1527,7 +1540,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
 
     const { data: current, error: currentError } = await supabase
       .from('mc_requests')
-      .select('status, assigned_to, plan, title')
+      .select('status, assigned_to, plan, title, updated_at')
       .eq('id', request_id)
       .single()
     if (currentError || !current) throw new Error(`Request not found: ${request_id}`)
@@ -1546,6 +1559,9 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       })
       .eq('id', request_id)
       .eq('status', 'submitted')
+      .eq('assigned_to', 'hermes')
+      .is('plan', null)
+      .eq('updated_at', current.updated_at)
       .select('id, phase, plan_submitted_at')
       .maybeSingle()
     if (error) throw new Error(error.message)
@@ -1689,7 +1705,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       try { artifacts = JSON.parse(args.artifact_refs) } catch { throw new Error('artifact_refs must be a JSON array') }
     }
     const data = await transitionRequest(
-      supabase, request_id, ['claimed', 'in_progress', 'awaiting_approval'],
+      supabase, request_id, ['claimed', 'in_progress'],
       { status: 'completed', result_summary, artifact_refs: artifacts, completed_at: new Date().toISOString() },
     )
     return JSON.stringify({ request_id: data.id, status: data.status })
