@@ -112,8 +112,8 @@ export function OwnerRequestActions({ id, status, updatedAt, assignedTo, attempt
           if (why === null) {
             return <Button key={a} type="button" variant="outline" size="xs" onClick={() => open(a)}>{LABELS[a]}</Button>
           }
-          // Reopen only applies to finished rows; its refusal on an open row is noise.
-          if (a === 'reopen' && !terminal) return null
+          // Refusals are noise on finished rows, and reopen's refusal is noise on open rows.
+          if (terminal || a === 'reopen') return null
           return (
             <span key={a} className="text-[10px] text-muted-foreground/70">
               Can&apos;t {a}: {why}
