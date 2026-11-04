@@ -211,3 +211,24 @@ export async function applyOwnerAction(
   await recordOwnerAudit(supabase, { tool: audit.tool, ok: true, request_id: id, detail: audit.detail })
   return { ok: true, row: data as Record<string, unknown> }
 }
+
+export type OwnerActionAvailability = {
+  close: string | null
+  reopen: string | null
+  reassign: Array<{ worker: OwnerWorker; unavailable: string | null }>
+}
+
+// Availability probe for the UI: the planners stay the single source of truth.
+// null = allowed, string = the planner's refusal. The reason is a placeholder; only the verdict matters.
+export function ownerActionAvailability(row: OwnerRequestRow, now: Date = new Date()): OwnerActionAvailability {
+  const probe = 'availability check'
+  const refusal = (p: OwnerPlan): string | null => (p.ok ? null : p.reason)
+  return {
+    close: refusal(planOwnerClose(row, 'cancelled', probe, undefined, now)),
+    reopen: refusal(planOwnerReopen(row, probe)),
+    reassign: OWNER_WORKERS.filter(w => w !== (row.assigned_to ?? null)).map(worker => ({
+      worker,
+      unavailable: refusal(planOwnerReassign(row, worker)),
+    })),
+  }
+}

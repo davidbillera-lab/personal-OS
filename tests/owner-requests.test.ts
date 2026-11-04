@@ -13,6 +13,7 @@ import {
   applyOwnerAction,
   CONFLICT_MESSAGE,
   OWNER_WORKERS,
+  ownerActionAvailability,
   planOwnerClose,
   planOwnerReassign,
   planOwnerReopen,
@@ -208,6 +209,28 @@ describe('planOwnerReassign', () => {
       updates: { assigned_to: 'codex' },
       detail: { from_assigned: null, to_assigned: 'codex' },
     })
+  })
+})
+
+describe('ownerActionAvailability', () => {
+  const unavailable = (a: ReturnType<typeof ownerActionAvailability>) => a.reassign.filter(r => r.unavailable === null).map(r => r.worker)
+
+  it('offers close on a stale claim but not a fresh one', () => {
+    expect(ownerActionAvailability(row({ status: 'claimed', assigned_to: 'claude', updated_at: '2026-11-03T08:00:00.000Z' }), NOW).close).toBeNull()
+    expect(ownerActionAvailability(row({ status: 'claimed', assigned_to: 'claude', updated_at: '2026-11-03T11:30:00.000Z' }), NOW).close).toMatch(/Claimed less than 2 h ago/)
+  })
+
+  it('offers only reopen on a completed row', () => {
+    const a = ownerActionAvailability(row({ status: 'completed' }), NOW)
+    expect(a.reopen).toBeNull()
+    expect(a.close).not.toBeNull()
+    expect(unavailable(a)).toEqual([])
+  })
+
+  it('leaves out the current worker and allows only codex on a queued unassigned row', () => {
+    const a = ownerActionAvailability(row({ status: 'queued', assigned_to: null }), NOW)
+    expect(a.reassign.map(r => r.worker)).toEqual(['claude', 'hermes', 'codex'])
+    expect(unavailable(a)).toEqual(['codex'])
   })
 })
 
