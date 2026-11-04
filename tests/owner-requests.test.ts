@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-const { getUser } = vi.hoisted(() => ({ getUser: vi.fn() }))
+const { getUser, admin } = vi.hoisted(() => ({ getUser: vi.fn(), admin: { client: undefined as unknown } }))
 
 vi.mock('@/lib/supabase', () => ({
   createServerSupabaseClient: async () => ({ auth: { getUser } }),
+  createAdminSupabaseClient: () => admin.client,
 }))
 
+import { callTool } from '@/lib/mcp-tools'
 import { requireOwner } from '@/lib/owner'
 import {
   applyOwnerAction,
@@ -284,5 +286,109 @@ describe('applyOwnerAction', () => {
       await expect(applyOwnerAction(f.client, 'id1', 'queued', RAW, {}, { tool: 't' })).resolves.toMatchObject({ ok: true })
     }
     spy.mockRestore()
+  })
+})
+
+// Minimal in-memory mc_requests with PostgREST-like chains. Emulates the 029
+// trigger (every successful write gets a fresh unique updated_at) and runs a
+// one-shot hook between a handler's read and its first write.
+type MemRow = Record<string, unknown>
+function memRequests(initial: MemRow) {
+  const rows = new Map<string, MemRow>()
+  let n = 0
+  let hook: (() => Promise<void>) | null = null
+  const stamp = () => `2026-11-03T11:00:00.${String(++n).padStart(6, '0')}+00:00`
+  rows.set(initial.id as string, { ...initial, updated_at: stamp() })
+  const pick = (r: MemRow, cols: string) =>
+    cols.trim() === '*' ? { ...r } : Object.fromEntries(cols.split(',').map(c => c.trim()).map(c => [c, r[c] ?? null]))
+  const builder = (mode: 'select' | 'update', payload: MemRow | undefined, selCols: string) => {
+    const preds: [string, unknown][] = []
+    let cols = selCols
+    const run = async (single: boolean) => {
+      if (mode === 'update' && hook) { const h = hook; hook = null; await h() }
+      const hit = [...rows.values()].find(r => preds.every(([c, v]) => (r[c] ?? null) === v))
+      if (!hit) return { data: null, error: single ? { message: 'no rows' } : null }
+      if (mode === 'update') { Object.assign(hit, payload); hit.updated_at = stamp() }
+      return { data: pick(hit, cols), error: null }
+    }
+    const b: Record<string, unknown> = {
+      eq: (c: string, v: unknown) => { preds.push([c, v]); return b },
+      is: (c: string, v: unknown) => { preds.push([c, v]); return b },
+      select: (c: string) => { cols = c; return b },
+      single: () => run(true),
+      maybeSingle: () => run(false),
+    }
+    return b
+  }
+  const client = {
+    from: (t: string) => t === 'mcp_audit_log'
+      ? { insert: async () => ({ error: null }) }
+      : { select: (c: string) => builder('select', undefined, c), update: (p: MemRow) => builder('update', p, '*') },
+  }
+  const id = initial.id as string
+  return {
+    client,
+    get: () => ({ ...rows.get(id)! }) as unknown as OwnerRequestRow,
+    touch: () => { rows.get(id)!.updated_at = stamp() },
+    onFirstUpdate: (fn: () => Promise<void>) => { hook = fn },
+  }
+}
+type Mem = ReturnType<typeof memRequests>
+
+async function ownerApply(m: Mem, plan: (r: OwnerRequestRow) => ReturnType<typeof planOwnerClose>, tool: string) {
+  const cur = m.get()
+  const p = plan(cur)
+  if (!p.ok) throw new Error(p.reason)
+  const r = await applyOwnerAction(m.client as never, cur.id, cur.status, cur.updated_at, p.updates, { tool, detail: p.detail })
+  if (!r.ok) throw new Error(r.error)
+}
+
+const ID = '13df18cf-8d09-4fac-ae35-245131b0685f'
+const setup = (over: Partial<OwnerRequestRow> & Record<string, unknown> = {}) => {
+  const m = memRequests({ ...row(over), title: 't' })
+  admin.client = m.client
+  return m
+}
+
+describe('transitionRequest write contract', () => {
+  it('a 0-row update throws Request changed', async () => {
+    const m = setup({ status: 'claimed', assigned_to: 'claude' })
+    m.onFirstUpdate(async () => m.touch())
+    await expect(callTool('mc_post_progress', { request_id: ID, progress: 'x' })).rejects.toThrow('Request changed')
+    expect(m.get().status).toBe('claimed')
+  })
+
+  it('refuses owner-hold rows (progress and fail)', async () => {
+    const m = setup({ status: 'blocked', blocker: 'owner-hold: reopened by owner: x' })
+    await expect(callTool('mc_post_progress', { request_id: ID, progress: 'x' })).rejects.toThrow(/held by the owner/)
+    await expect(callTool('mc_mark_failed', { request_id: ID, reason: 'x' })).rejects.toThrow(/held by the owner/)
+    expect(m.get().status).toBe('blocked')
+  })
+
+  it('mc_complete_request refuses awaiting_approval', async () => {
+    const m = setup({ status: 'awaiting_approval' })
+    await expect(callTool('mc_complete_request', { request_id: ID, result_summary: 'done' })).rejects.toThrow(/Not allowed from status 'awaiting_approval'/)
+    expect(m.get().status).toBe('awaiting_approval')
+  })
+
+  it.each(['completed', 'cancelled'] as const)('worker progress/complete fail against a row the owner closed as %s', async (outcome) => {
+    const m = setup({ status: 'queued' })
+    await ownerApply(m, r => planOwnerClose(r, outcome, 'done elsewhere'), 'owner_close_request')
+    await expect(callTool('mc_post_progress', { request_id: ID, progress: 'x' })).rejects.toThrow(/Not allowed from status/)
+    await expect(callTool('mc_complete_request', { request_id: ID, result_summary: 'x' })).rejects.toThrow(/Not allowed from status/)
+    expect(m.get().status).toBe(outcome)
+  })
+})
+
+describe('interleaving: owner vs worker', () => {
+  it('A->B->A: owner close + reopen between a worker read and write refuses the write', async () => {
+    const m = setup({ status: 'blocked', assigned_to: 'claude', blocker: 'waiting on a thing' })
+    m.onFirstUpdate(async () => {
+      await ownerApply(m, r => planOwnerClose(r, 'cancelled', 'dup'), 'owner_close_request')
+      await ownerApply(m, r => planOwnerReopen(r, 'actually needed'), 'owner_reopen_request')
+    })
+    await expect(callTool('mc_post_progress', { request_id: ID, progress: 'x' })).rejects.toThrow('Request changed')
+    expect(m.get().status).toBe('blocked')
+    expect(m.get().blocker).toMatch(/^owner-hold:/)
   })
 })
