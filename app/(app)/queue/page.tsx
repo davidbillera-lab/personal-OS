@@ -55,6 +55,9 @@ function formatDate(iso: string | null): string {
   })
 }
 
+// Live data and version tokens: never prerender.
+export const dynamic = 'force-dynamic'
+
 const OPEN_LIMIT = 500
 const TERMINAL = '(completed,failed,cancelled)'
 
