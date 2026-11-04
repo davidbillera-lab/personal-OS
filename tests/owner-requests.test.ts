@@ -428,3 +428,147 @@ describe('assign/resume compare on updated_at', () => {
     expect(m.get().assigned_to).toBeNull()
   })
 })
+
+// ---- owner server actions (app/(app)/queue/actions.ts) ----
+const { revalidatePath } = vi.hoisted(() => ({ revalidatePath: vi.fn() }))
+vi.mock('next/cache', () => ({ revalidatePath }))
+
+import { closeRequest, reassignRequest, reopenRequest } from '../app/(app)/queue/actions'
+
+type Audit = { tool: string; ok: boolean; error: string | null; request_id: string; detail: Record<string, unknown> | null }
+function actionSetup(over: Partial<OwnerRequestRow> & Record<string, unknown> = {}) {
+  const m = setup(over)
+  const audits: Audit[] = []
+  const ops: string[] = []
+  admin.client = {
+    from: (t: string) => {
+      if (t === 'mcp_audit_log') return { insert: async (r: Audit) => { audits.push(r); return { error: null } } }
+      const q = m.client.from(t) as { select: (c: string) => unknown; update: (p: unknown) => unknown }
+      return {
+        select: (c: string) => { ops.push('select'); return q.select(c) },
+        update: (p: unknown) => { ops.push('update'); return q.update(p) },
+      }
+    },
+  }
+  return { m, audits, ops }
+}
+const asOwner = () => {
+  process.env.MC_OWNER_USER_ID = 'owner-1'
+  getUser.mockResolvedValue({ data: { user: { id: 'owner-1' } }, error: null })
+}
+const args = (m: Mem, over: Record<string, unknown> = {}) => {
+  const r = m.get()
+  return { id: ID, expectedStatus: r.status, expectedUpdatedAt: r.updated_at, reason: 'because', ...over }
+}
+
+describe('owner server actions', () => {
+  const saved = process.env.MC_OWNER_USER_ID
+  afterEach(() => {
+    if (saved === undefined) delete process.env.MC_OWNER_USER_ID
+    else process.env.MC_OWNER_USER_ID = saved
+    getUser.mockReset()
+    revalidatePath.mockReset()
+  })
+
+  it('stale tab: refused with the conflict message, audited, no update issued', async () => {
+    asOwner()
+    const { m, audits, ops } = actionSetup({ status: 'queued' })
+    const a = args(m)
+    m.touch()
+    expect(await closeRequest({ ...a, outcome: 'cancelled' })).toEqual({ ok: false, error: CONFLICT_MESSAGE })
+    expect(ops).not.toContain('update')
+    expect(audits).toMatchObject([{ tool: 'owner_close_request', ok: false, error: CONFLICT_MESSAGE, request_id: ID }])
+    expect(m.get().status).toBe('queued')
+
+    expect(await reopenRequest({ ...args(m), expectedStatus: 'blocked' })).toEqual({ ok: false, error: CONFLICT_MESSAGE })
+    expect(ops).not.toContain('update')
+  })
+
+  it('owner check: not authorized, audited, no mc_requests access', async () => {
+    delete process.env.MC_OWNER_USER_ID
+    const { m, audits, ops } = actionSetup({ status: 'queued' })
+    expect(await closeRequest({ ...args(m), outcome: 'cancelled' })).toEqual({ ok: false, error: 'Not authorized' })
+    process.env.MC_OWNER_USER_ID = 'owner-1'
+    getUser.mockResolvedValue({ data: { user: { id: 'someone-else' } }, error: null })
+    expect(await reassignRequest({ ...args(m), worker: 'codex' })).toEqual({ ok: false, error: 'Not authorized' })
+    expect(ops).toEqual([])
+    expect(audits).toMatchObject([
+      { tool: 'owner_close_request', ok: false, error: 'Not authorized', request_id: ID },
+      { tool: 'owner_reassign_request', ok: false, error: 'Not authorized', request_id: ID },
+    ])
+  })
+
+  it('planner denial: reason returned and audited, no update', async () => {
+    asOwner()
+    const { m, audits, ops } = actionSetup({ status: 'claimed', assigned_to: 'claude', attempt_id: 'run-1' })
+    const r = await closeRequest({ ...args(m), outcome: 'cancelled' })
+    expect(r).toEqual({ ok: false, error: 'A dispatcher run is in flight; it cannot be closed from here' })
+    expect(ops).not.toContain('update')
+    expect(audits).toMatchObject([{ ok: false, error: 'A dispatcher run is in flight; it cannot be closed from here' }])
+  })
+
+  it('success: close applies with the client raw version, audits once, revalidates /queue', async () => {
+    asOwner()
+    const { m, audits } = actionSetup({ status: 'queued' })
+    const a = args(m, { reason: 'done elsewhere', evidence: 'PR 12' })
+    expect(await closeRequest({ ...a, outcome: 'completed' })).toEqual({ ok: true })
+    const after = m.get() as unknown as Record<string, unknown>
+    expect(after.status).toBe('completed')
+    expect(after.result_summary).toBe('Closed by owner: done elsewhere\nEvidence: PR 12')
+    expect(audits).toMatchObject([{ tool: 'owner_close_request', ok: true, detail: { reason: 'done elsewhere', evidence: 'PR 12' } }])
+    expect(audits).toHaveLength(1)
+    expect(revalidatePath).toHaveBeenCalledWith('/queue')
+  })
+
+  it('a write that loses the race returns the conflict message and does not revalidate', async () => {
+    asOwner()
+    const { m, audits } = actionSetup({ status: 'queued' })
+    const a = args(m)
+    m.onFirstUpdate(async () => m.touch())
+    expect(await closeRequest({ ...a, outcome: 'cancelled' })).toEqual({ ok: false, error: CONFLICT_MESSAGE })
+    expect(audits).toMatchObject([{ ok: false, error: CONFLICT_MESSAGE }])
+    expect(revalidatePath).not.toHaveBeenCalled()
+  })
+
+  it('reopen works and holds the row', async () => {
+    asOwner()
+    const { m } = actionSetup({ status: 'cancelled' })
+    expect(await reopenRequest(args(m))).toEqual({ ok: true })
+    expect(m.get().status).toBe('blocked')
+    expect(m.get().blocker).toMatch(/^owner-hold:/)
+  })
+
+  it('reassign: real reason in the audit, empty string maps to null, rig-eligible result refused', async () => {
+    asOwner()
+    const { m, audits } = actionSetup({ status: 'queued', assigned_to: null })
+    expect(await reassignRequest({ ...args(m, { reason: 'Hermes should own this' }), worker: 'codex' })).toEqual({ ok: true })
+    expect(m.get().assigned_to).toBe('codex')
+    expect(audits[0].detail).toMatchObject({ reason: 'Hermes should own this', to_assigned: 'codex' })
+
+    // a queued row with no worker is rig-eligible, so unassign is exercised on a blocked row
+    const { m: mb, audits: auditsB } = actionSetup({ status: 'blocked', assigned_to: 'codex' })
+    expect(await reassignRequest({ ...args(mb, { reason: 'unassign' }), worker: '' })).toEqual({ ok: true })
+    expect(mb.get().assigned_to).toBeNull()
+    expect(auditsB[0].detail).toMatchObject({ reason: 'unassign', to_assigned: null })
+
+    const { m: m2, audits: audits2 } = actionSetup({ status: 'queued', assigned_to: 'codex' })
+    expect(await reassignRequest({ ...args(m2), worker: 'claude' })).toEqual({ ok: false, error: 'Reassigning would let the rig run this' })
+    expect(m2.get().assigned_to).toBe('codex')
+    expect(audits2).toMatchObject([{ ok: false }])
+  })
+
+  it('input: invalid id is refused before any DB call; bad reason/outcome/worker are audited refusals', async () => {
+    asOwner()
+    const { m, audits, ops } = actionSetup({ status: 'queued' })
+    expect(await closeRequest({ ...args(m, { id: 'nope' }), outcome: 'cancelled' })).toEqual({ ok: false, error: 'Invalid request id' })
+    expect(ops).toEqual([])
+    expect(audits).toEqual([])
+
+    expect(await closeRequest({ ...args(m, { reason: '  ' }), outcome: 'cancelled' })).toMatchObject({ ok: false })
+    expect(await closeRequest({ ...args(m), outcome: 'bogus' as never })).toEqual({ ok: false, error: 'Outcome must be completed or cancelled' })
+    expect(await reassignRequest({ ...args(m), worker: 'bogus' })).toEqual({ ok: false, error: 'Unknown worker' })
+    expect(await reopenRequest(args(m, { expectedUpdatedAt: '' }))).toMatchObject({ ok: false })
+    expect(ops).not.toContain('update')
+    expect(audits.every(a => a.ok === false)).toBe(true)
+  })
+})
