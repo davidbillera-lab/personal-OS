@@ -610,6 +610,7 @@ async function callTool(name, args) {
     let q = supabase
       .from('vault_items')
       .select('id, type, title, tags, created_at')
+      .eq('is_mcp_accessible', true)
       .eq('encrypted', false)
       .not('type', 'in', '(credential,personal)')
       .order('created_at', { ascending: false })

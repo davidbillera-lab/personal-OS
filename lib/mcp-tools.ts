@@ -1000,7 +1000,8 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
     let q = supabase
       .from('vault_items')
       .select('id, type, title, tags, created_at')
-      // Never expose secrets or personal items through a plain listing.
+      // Never expose secrets, personal items, or items not opted in to MCP through a plain listing.
+      .eq('is_mcp_accessible', true)
       .eq('encrypted', false)
       .not('type', 'in', '(credential,personal)')
       .order('created_at', { ascending: false })
