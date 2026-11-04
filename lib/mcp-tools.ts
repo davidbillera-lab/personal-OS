@@ -1493,7 +1493,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
 
     const { data: current, error: currentError } = await supabase
       .from('mc_requests')
-      .select('status, request_text, blocker, updated_at')
+      .select('status, request_text, blocker, plan, updated_at')
       .eq('id', request_id)
       .single()
     if (currentError || !current) throw new Error(`Request not found: ${request_id}`)
@@ -1503,6 +1503,8 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       .from('mc_requests')
       .update({
         ...plan,
+        // A reviewed plan is reused: without 'planned' the row is stuck (submit_plan refuses existing plans).
+        phase: plan.status === 'submitted' && current.plan != null ? 'planned' : plan.phase,
         blocker: null,
         approval_required: false,
         approved_by: null,

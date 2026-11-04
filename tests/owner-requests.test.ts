@@ -444,6 +444,26 @@ describe('assign/resume compare on updated_at', () => {
     expect(m.get().blocker).toMatch(/^owner-hold:/)
   })
 
+  it('resume of a Hermes-workflow row that still has a plan restores phase=planned and is claimable', async () => {
+    const m = setup({ status: 'blocked', blocker: 'stuck', request_text: 'Workflow: spec_build_qc_push\nOutcome: x', assigned_to: 'hermes', plan: 'the reviewed plan' })
+    await callTool('mc_resume_request', { request_id: ID, reason: 'go' })
+    const after = m.get()
+    expect(after).toMatchObject({ status: 'submitted', phase: 'planned', plan: 'the reviewed plan' })
+    expect(isClaimablePlanned(after, true)).toBe(true)
+  })
+
+  it('resume of a Hermes-workflow row without a plan leaves phase null', async () => {
+    const m = setup({ status: 'blocked', blocker: 'stuck', request_text: 'Workflow: spec_build_qc_push\nOutcome: x', assigned_to: 'hermes' })
+    await callTool('mc_resume_request', { request_id: ID, reason: 'go' })
+    expect(m.get()).toMatchObject({ status: 'submitted', phase: null })
+  })
+
+  it('resume to queued never sets phase=planned, even with a plan', async () => {
+    const m = setup({ status: 'failed', request_text: 'do a thing', plan: 'old plan' })
+    await callTool('mc_resume_request', { request_id: ID, reason: 'go' })
+    expect(m.get()).toMatchObject({ status: 'queued', phase: null })
+  })
+
   it('assign based on an old read is refused when the row changed since', async () => {
     const m = setup({ status: 'queued', request_text: 'do a thing' })
     m.onFirstUpdate(async () => m.touch())

@@ -884,3 +884,11 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 - Three stale `queued` rows (9d2b2a80, ecc57612, 8ae41b9f) would run the day the dispatcher is switched back on. Clear them before that.
 
 **Made by:** David / Claude
+
+### 2026-11-03 — Resume restores phase=planned when a plan exists
+
+**Decision:** `mc_resume_request` now sets `phase='planned'` when the row resumes to `submitted` and still has a plan, so the reviewed plan is reused. Rows resuming to `queued`, or with no plan, behave as before (phase null).
+
+**Reasoning:** Codex round 2 found a stuck-row bug. Resume sent a Hermes-workflow row back to `submitted` with phase null but kept its plan. `mc_submit_plan` refuses existing plans, dispatcher pickup needs `phase='planned'`, and the plan nudge needs plan null, so nothing could move the row.
+
+**Made by:** David / Claude
