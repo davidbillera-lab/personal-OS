@@ -392,3 +392,23 @@ describe('interleaving: owner vs worker', () => {
     expect(m.get().blocker).toMatch(/^owner-hold:/)
   })
 })
+
+describe('interleaving: mc_submit_plan', () => {
+  it('owner reassign between read and write refuses the plan; row stays unplanned and not dispatcher-eligible', async () => {
+    const m = setup({ status: 'submitted', assigned_to: 'hermes' })
+    m.onFirstUpdate(() => ownerApply(m, r => planOwnerReassign(r, 'claude'), 'owner_reassign_request'))
+    await expect(callTool('mc_submit_plan', { request_id: ID, plan: 'the plan' }, 'full')).rejects.toThrow('Request changed')
+    const after = m.get()
+    expect(after.plan).toBeNull()
+    expect(after.assigned_to).toBe('claude')
+    expect(after.status === 'queued' && isDispatcherRow(after)).toBe(false)
+    expect(isClaimablePlanned(after, true)).toBe(false)
+  })
+
+  it('two concurrent submissions: the second lands, the first is refused and does not overwrite', async () => {
+    const m = setup({ status: 'submitted', assigned_to: 'hermes' })
+    m.onFirstUpdate(async () => { await callTool('mc_submit_plan', { request_id: ID, plan: 'second' }, 'full') })
+    await expect(callTool('mc_submit_plan', { request_id: ID, plan: 'first' }, 'full')).rejects.toThrow('Request changed')
+    expect(m.get().plan).toBe('second')
+  })
+})

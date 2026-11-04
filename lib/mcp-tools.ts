@@ -1536,7 +1536,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
 
     const { data: current, error: currentError } = await supabase
       .from('mc_requests')
-      .select('status, assigned_to, plan, title')
+      .select('status, assigned_to, plan, title, updated_at')
       .eq('id', request_id)
       .single()
     if (currentError || !current) throw new Error(`Request not found: ${request_id}`)
@@ -1555,6 +1555,9 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       })
       .eq('id', request_id)
       .eq('status', 'submitted')
+      .eq('assigned_to', 'hermes')
+      .is('plan', null)
+      .eq('updated_at', current.updated_at)
       .select('id, phase, plan_submitted_at')
       .maybeSingle()
     if (error) throw new Error(error.message)
