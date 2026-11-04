@@ -412,3 +412,19 @@ describe('interleaving: mc_submit_plan', () => {
     expect(m.get().plan).toBe('second')
   })
 })
+
+describe('assign/resume compare on updated_at', () => {
+  it('resume based on an old read does not release a row changed since', async () => {
+    const m = setup({ status: 'blocked', blocker: 'owner-hold: reopened by owner: x', request_text: 'do a thing' })
+    m.onFirstUpdate(async () => m.touch())
+    await expect(callTool('mc_resume_request', { request_id: ID, reason: 'go' })).rejects.toThrow('Request changed while resume')
+    expect(m.get().blocker).toMatch(/^owner-hold:/)
+  })
+
+  it('assign based on an old read is refused when the row changed since', async () => {
+    const m = setup({ status: 'queued', request_text: 'do a thing' })
+    m.onFirstUpdate(async () => m.touch())
+    await expect(callTool('mc_assign_request', { request_id: ID, worker: 'claude' })).rejects.toThrow('Request changed while assignment')
+    expect(m.get().assigned_to).toBeNull()
+  })
+})

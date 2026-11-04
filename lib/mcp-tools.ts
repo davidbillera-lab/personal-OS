@@ -1464,7 +1464,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
     const allowedStates = ['submitted', 'queued', 'claimed', 'in_progress', 'blocked']
     const { data: current, error: currentError } = await supabase
       .from('mc_requests')
-      .select('status, request_text')
+      .select('status, request_text, updated_at')
       .eq('id', request_id)
       .single()
     if (currentError || !current) throw new Error(`Request not found: ${request_id}`)
@@ -1477,6 +1477,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       .update({ assigned_to: assignedWorker, updated_at: new Date().toISOString() })
       .eq('id', request_id)
       .eq('status', current.status)
+      .eq('updated_at', current.updated_at)
       .select('id, status, assigned_to')
       .maybeSingle()
     if (error) throw new Error(error.message)
@@ -1492,7 +1493,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
 
     const { data: current, error: currentError } = await supabase
       .from('mc_requests')
-      .select('status, request_text, blocker')
+      .select('status, request_text, blocker, updated_at')
       .eq('id', request_id)
       .single()
     if (currentError || !current) throw new Error(`Request not found: ${request_id}`)
@@ -1515,6 +1516,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
       })
       .eq('id', request_id)
       .eq('status', current.status)
+      .eq('updated_at', current.updated_at)
       .select('id, status, assigned_to, preferred_worker, latest_progress, updated_at')
       .maybeSingle()
     if (error) throw new Error(error.message)
