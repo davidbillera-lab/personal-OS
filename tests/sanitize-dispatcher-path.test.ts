@@ -8,6 +8,14 @@
 // live hazard (that import ran the real dispatcher against production Mission Control).
 // The dispatcher now only self-starts as a process entry point, and exports its internals.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { mkdtempSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { persistAttemptResult, readAttemptResult } from '../scripts/lib/attempt-recovery.mjs'
+
+// Sidecars land in a throwaway dir, not the repo's builds/. Read once at dispatcher import.
+const BUILDS = mkdtempSync(join(tmpdir(), 'dispatcher-test-'))
+process.env.DISPATCHER_BUILDS_DIR = BUILDS
 
 const REQ_ID = '550e8400-e29b-41d4-a716-446655440000'
 const GIT_SHA = '3f2a91c0de4b7a5e18cc6d0f9b2e4a7c13d5f608'
@@ -27,9 +35,6 @@ const ALL_SECRETS = [
   'AAHfakeTokenValue', 'hunter2hunter2',
 ]
 
-const state: { updates: any[]; telegram: string[]; launch: () => any } =
-  { updates: [], telegram: [], launch: () => ({}) }
-
 const BASE_ROW = {
   id: REQ_ID,
   title: 'Add a hello file',
@@ -38,6 +43,12 @@ const BASE_ROW = {
   project_id: null,
   status: 'claimed',
 }
+
+// reread = what a SELECT on mc_requests returns (the write-contract re-read); casMiss makes
+// every guarded UPDATE match 0 rows, as when something touched the row in between.
+const stillOurs = () => ({ status: 'claimed', phase: 'building', attempt_id: BASE_ROW.attempt_id, updated_at: 't0' })
+const state: { updates: any[]; telegram: string[]; launch: () => any; reread: () => Record<string, unknown> | null; casMiss: boolean } =
+  { updates: [], telegram: [], launch: () => ({}), reread: stillOurs, casMiss: false }
 
 vi.mock('@supabase/supabase-js', () => ({ createClient: () => makeStubClient() }))
 
@@ -59,7 +70,9 @@ function makeStubClient() {
       chain.upsert = () => chain
       chain.then = (res: any, rej: any) => {
         if (ops.method === 'update' && ops.table === 'mc_requests') state.updates.push(ops.payload)
-        const data = ops.method === 'update' ? { ...BASE_ROW, ...ops.payload } : null
+        const data = ops.method === 'update'
+          ? (state.casMiss && ops.table === 'mc_requests' ? null : { ...BASE_ROW, ...ops.payload })
+          : (ops.table === 'mc_requests' ? state.reread() : null)
         return Promise.resolve({ data, error: null }).then(res, rej)
       }
       return chain
@@ -67,7 +80,7 @@ function makeStubClient() {
   }
 }
 
-async function runBuild() {
+async function loadDispatcher() {
   state.updates = []
   state.telegram = []
   process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://stub.supabase.co'
@@ -79,9 +92,15 @@ async function runBuild() {
     state.telegram.push(JSON.parse(init.body).text)
     return { ok: true, status: 200 }
   })
-  const { runAttempt, createAdminSupabaseClient } = await import('../scripts/dispatcher.mjs')
+  return import('../scripts/dispatcher.mjs')
+}
+
+async function runBuild() {
+  const { runAttempt, createAdminSupabaseClient } = await loadDispatcher()
   await runAttempt(createAdminSupabaseClient(), { ...BASE_ROW })
 }
+
+beforeEach(() => { state.reread = stillOurs; state.casMiss = false })
 
 describe('C6-P5 sanitization on the live dispatcher return path', () => {
   beforeEach(() => { vi.unstubAllGlobals() })
@@ -127,5 +146,39 @@ describe('C6-P5 sanitization on the live dispatcher return path', () => {
     expect(failed.blocker).toContain('[REDACTED:anthropic-key]')
     expect(failed.blocker).toContain('[REDACTED:jwt]')
     for (const secret of ALL_SECRETS) expect(failed.blocker).not.toContain(secret)
+  })
+})
+
+// Write contract (migration 029): requestApproval CASes on a fresh updated_at. The sidecar
+// is the only copy of a finished build, so a CAS miss may only delete it when the re-read
+// proves the row is no longer this attempt's.
+describe('requestApproval CAS miss vs the on-disk sidecar', () => {
+  const RESULT = { reviewedSha: GIT_SHA, qcVerdict: 'SHIP', commits: ['abc1234 add hello'], workspace: '/w', runtimeSec: 1 }
+
+  async function approve() {
+    persistAttemptResult(BUILDS, REQ_ID, BASE_ROW.attempt_id, RESULT)
+    const { requestApproval, createAdminSupabaseClient } = await loadDispatcher()
+    const ok = await requestApproval(createAdminSupabaseClient(), { ...BASE_ROW }, RESULT)
+    return { ok, sidecar: readAttemptResult(BUILDS, REQ_ID, BASE_ROW.attempt_id) }
+  }
+
+  it('keeps the sidecar when the CAS misses but the row is still ours', async () => {
+    state.casMiss = true
+    const { ok, sidecar } = await approve()
+    expect(ok).toBe(false)
+    expect(sidecar).not.toBeNull()
+  })
+
+  it('clears the sidecar when the row has moved on (cancelled)', async () => {
+    state.reread = () => ({ ...stillOurs(), status: 'cancelled' })
+    const { ok, sidecar } = await approve()
+    expect(ok).toBe(false)
+    expect(sidecar).toBeNull()
+  })
+
+  it('records the approval and clears the sidecar on the happy path', async () => {
+    const { ok, sidecar } = await approve()
+    expect(ok).toBe(true)
+    expect(sidecar).toBeNull()
   })
 })
