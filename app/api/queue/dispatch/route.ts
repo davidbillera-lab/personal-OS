@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { callTool } from '@/lib/mcp-tools'
+import { DISPATCHER_ROW_FILTER } from '../../../../scripts/lib/planned-claim.mjs'
 
 export const runtime = 'nodejs'
 
@@ -45,6 +46,7 @@ export async function GET(req: NextRequest) {
     .from('mc_requests')
     .select('id, title, preferred_worker, priority, created_at')
     .eq('status', 'queued')
+    .or(DISPATCHER_ROW_FILTER) // never hijack rows the owner parked on another worker (e.g. codex)
     .order('created_at', { ascending: true })
     .limit(MAX_PER_RUN)
   if (error) {

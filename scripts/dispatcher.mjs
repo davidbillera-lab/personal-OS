@@ -51,6 +51,7 @@ import { workSetEmpty, shouldSleep } from './lib/idle-sleep.mjs'
 import {
   withRetry, persistAttemptResult, clearAttemptResult, recoverFinishedBuild, isOurAttempt,
 } from './lib/attempt-recovery.mjs'
+import { rereadForWrite } from './lib/request-cas.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -181,7 +182,7 @@ async function claimOne(sb) {
   // Only null/claude/hermes rows are dispatcher territory; every other worker identity
   // (codex, codex-qc, future lanes) claims its own rows, never here.
   const { data: candidates, error: selErr } = await sb
-    .from('mc_requests').select('id, assigned_to')
+    .from('mc_requests').select('id, assigned_to, updated_at')
     .eq('status', 'queued').or(DISPATCHER_ROW_FILTER).order('created_at', { ascending: true }).limit(1)
   if (selErr) throw new Error(`claim select failed: ${selErr.message}`)
   if (!candidates || candidates.length === 0) return null
@@ -192,6 +193,7 @@ async function claimOne(sb) {
     .from('mc_requests')
     .update({ status: 'claimed', assigned_to: 'claude', phase: 'building', attempt_id: attemptId, updated_at: nowISO() })
     .eq('id', candidateId).eq('status', 'queued') // conditional: 0 rows ⇒ already claimed
+    .eq('updated_at', candidates[0].updated_at) // version token (migration 029): an owner touch since the select ⇒ 0 rows
     .or(DISPATCHER_ROW_FILTER)
     .select('*').maybeSingle()
   if (updErr) throw new Error(`claim update failed: ${updErr.message}`)
@@ -227,6 +229,7 @@ async function claimPlannedOne(sb) {
     // assigned_to='claude', attempt_id set, updated_at bumped.
     .update({ status: 'claimed', assigned_to: 'claude', phase: 'building', attempt_id: attemptId, updated_at: nowISO() })
     .eq('id', candidate.id).eq('status', 'submitted').eq('phase', 'planned') // conditional: 0 rows ⇒ already claimed
+    .eq('updated_at', candidate.updated_at) // version token (migration 029)
     .or(DISPATCHER_ROW_FILTER)
     .select('*').maybeSingle()
   if (updErr) throw new Error(`claim(planned) update failed: ${updErr.message}`)
@@ -247,9 +250,17 @@ async function classifierGate(sb, row) {
   }
   console.log(`[classifier] HELD ${row.id} category=${verdict.category} matched="${verdict.matched}"`)
   const blocker = clip(`auto-classifier: ${verdict.category} — held for operator review (matched: ${verdict.matched})`)
-  await sb.from('mc_requests')
+  // `row` is the freshly claimed row, so its updated_at is the claim's own write. 0 rows ⇒
+  // the row moved on since the claim (owner action, cancel): it is no longer ours to hold.
+  const { data: held, error: herr } = await sb.from('mc_requests')
     .update({ status: 'blocked', phase: null, blocker, updated_at: nowISO() })
-    .eq('id', row.id).eq('status', 'claimed')
+    .eq('id', row.id).eq('status', 'claimed').eq('updated_at', row.updated_at)
+    .select('id').maybeSingle()
+  if (herr) console.log(`[classifier] hold write failed for ${row.id}: ${clip(herr.message)}`)
+  else if (!held) {
+    console.log(`[classifier] ${row.id} moved on before the hold landed — leaving it alone`)
+    return true
+  }
   await logAudit(sb, 'dispatcher.classifier_blocked', false, verdict.category)
   const ping = await notifyClassifierHold({ id: row.id, title: row.title || clip(row.request_text, 40), category: verdict.category })
   console.log(`[classifier] ping ${JSON.stringify(ping)}`)
@@ -291,10 +302,22 @@ async function runAttempt(sb, row) {
     // stuck mid-build (looked like it was still running). Check + log the write.
     // Retried: a failed build that ALSO fails to record its failure is the worst state —
     // the row keeps claiming to be building and nothing sweeps it (2026-08-08).
-    const { error: uerr } = await withRetry('build-failed update', () => sb.from('mc_requests')
-      .update({ status: 'failed', phase: null, blocker: clip(`build failed: ${e.message}`), updated_at: nowISO() })
-      .eq('id', row.id).in('status', ['claimed', 'in_progress']))
+    // The build ran for minutes, so the claim-time updated_at is stale for innocent reasons:
+    // re-read inside the retried fn (fresh token per attempt), write only if still our attempt.
+    let movedOn = false
+    const { data: failedRow, error: uerr } = await withRetry('build-failed update', async () => {
+      movedOn = false
+      const g = await rereadForWrite(sb, row, ['claimed', 'in_progress'])
+      if (g.reason === 'error') return { error: g.error }
+      if (!g.ok) { movedOn = true; return { data: null, error: null } }
+      return sb.from('mc_requests')
+        .update({ status: 'failed', phase: null, blocker: clip(`build failed: ${e.message}`), updated_at: nowISO() })
+        .eq('id', row.id).eq('status', g.fresh.status).eq('attempt_id', row.attempt_id).eq('updated_at', g.fresh.updated_at)
+        .select('id').maybeSingle()
+    })
     if (uerr) console.log(`[build] FAILED status-update error for ${row.id}: ${clip(uerr.message)} — reconcile will retry`)
+    else if (movedOn) console.log(`[build] FAILED ${row.id} but the row moved on (cancelled/reassigned) — not overwriting`)
+    else if (!failedRow) console.log(`[build] FAILED ${row.id} write lost a race (row touched) — reconcile will retry`)
     await logAudit(sb, 'dispatcher.build_failed', false, e.message)
     // Alert the operator: this job fell out of the autonomous path and needs a
     // human to run it interactively. Best-effort; never throws (no-ops if unconfigured).
@@ -325,16 +348,26 @@ async function requestApproval(sb, row, result) {
   const title = row.title || clip(row.request_text, 40)
   const blocker = `built ${title}; CodexQC ${qcVerdict}; push commit ${reviewedSha} to ${SANDBOX_REPO}@${branch} — approve via ChatGPT Voice`
 
-  const { data: awaiting, error: aerr } = await withRetry('request-approval update', () => sb
-    .from('mc_requests')
-    .update({
-      status: 'awaiting_approval', phase: 'review', approval_required: true,
-      reviewed_sha: reviewedSha, workspace_ref: workspace,
-      latest_progress: clip(`built; CodexQC ${qcVerdict}; commit ${reviewedSha}`),
-      blocker: clip(blocker), updated_at: nowISO(),
-    })
-    .eq('id', row.id).eq('status', 'claimed') // guard from-state
-    .select('*').maybeSingle())
+  // Re-read inside the retried fn so every attempt CASes on a fresh updated_at (migration
+  // 029): the claim-time token is stale after a long build. `movedOn` separates "the row is
+  // no longer ours" (sidecar can go) from "still ours but the CAS missed" (sidecar must stay).
+  let movedOn = false
+  const { data: awaiting, error: aerr } = await withRetry('request-approval update', async () => {
+    movedOn = false
+    const g = await rereadForWrite(sb, row, ['claimed'])
+    if (g.reason === 'error') return { error: g.error }
+    if (!g.ok) { movedOn = true; return { data: null, error: null } }
+    return sb.from('mc_requests')
+      .update({
+        status: 'awaiting_approval', phase: 'review', approval_required: true,
+        reviewed_sha: reviewedSha, workspace_ref: workspace,
+        latest_progress: clip(`built; CodexQC ${qcVerdict}; commit ${reviewedSha}`),
+        blocker: clip(blocker), updated_at: nowISO(),
+      })
+      .eq('id', row.id).eq('status', 'claimed').eq('attempt_id', attemptId) // guard from-state + attempt
+      .eq('updated_at', g.fresh.updated_at)
+      .select('*').maybeSingle()
+  })
 
   // Retries exhausted: do NOT throw. The sidecar on disk is the record, the row stays
   // claimed/building, and reconcile() picks it up next tick. Throwing here is exactly
@@ -345,7 +378,13 @@ async function requestApproval(sb, row, result) {
     return false
   }
   if (!awaiting) {
-    console.log(`[approval] from-state guard failed for ${row.id} (no longer 'claimed') — not requesting`)
+    if (!movedOn) {
+      // Row is still our claimed attempt; something touched it between the re-read and the
+      // write. The sidecar is the only copy of a finished build — keep it, reconcile replays it.
+      console.log(`[approval] CAS missed for ${row.id} (row still ours, concurrently touched) — build kept on disk, reconcile will retry`)
+      return false
+    }
+    console.log(`[approval] from-state guard failed for ${row.id} (no longer our 'claimed' attempt) — not requesting`)
     clearResult(row.id, attemptId)
     return false
   }
@@ -396,9 +435,17 @@ async function gatedPush(sb, row) {
 
   const fail = async (reason) => {
     console.log(`[push] GATE FAIL ${r.id}: ${reason}`)
-    await sb.from('mc_requests')
+    // A git push may have run since the top-of-function re-read, so re-read again and CAS on
+    // that token. Moved on / CAS miss ⇒ don't fail it; the next tick re-evaluates the row.
+    const g = await rereadForWrite(sb, r, ['in_progress'])
+    if (!g.ok) { console.log(`[push] fail-write skipped for ${r.id}: ${g.reason}`); return }
+    const { data: failed, error: ferr } = await sb.from('mc_requests')
       .update({ status: 'failed', phase: null, blocker: clip(`push gate: ${reason}`), updated_at: nowISO() })
-      .eq('id', r.id).eq('status', 'in_progress') // don't clobber a newer state
+      .eq('id', r.id).eq('status', 'in_progress').eq('attempt_id', r.attempt_id) // don't clobber a newer state
+      .eq('updated_at', g.fresh.updated_at)
+      .select('id').maybeSingle()
+    if (ferr) console.log(`[push] fail-write error for ${r.id}: ${clip(ferr.message)}`)
+    else if (!failed) { console.log(`[push] fail-write lost a race for ${r.id} (row touched) — next tick re-evaluates`); return }
     await logAudit(sb, 'dispatcher.push', false, reason)
   }
 
@@ -438,13 +485,17 @@ async function gatedPush(sb, row) {
   }
 
   const repoURL = SANDBOX_REMOTE || `https://github.com/${SANDBOX_REPO}`
+  // The push can take a while; re-read right before recording it. A miss here is safe: the
+  // next tick's findPushable → gatedPush retries, and pushing the same SHA again is idempotent.
+  const g = await rereadForWrite(sb, r, ['in_progress'], { phase: 'pushing' })
+  if (!g.ok) { console.log(`[push] completion skipped for ${r.id} (${g.reason}) — next tick retries`); return }
   const { data: done, error: derr } = await sb.from('mc_requests')
     .update({
       status: 'completed', phase: null,
       result_summary: `pushed ${head} to ${SANDBOX_REPO}@${branch}`,
       artifact_refs: [repoURL, head], completed_at: nowISO(), updated_at: nowISO(),
     })
-    .eq('id', r.id).eq('status', 'in_progress') // guard: a newer state ⇒ don't double-complete
+    .eq('id', r.id).eq('status', 'in_progress').eq('updated_at', g.fresh.updated_at) // guard: a newer state ⇒ don't double-complete
     .select('*').maybeSingle()
   if (derr) { console.log(`[push] complete update error ${r.id}: ${derr.message}`); return }
   if (!done) { console.log(`[push] complete guard failed for ${r.id} (a newer state won)`); return }
@@ -479,10 +530,13 @@ async function reconcile(sb) {
     // phase (only this dispatcher sets phase='building' at claim time). Reclaim it —
     // distinct from a legit interrupted build, which always has phase='building'.
     if (r.status === 'claimed' && !r.phase) {
-      await withRetry('reconcile requeue', () => sb.from('mc_requests')
+      const { data: requeued } = await withRetry('reconcile requeue', () => sb.from('mc_requests')
         .update({ status: 'queued', assigned_to: null, attempt_id: null, updated_at: nowISO() })
-        .eq('id', r.id).eq('status', 'claimed'))
-      console.log(`[reconcile] ${r.id} cron-orphan (claimed/phase=null) → requeued`)
+        .eq('id', r.id).eq('status', 'claimed').eq('updated_at', r.updated_at) // sweep token; a miss re-evaluates next sweep
+        .select('id').maybeSingle())
+      console.log(requeued
+        ? `[reconcile] ${r.id} cron-orphan (claimed/phase=null) → requeued`
+        : `[reconcile] ${r.id} cron-orphan requeue not applied (row moved or write failed) — next sweep re-evaluates`)
       continue
     }
 
@@ -498,10 +552,13 @@ async function reconcile(sb) {
         if (!ok) console.log(`[reconcile] ${r.id} write-back still failing — leaving claimed, will retry next sweep`)
         continue
       }
-      await withRetry('reconcile fail', () => sb.from('mc_requests')
+      const { data: failedRow } = await withRetry('reconcile fail', () => sb.from('mc_requests')
         .update({ status: 'failed', phase: null, blocker: 'dispatcher reconcile: build interrupted, no commit on disk', updated_at: nowISO() })
-        .eq('id', r.id).in('status', ['claimed', 'in_progress']))
-      console.log(`[reconcile] ${r.id} interrupted mid-build, nothing to salvage → failed`)
+        .eq('id', r.id).in('status', ['claimed', 'in_progress']).eq('updated_at', r.updated_at) // sweep token; a miss re-evaluates next sweep
+        .select('id').maybeSingle())
+      console.log(failedRow
+        ? `[reconcile] ${r.id} interrupted mid-build, nothing to salvage → failed`
+        : `[reconcile] ${r.id} fail not applied (row moved or write failed) — next sweep re-evaluates`)
     } else if (r.phase === 'pushing' && r.approved_at && r.reviewed_sha) {
       console.log(`[reconcile] ${r.id} approved+pushing → leaving for path B resume`)
     } else {
