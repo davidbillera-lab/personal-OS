@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildTaskRequest, isTaskRoute } from '@/lib/task-request'
+import { buildTaskRequest, firstArtifactUrl, isTaskRoute, requestStatusLine } from '@/lib/task-request'
 
 const task = { id: 't-1', title: 'Build the thing', generated_spec: '# Spec\nDo it.', project_id: 'p-1' }
 const project = { id: 'p-1', name: 'Mission Control', repo_url: 'https://github.com/x/y' }
@@ -40,5 +40,22 @@ describe('buildTaskRequest', () => {
   it('rejects unknown routes', () => {
     expect(isTaskRoute('codex')).toBe(true)
     expect(isTaskRoute('dispatcher')).toBe(false)
+  })
+})
+
+describe('task card status line', () => {
+  const base = { assigned_to: 'codex', blocker: null, plan_submitted_at: null }
+  it('maps request states to plain English', () => {
+    expect(requestStatusLine({ ...base, status: 'submitted' })).toBe('Waiting for Hermes to plan')
+    expect(requestStatusLine({ ...base, status: 'submitted', plan_submitted_at: '2026-11-06' })).toBe('Plan ready, review it in the queue')
+    expect(requestStatusLine({ ...base, status: 'queued' })).toBe('Waiting for codex to pick it up')
+    expect(requestStatusLine({ ...base, status: 'blocked', blocker: 'needs key' })).toBe('Blocked: needs key')
+    expect(requestStatusLine({ ...base, status: 'cancelled' })).toBe('Cancelled, re-send available')
+  })
+
+  it('finds the first URL in artifact_refs', () => {
+    expect(firstArtifactUrl(['note', { url: 'https://github.com/x/y/pull/1' }])).toBe('https://github.com/x/y/pull/1')
+    expect(firstArtifactUrl([{ type: 'file' }])).toBeNull()
+    expect(firstArtifactUrl(null)).toBeNull()
   })
 })

@@ -16,6 +16,50 @@ const ROUTES: Record<TaskRoute, { status: 'submitted' | 'queued'; worker: 'herme
   claude: { status: 'queued', worker: 'claude', progress: 'Sent from dashboard; waiting for claude to pick it up.' },
 }
 
+export type LinkedRequest = {
+  id: string
+  task_id: string
+  status: string
+  phase: string | null
+  assigned_to: string | null
+  latest_progress: string | null
+  blocker: string | null
+  result_summary: string | null
+  artifact_refs: unknown
+  plan_submitted_at: string | null
+  updated_at: string
+}
+
+export const FINISHED_STATUSES = ['completed', 'failed', 'cancelled']
+
+// Plain-English line for the task card (spec table "Request state -> Status line").
+export function requestStatusLine(r: Pick<LinkedRequest, 'status' | 'assigned_to' | 'blocker' | 'plan_submitted_at'>): string {
+  const worker = r.assigned_to ?? 'an agent'
+  switch (r.status) {
+    case 'submitted': return r.plan_submitted_at ? 'Plan ready, review it in the queue' : 'Waiting for Hermes to plan'
+    case 'queued': return `Waiting for ${worker} to pick it up`
+    case 'claimed':
+    case 'in_progress': return `${worker} is working`
+    case 'blocked': return `Blocked: ${r.blocker ?? 'no reason given'}`
+    case 'awaiting_approval': return 'Needs your approval'
+    case 'completed': return 'Agent finished, run QC'
+    case 'failed': return 'Failed, re-send available'
+    case 'cancelled': return 'Cancelled, re-send available'
+    default: return r.status
+  }
+}
+
+// First http(s) URL found in artifact_refs (strings or objects with url/href), for the PR link.
+export function firstArtifactUrl(refs: unknown): string | null {
+  if (!Array.isArray(refs)) return null
+  for (const ref of refs) {
+    const candidate = typeof ref === 'string' ? ref
+      : ref && typeof ref === 'object' ? ((ref as Record<string, unknown>).url ?? (ref as Record<string, unknown>).href) : null
+    if (typeof candidate === 'string' && /^https?:\/\//.test(candidate)) return candidate
+  }
+  return null
+}
+
 export function isTaskRoute(value: unknown): value is TaskRoute {
   return typeof value === 'string' && (TASK_ROUTES as string[]).includes(value)
 }
