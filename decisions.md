@@ -892,3 +892,11 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 **Reasoning:** Codex round 2 found a stuck-row bug. Resume sent a Hermes-workflow row back to `submitted` with phase null but kept its plan. `mc_submit_plan` refuses existing plans, dispatcher pickup needs `phase='planned'`, and the plan nudge needs plan null, so nothing could move the row.
 
 **Made by:** David / Claude
+
+### 2026-11-06 — Mission Control is a workflow OS, run from the dashboard
+
+**Decision:** Mission Control becomes the place where work starts and moves: brain dump → spec → agent → QC → ship, all driven from the dashboard. Dashboard work on that path no longer needs its own advisory board gate. This supersedes the 2026-11-02 "redesign needs its own AB gate" directive for this path. Scope creep and the cost to revenue work still get flagged. Step 1 is the dashboard → agent bridge (`specs/2026-11-06-mc-dashboard-agent-bridge.md`). Step 2 is running each pipeline step from the project page. Step 3 is execution that doesn't need a human to open a window.
+
+**Reasoning:** Today only agents with write keys can change MC. Handing work off means juggling ChatGPT, Hermes, the Hermes dashboard and several VS Code windows, which breaks the tool-agnostic rule. A repo check found the dashboard pipeline (`tasks`) and the agent queue (`mc_requests`) have never been connected. This matches the v1 charter's "one-click handoff".
+
+**Made by:** David
