@@ -131,8 +131,8 @@ function CodexQCForm({ taskId, projectId, currentQcStatus }: { taskId: string; p
       const res = isRerun
         ? await rerunCodexQCOnSpec(taskId, projectId, diff, commitUrl || undefined)
         : await runCodexQC(taskId, projectId, diff, commitUrl || undefined)
-      if (res.error) {
-        setError(res.error)
+      if (res.error || !('status' in res)) {
+        setError(res.error ?? 'QC failed')
       } else {
         setResult({ status: res.status ?? '', notes: res.notes ?? '' })
       }

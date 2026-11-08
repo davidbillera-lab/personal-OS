@@ -47,7 +47,7 @@ export function ProjectChat({ projectId, initialMessages, focusedContext }: Prop
         setInput(text)
         return
       }
-      if (result.reply) {
+      if ('reply' in result && result.reply) {
         const assistantMsg: ProjectChatType = {
           id: `reply-${Date.now()}`,
           project_id: projectId,

@@ -1,7 +1,7 @@
 ﻿import { createAdminSupabaseClient } from '@/lib/supabase'
 import { decrypt, encrypt } from '@/lib/crypto'
 import { fetchGitHubDiff } from '@/lib/github'
-import { runCodexQC, rerunCodexQCOnSpec } from '@/app/(app)/projects/[id]/actions'
+import { runCodexQCCore, rerunCodexQCCore } from '@/lib/codex-qc'
 import { captureToVault } from '@/lib/vault'
 import { buildPlanReadyMessage } from '@/lib/alerts/plan-ready'
 import {
@@ -820,8 +820,8 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
 
           const isRerun = currentQcStatus === 'issues_found'
           const qcResult = isRerun
-            ? await rerunCodexQCOnSpec(task_id, task.project_id, diff, github_commit_url)
-            : await runCodexQC(task_id, task.project_id, diff, github_commit_url)
+            ? await rerunCodexQCCore(task_id, task.project_id, diff, github_commit_url)
+            : await runCodexQCCore(task_id, task.project_id, diff, github_commit_url)
 
           if ('error' in qcResult && qcResult.error) {
             return JSON.stringify({ ok: true, completed_at: now, qc_error: qcResult.error })
