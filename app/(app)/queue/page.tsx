@@ -66,7 +66,7 @@ function RequestCard({ req, projectName }: { req: McRequest; projectName: string
   const title = req.title ?? req.request_text.slice(0, 80)
 
   return (
-    <div className="rounded-lg border border-border bg-card px-4 py-3 flex flex-col gap-1.5">
+    <div id={req.id} className="scroll-mt-4 rounded-lg border border-border bg-card px-4 py-3 flex flex-col gap-1.5 target:ring-2 target:ring-blue-400">
       <div className="flex items-center gap-2 flex-wrap">
         <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${statusColors[req.status] ?? 'bg-slate-100 text-slate-600'}`}>
           {req.status.replace(/_/g, ' ')}
