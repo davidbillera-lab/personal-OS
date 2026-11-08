@@ -195,6 +195,18 @@ export async function sendTaskToAgent(taskId: string, projectId: string, route: 
     const { data: moved, error: taskUpdateError } = await supabase.from('tasks')
       .update({ status: 'in_progress', agent_assigned_to: routeWorker(route) })
       .eq('id', taskId).eq('status', task.status).select('id').maybeSingle()
+    if (!taskUpdateError && !moved) {
+      // The task changed after our read. If it was closed meanwhile, the new request must not stay live.
+      const { data: now } = await supabase.from('tasks').select('status').eq('id', taskId).maybeSingle()
+      if (!now || now.status === 'done' || now.status === 'killed') {
+        const { data: undone } = await supabase.from('mc_requests')
+          .update({ status: 'cancelled', latest_progress: 'Task was closed while sending; request cancelled.' })
+          .eq('id', created.id).eq('status', row.status).select('id').maybeSingle()
+        return refuse(undone
+          ? 'Task was closed while sending; the request was cancelled.'
+          : 'Task was closed while sending and the request is already live; close it in the queue.', created.id)
+      }
+    }
     if (taskUpdateError || !moved) warning = 'Request created, but the task status could not be updated.'
 
     await recordOwnerAudit(supabase, {
