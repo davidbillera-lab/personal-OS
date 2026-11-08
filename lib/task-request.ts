@@ -49,13 +49,14 @@ export function requestStatusLine(r: Pick<LinkedRequest, 'status' | 'assigned_to
   }
 }
 
-// First http(s) URL found in artifact_refs (strings or objects with url/href), for the PR link.
-export function firstArtifactUrl(refs: unknown): string | null {
+// First pull-request URL in artifact_refs (strings or objects with url/href). The dispatcher
+// stores [repoURL, sha], so a bare http(s) match would label the repo homepage "View PR".
+export function firstPrUrl(refs: unknown): string | null {
   if (!Array.isArray(refs)) return null
   for (const ref of refs) {
     const candidate = typeof ref === 'string' ? ref
       : ref && typeof ref === 'object' ? ((ref as Record<string, unknown>).url ?? (ref as Record<string, unknown>).href) : null
-    if (typeof candidate === 'string' && /^https?:\/\//.test(candidate)) return candidate
+    if (typeof candidate === 'string' && /^https?:\/\/\S+\/pull\/\d+/.test(candidate)) return candidate
   }
   return null
 }

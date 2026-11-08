@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildTaskRequest, firstArtifactUrl, isTaskRoute, requestStatusLine } from '@/lib/task-request'
+import { buildTaskRequest, firstPrUrl, isTaskRoute, requestStatusLine } from '@/lib/task-request'
 
 const task = { id: 't-1', title: 'Build the thing', generated_spec: '# Spec\nDo it.', project_id: 'p-1' }
 const project = { id: 'p-1', name: 'Mission Control', repo_url: 'https://github.com/x/y' }
@@ -53,9 +53,11 @@ describe('task card status line', () => {
     expect(requestStatusLine({ ...base, status: 'cancelled' })).toBe('Cancelled, re-send available')
   })
 
-  it('finds the first URL in artifact_refs', () => {
-    expect(firstArtifactUrl(['note', { url: 'https://github.com/x/y/pull/1' }])).toBe('https://github.com/x/y/pull/1')
-    expect(firstArtifactUrl([{ type: 'file' }])).toBeNull()
-    expect(firstArtifactUrl(null)).toBeNull()
+  it('finds the first PR URL in artifact_refs, skipping repo URLs', () => {
+    expect(firstPrUrl(['note', { url: 'https://github.com/x/y/pull/1' }])).toBe('https://github.com/x/y/pull/1')
+    expect(firstPrUrl(['https://github.com/x/y', 'abc123', 'https://github.com/x/y/pull/7'])).toBe('https://github.com/x/y/pull/7')
+    expect(firstPrUrl(['https://github.com/x/y', 'abc123'])).toBeNull()
+    expect(firstPrUrl([{ type: 'file' }])).toBeNull()
+    expect(firstPrUrl(null)).toBeNull()
   })
 })

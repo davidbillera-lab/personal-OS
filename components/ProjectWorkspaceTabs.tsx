@@ -21,7 +21,7 @@ import {
   FINISHED_STATUSES,
   ROUTE_LABELS,
   TASK_ROUTES,
-  firstArtifactUrl,
+  firstPrUrl,
   requestStatusLine,
   type LinkedRequest,
   type TaskRoute,
@@ -715,7 +715,7 @@ const REQUEST_STATUS_COLOR: Record<string, string> = {
 }
 
 function LinkedRequestPanel({ request }: { request: LinkedRequest }) {
-  const prUrl = request.status === 'completed' ? firstArtifactUrl(request.artifact_refs) : null
+  const prUrl = request.status === 'completed' ? firstPrUrl(request.artifact_refs) : null
   return (
     <div className="rounded border border-white/10 bg-black/20 p-2 flex flex-col gap-1">
       <div className="flex items-center gap-2 flex-wrap">
