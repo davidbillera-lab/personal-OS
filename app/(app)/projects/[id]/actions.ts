@@ -302,20 +302,21 @@ async function ownerRunQc(taskId: string, projectId: string, diff: string, commi
       return NOT_AUTHORIZED
     }
     let source = diff
+    let reviewedSha: string | undefined
     if (!source.trim() && commitUrl && parsePrUrl(commitUrl)) {
       try {
-        source = await fetchGitHubPrDiff(commitUrl)
+        ({ diff: source, headSha: reviewedSha } = await fetchGitHubPrDiff(commitUrl))
       } catch (err) {
         const error = `Could not fetch the PR diff: ${err instanceof Error ? err.message : String(err)}`
         await recordOwnerAudit(supabase, { tool, ok: false, error, request_id: null, detail: { task_id: taskId, rerun } })
         return { error }
       }
     }
-    const res = await (rerun ? rerunCodexQCCore : runCodexQCCore)(taskId, projectId, source, commitUrl)
+    const res = await (rerun ? rerunCodexQCCore : runCodexQCCore)(taskId, projectId, source, commitUrl, reviewedSha)
     const ran = 'model' in res
     await recordOwnerAudit(supabase, {
       tool, ok: ran, error: ran ? undefined : res.error, request_id: null,
-      detail: { task_id: taskId, rerun, model: ran ? res.model : null, verdict: ran ? res.verdict : null },
+      detail: { task_id: taskId, rerun, reviewed_sha: reviewedSha ?? null, model: ran ? res.model : null, verdict: ran ? res.verdict : null },
     })
     return res
   } catch (err) {

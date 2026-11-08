@@ -10,20 +10,28 @@ export function parsePrUrl(prUrl: string): { owner: string; repo: string; number
   return match ? { owner: match[1], repo: match[2], number: Number(match[3]) } : null
 }
 
-export async function fetchGitHubPrDiff(prUrl: string): Promise<string> {
+// Pinned to the PR's current head: diffs base...head by SHA, so later pushes cannot change what was reviewed.
+export async function fetchGitHubPrDiff(prUrl: string): Promise<{ diff: string; headSha: string }> {
   const pr = parsePrUrl(prUrl)
   if (!pr) throw new Error(`Invalid GitHub pull request URL: ${prUrl}`)
-  return fetchDiff(`https://api.github.com/repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`)
+  const repo = `https://api.github.com/repos/${pr.owner}/${pr.repo}`
+  const meta = JSON.parse(await fetchDiff(`${repo}/pulls/${pr.number}`, 'application/vnd.github+json')) as {
+    base?: { sha?: string }; head?: { sha?: string }
+  }
+  const baseSha = meta.base?.sha
+  const headSha = meta.head?.sha
+  if (!baseSha || !headSha) throw new Error(`GitHub returned no base/head SHA for ${prUrl}`)
+  return { diff: await fetchDiff(`${repo}/compare/${baseSha}...${headSha}`), headSha }
 }
 
-async function fetchDiff(apiUrl: string): Promise<string> {
+async function fetchDiff(apiUrl: string, accept = 'application/vnd.github.diff'): Promise<string> {
   const pat = process.env.GITHUB_PAT
   if (!pat) throw new Error('GITHUB_PAT not configured')
   const res = await fetch(
     apiUrl,
     {
       headers: {
-        Accept: 'application/vnd.github.diff',
+        Accept: accept,
         Authorization: `token ${pat}`,
       },
     }

@@ -25,5 +25,6 @@ export async function callOpenAI(
     text: response.choices[0]?.message?.content ?? '',
     tokens_in: response.usage?.prompt_tokens ?? 0,
     tokens_out: response.usage?.completion_tokens ?? 0,
+    finish_reason: response.choices[0]?.finish_reason ?? undefined,
   }
 }

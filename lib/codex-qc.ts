@@ -50,7 +50,9 @@ export type QcResult =
   | { status: 'passed' | 'issues_found' | 'loop_detected'; notes: string; model: string; verdict: QcVerdict | null; error?: undefined }
   | { error: string }
 
-async function runQc(taskId: string, projectId: string, diff: string, commitUrl: string | undefined, rerun: boolean): Promise<QcResult> {
+// reviewedSha: the immutable head the diff was taken at (PR reviews), recorded in the report.
+// minimal: concurrent runs for one task are not de-duplicated; last writer wins. Needs a per-task attempt column.
+async function runQc(taskId: string, projectId: string, diff: string, commitUrl: string | undefined, rerun: boolean, reviewedSha?: string): Promise<QcResult> {
   if (!diff.trim()) return { error: 'The diff is empty; nothing to review.' }
   if (diff.length > MAX_DIFF_CHARS) {
     return { error: `The diff is ${diff.length.toLocaleString()} characters, over the ${MAX_DIFF_CHARS.toLocaleString()} limit. Review it with /CodexQC locally or split the PR.` }
@@ -77,15 +79,23 @@ async function runQc(taskId: string, projectId: string, diff: string, commitUrl:
     return { error: err instanceof Error ? err.message : 'QC model call failed' }
   }
 
+  // A report cut off at the token cap can carry a SHIP header without its findings: never record it.
+  if (result.finish_reason && result.finish_reason !== 'stop') {
+    return { error: `The review was incomplete (finish_reason: ${result.finish_reason}); nothing was recorded. Re-run, or review a smaller diff.` }
+  }
+
   const verdict = parseVerdict(result.text)
   const status = qcStatusFor(result.text)
   const finalStatus = rerun && task.codex_qc_status === 'issues_found' && status === 'issues_found' ? 'loop_detected' : status
-  const notes = `_Reviewed by ${result.model}_\n\n${result.text}`
-  await supabase.from('tasks').update({
+  const notes = `_Reviewed by ${result.model}${reviewedSha ? ` at ${reviewedSha.slice(0, 7)}` : ''}_\n\n${result.text}`
+  const { data: saved, error: saveError } = await supabase.from('tasks').update({
     codex_qc_status: finalStatus,
     codex_qc_notes: notes,
     status: finalStatus === 'passed' ? 'done' : 'review',
-  }).eq('id', taskId)
+  }).eq('id', taskId).select('id').maybeSingle()
+  if (saveError || !saved) {
+    return { error: `The review finished (${verdict ?? 'no verdict'}) but saving it failed: ${saveError?.message ?? 'task not updated'}. Nothing else changed.` }
+  }
   if (commitUrl && finalStatus === 'passed') {
     await supabase.from('agent_handoffs').update({ status: 'done', github_commit_url: commitUrl, completed_at: new Date().toISOString() }).eq('task_id', taskId)
   }
@@ -96,13 +106,13 @@ async function runQc(taskId: string, projectId: string, diff: string, commitUrl:
   return { status: finalStatus, notes, model: result.model, verdict }
 }
 
-export function runCodexQCCore(taskId: string, projectId: string, diff: string, commitUrl?: string) {
-  return runQc(taskId, projectId, diff, commitUrl, false)
+export function runCodexQCCore(taskId: string, projectId: string, diff: string, commitUrl?: string, reviewedSha?: string) {
+  return runQc(taskId, projectId, diff, commitUrl, false, reviewedSha)
 }
 
 // Re-run keeps loop detection: issues_found twice in a row becomes loop_detected.
-export function rerunCodexQCCore(taskId: string, projectId: string, diff: string, commitUrl?: string) {
-  return runQc(taskId, projectId, diff, commitUrl, true)
+export function rerunCodexQCCore(taskId: string, projectId: string, diff: string, commitUrl?: string, reviewedSha?: string) {
+  return runQc(taskId, projectId, diff, commitUrl, true, reviewedSha)
 }
 
 export async function runProjectShipAdvisoryBoard(projectId: string) {

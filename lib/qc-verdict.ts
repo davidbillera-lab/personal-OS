@@ -16,7 +16,8 @@ export function qcStatusFor(report: string): 'passed' | 'issues_found' {
   return parseVerdict(report) === 'SHIP' ? 'passed' : 'issues_found'
 }
 
-// Stored notes start with "_Reviewed by <model>_" (written by lib/codex-qc.ts); older gpt-4o notes have neither.
+// Stored notes start with "_Reviewed by <model>[ at <sha7>]_" (written by lib/codex-qc.ts); older gpt-4o notes have neither.
 export function qcReportMeta(notes: string): { verdict: QcVerdict | null; model: string | null } {
-  return { verdict: parseVerdict(notes), model: notes.match(/^_Reviewed by ([\w.-]+)_/)?.[1] ?? null }
+  const m = notes.match(/^_Reviewed by ([\w.-]+)( at [0-9a-f]{7})?_/)
+  return { verdict: parseVerdict(notes), model: m ? `${m[1]}${m[2] ?? ''}` : null }
 }

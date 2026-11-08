@@ -17,7 +17,7 @@ const TIER_MODEL: Record<ComplexityTier, string> = {
 // Anthropic models for tiers 1-3
 const ANTHROPIC_TIERS = new Set(['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-7'])
 
-type AdapterResult = { text: string; tokens_in: number; tokens_out: number }
+type AdapterResult = { text: string; tokens_in: number; tokens_out: number; finish_reason?: string }
 
 async function callModel(
   prompt: string,
@@ -73,7 +73,7 @@ export interface RouteTaskInput {
   supabase: SupabaseClient
 }
 
-export async function routeTask(input: RouteTaskInput): Promise<{ text: string; model: string; cost_usd: number }> {
+export async function routeTask(input: RouteTaskInput): Promise<{ text: string; model: string; cost_usd: number; finish_reason?: string }> {
   const {
     prompt, complexity_tier, purpose, model: modelOverride,
     system, project_id, task_id, brain_dump_id, allow_escalate = false, no_fallback = false, max_tokens, supabase,
@@ -120,7 +120,7 @@ export async function routeTask(input: RouteTaskInput): Promise<{ text: string; 
     const result = await callModel(prompt, primaryModel, { system, max_tokens })
     const cost_usd = calcCost(primaryModel, result.tokens_in, result.tokens_out)
     await logCost(supabase, { ...sharedLogFields, model: primaryModel, ...result, cost_usd })
-    return { text: result.text, model: primaryModel, cost_usd }
+    return { text: result.text, model: primaryModel, cost_usd, finish_reason: result.finish_reason }
   } catch (primaryErr) {
     if (no_fallback) throw primaryErr
 
