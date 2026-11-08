@@ -4,6 +4,7 @@ import { createAdminSupabaseClient } from '@/lib/supabase'
 import { bearerToken, lookupApiKey } from '@/lib/api-auth'
 
 export const runtime = 'nodejs' // needs Node crypto to hash the presented key
+export const maxDuration = 300 // mc_complete_task runs the Codex QC review inline (30-90s)
 
 // Append-only audit stamp for every tool call through this HTTP route. Records the
 // resolved actor, the tool, and whether it succeeded. Non-fatal: an audit failure

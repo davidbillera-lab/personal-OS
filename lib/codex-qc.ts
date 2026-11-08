@@ -1,6 +1,7 @@
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
 import { revalidatePath } from 'next/cache'
+import { parseVerdict, qcStatusFor, type QcVerdict } from '@/lib/qc-verdict'
 
 // Unguarded QC core: no 'use server', so it is never a public endpoint. Callers authorize first:
 // the owner-gated wrappers in app/(app)/projects/[id]/actions.ts, or mc_complete_task (MCP key).
@@ -37,21 +38,7 @@ Output STRICT markdown in this shape:
 
 If a section has no items, write "_None._". Reference real file paths/lines from the provided material. Do not invent issues to fill space.`
 
-export type QcVerdict = 'SHIP' | 'FIX-FIRST' | 'RECONSIDER'
-
-// Reads the **Verdict:** line. Exactly one verdict word must be present; an echoed template
-// ("SHIP | FIX-FIRST | RECONSIDER"), a missing line or garbage yields null.
-export function parseVerdict(report: string): QcVerdict | null {
-  const line = report.match(/\*\*Verdict:?\*\*:?\s*(.+)/i)?.[1]
-  if (!line) return null
-  const found = (['SHIP', 'FIX-FIRST', 'RECONSIDER'] as const).filter(v => new RegExp(`\\b${v}\\b`, 'i').test(line))
-  return found.length === 1 ? found[0] : null
-}
-
-// Only an explicit SHIP passes. Anything unparseable must never mark a task done.
-export function qcStatusFor(report: string): 'passed' | 'issues_found' {
-  return parseVerdict(report) === 'SHIP' ? 'passed' : 'issues_found'
-}
+export { parseVerdict, qcStatusFor, type QcVerdict } from '@/lib/qc-verdict'
 
 function isModelUnavailable(err: unknown): boolean {
   const e = err as { status?: number; code?: string; message?: string }

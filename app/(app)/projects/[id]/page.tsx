@@ -5,6 +5,9 @@ import { getProjectHealth } from '@/lib/health'
 import type { AgentHandoff, KillCriteriaCheck } from '@/lib/types'
 import type { LinkedRequest } from '@/lib/task-request'
 
+// Server actions run under this page's limit; a Codex QC review takes 30-90s. 300s is the Hobby (Fluid) max.
+export const maxDuration = 300
+
 interface Props {
   params: Promise<{ id: string }>
 }
