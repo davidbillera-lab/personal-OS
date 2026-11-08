@@ -47,7 +47,7 @@ describe('task card status line', () => {
   const base = { assigned_to: 'codex', blocker: null, plan_submitted_at: null }
   it('maps request states to plain English', () => {
     expect(requestStatusLine({ ...base, status: 'submitted' })).toBe('Waiting for Hermes to plan')
-    expect(requestStatusLine({ ...base, status: 'submitted', plan_submitted_at: '2026-11-06' })).toBe('Plan ready, review it in the queue')
+    expect(requestStatusLine({ ...base, status: 'submitted', plan_submitted_at: '2026-11-06' })).toBe('Plan ready, review it below')
     expect(requestStatusLine({ ...base, status: 'queued' })).toBe('Waiting for codex to pick it up')
     expect(requestStatusLine({ ...base, status: 'blocked', blocker: 'needs key' })).toBe('Blocked: needs key')
     expect(requestStatusLine({ ...base, status: 'cancelled' })).toBe('Cancelled, re-send available')

@@ -15,6 +15,7 @@ import {
   fetchRepoContents,
   archiveProject,
   sendTaskToAgent,
+  approvePlan,
   type RepoEntry,
 } from '@/app/(app)/projects/[id]/actions'
 import {
@@ -26,6 +27,7 @@ import {
   type LinkedRequest,
   type TaskRoute,
 } from '@/lib/task-request'
+import { qcReportMeta, type QcVerdict } from '@/lib/qc-verdict'
 import { ProjectChat } from '@/components/ProjectChat'
 import { ProjectGraph } from '@/components/ProjectGraph'
 import type {
@@ -109,6 +111,58 @@ function QCStatusBadge({ status }: { status: CodexQcStatus }) {
     <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${QC_STATUS_COLOR[status]}`}>
       QC: {status.replace(/_/g, ' ')}
     </span>
+  )
+}
+
+const VERDICT_COLOR: Record<QcVerdict, string> = {
+  'SHIP':       'bg-green-900/40 text-green-300',
+  'FIX-FIRST':  'bg-orange-900/40 text-orange-300',
+  'RECONSIDER': 'bg-red-900/40 text-red-300',
+}
+
+function QcReport({ notes }: { notes: string }) {
+  const { verdict, model } = qcReportMeta(notes)
+  return (
+    <details>
+      <summary className="cursor-pointer flex items-center gap-2 text-[11px] text-gray-300">
+        {verdict && <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${VERDICT_COLOR[verdict]}`}>{verdict}</span>}
+        QC report{model ? ` · ${model}` : ''}
+      </summary>
+      <pre className="mt-1 max-h-96 overflow-y-auto rounded border border-white/10 bg-black/30 p-2 text-[11px] text-gray-300 whitespace-pre-wrap leading-relaxed">
+        {notes}
+      </pre>
+    </details>
+  )
+}
+
+// Reviews the agent's PR diff on the server; nothing to paste. A re-run keeps loop detection.
+function PrCodexQC({ taskId, projectId, prUrl, qcStatus }: { taskId: string; projectId: string; prUrl: string; qcStatus?: CodexQcStatus | null }) {
+  const [isPending, startTransition] = useTransition()
+  const [error, setError] = useState<string | null>(null)
+  const isRerun = !!qcStatus && qcStatus !== 'pending'
+
+  function handleRun() {
+    setError(null)
+    startTransition(async () => {
+      const res = isRerun
+        ? await rerunCodexQCOnSpec(taskId, projectId, '', prUrl)
+        : await runCodexQC(taskId, projectId, '', prUrl)
+      if (res.error || !('status' in res)) setError(res.error ?? 'QC failed')
+    })
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5 border-t border-white/10 pt-2">
+      <button
+        onClick={handleRun}
+        disabled={isPending || qcStatus === 'loop_detected'}
+        className="self-start rounded bg-white/10 px-3 py-1 text-[11px] text-white hover:bg-white/20 disabled:opacity-40"
+      >
+        {isPending ? 'Reviewing… (up to 2 min)' : isRerun ? 'Re-run Codex QC on the PR' : 'Run Codex QC on the PR'}
+      </button>
+      {qcStatus === 'loop_detected' && <p className="text-[11px] text-orange-300">Loop detected: QC failed twice. Fix it by hand or re-send.</p>}
+      {error && <p role="alert" className="text-[11px] text-red-400 bg-red-900/20 rounded px-2 py-1">{error}</p>}
+    </div>
   )
 }
 
@@ -714,8 +768,59 @@ const REQUEST_STATUS_COLOR: Record<string, string> = {
   cancelled:         'bg-gray-800 text-gray-400',
 }
 
-function LinkedRequestPanel({ request }: { request: LinkedRequest }) {
+function PlanApproval({ request, projectId }: { request: LinkedRequest; projectId: string }) {
+  const [builder, setBuilder] = useState('codex')
+  const [isPending, startTransition] = useTransition()
+  const [error, setError] = useState<string | null>(null)
+
+  function handleApprove() {
+    setError(null)
+    startTransition(async () => {
+      const res = await approvePlan({
+        id: request.id, projectId, expectedStatus: request.status, expectedUpdatedAt: request.updated_at, builder,
+      })
+      if (!res.ok) setError(res.error)
+    })
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5 border-t border-white/10 pt-1.5">
+      <details>
+        <summary className="cursor-pointer text-[11px] text-gray-300">
+          Plan{request.plan_by ? ` by ${request.plan_by}` : ''} ({request.plan!.length.toLocaleString()} chars)
+        </summary>
+        <pre className="mt-1 max-h-80 overflow-y-auto rounded border border-white/10 bg-black/30 p-2 text-[11px] text-gray-300 whitespace-pre-wrap leading-relaxed">
+          {request.plan}
+        </pre>
+      </details>
+      <div className="flex items-center gap-2 flex-wrap">
+        <select
+          value={builder}
+          onChange={e => setBuilder(e.target.value)}
+          disabled={isPending}
+          aria-label="Builder"
+          className="rounded border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-gray-200 disabled:opacity-50"
+        >
+          <option value="codex">Codex builds</option>
+          <option value="claude">Claude builds</option>
+        </select>
+        <button
+          onClick={handleApprove}
+          disabled={isPending}
+          className="rounded bg-green-700/60 px-3 py-1 text-[11px] text-green-100 hover:bg-green-700/80 disabled:opacity-40"
+        >
+          {isPending ? 'Approving…' : 'Approve plan'}
+        </button>
+        <span className="text-[10px] text-gray-500">To reject it, close it in the queue.</span>
+      </div>
+      {error && <p role="alert" className="text-[11px] text-red-400 bg-red-900/20 rounded px-2 py-1">{error}</p>}
+    </div>
+  )
+}
+
+function LinkedRequestPanel({ request, projectId }: { request: LinkedRequest; projectId: string }) {
   const prUrl = request.status === 'completed' ? firstPrUrl(request.artifact_refs) : null
+  const planReady = request.status === 'submitted' && request.phase === 'planned' && !!request.plan
   return (
     <div className="rounded border border-white/10 bg-black/20 p-2 flex flex-col gap-1">
       <div className="flex items-center gap-2 flex-wrap">
@@ -737,6 +842,7 @@ function LinkedRequestPanel({ request }: { request: LinkedRequest }) {
           View PR →
         </a>
       )}
+      {planReady && <PlanApproval request={request} projectId={projectId} />}
     </div>
   )
 }
@@ -840,7 +946,7 @@ function TaskSpecCard({ task, project, linkedRequest }: { task: Task; project: P
         </button>
       </div>
 
-      {linkedRequest && <LinkedRequestPanel request={linkedRequest} />}
+      {linkedRequest && <LinkedRequestPanel request={linkedRequest} projectId={project.id} />}
       {task.generated_spec && !hasLiveRequest && <SendToAgentControl taskId={task.id} projectId={project.id} />}
 
       {approveError && (
@@ -1201,6 +1307,7 @@ export function ProjectWorkspaceTabs({
                   .map(task => {
                     const relatedHandoff = handoffs.find(h => h.task_id === task.id)
                     const linked = linkedRequests[task.id]
+                    const linkedPrUrl = linked?.status === 'completed' ? firstPrUrl(linked.artifact_refs) : null
                     return (
                       <div key={task.id} className="rounded-lg border border-white/10 bg-white/5 p-3 flex flex-col gap-2">
                         <div className="flex items-center gap-2 flex-wrap">
@@ -1219,11 +1326,9 @@ export function ProjectWorkspaceTabs({
                           )}
                         </div>
 
-                        {task.codex_qc_notes && (
-                          <p className="text-[11px] text-gray-400 leading-relaxed">{task.codex_qc_notes}</p>
-                        )}
+                        {task.codex_qc_notes && <QcReport notes={task.codex_qc_notes} />}
 
-                        {linked && <LinkedRequestPanel request={linked} />}
+                        {linked && <LinkedRequestPanel request={linked} projectId={project.id} />}
                         {linked && FINISHED_STATUSES.includes(linked.status) && task.generated_spec && (
                           <SendToAgentControl taskId={task.id} projectId={project.id} />
                         )}
@@ -1239,7 +1344,9 @@ export function ProjectWorkspaceTabs({
                           </a>
                         )}
 
-                        {task.tool === 'codex' && task.codex_qc_status && task.codex_qc_status !== 'pending' ? (
+                        {linkedPrUrl ? (
+                          <PrCodexQC taskId={task.id} projectId={project.id} prUrl={linkedPrUrl} qcStatus={task.codex_qc_status} />
+                        ) : task.tool === 'codex' && task.codex_qc_status && task.codex_qc_status !== 'pending' ? (
                           <details className="mt-1">
                             <summary className="cursor-pointer text-[10px] text-gray-600 hover:text-gray-400 select-none">
                               Run QC manually

@@ -6,6 +6,8 @@ export const PRICING: Record<string, { in: number; out: number }> = {
   'gpt-4o-mini':               { in: 0.15,  out: 0.60  },
   'gpt-4o':                    { in: 2.50,  out: 10.00 },
   'codex-mini-latest':         { in: 1.50,  out: 6.00  },
+  'gpt-6.1-sol':               { in: 2.00,  out: 10.00 },
+  'gpt-5.5':                   { in: 5.00,  out: 30.00 }, // standard tier; prompts >272k tokens bill higher, but the QC diff cap keeps us under
   'gemini-1.5-flash':          { in: 0.075, out: 0.30  },
   'gemini-1.5-pro':            { in: 3.50,  out: 10.50 },
 }

@@ -1357,7 +1357,7 @@ export async function callTool(name: string, args: ToolArgs, actor = 'system'): 
     const [{ data: request, error: requestError }, { data: audit, error: auditError }] = await Promise.all([
       supabase
         .from('mc_requests')
-        .select('id, title, status, assigned_to, priority, source, created_at, updated_at, latest_progress, blocker, request_text')
+        .select('id, title, status, assigned_to, priority, source, created_at, updated_at, latest_progress, blocker, request_text, plan, plan_by')
         .eq('id', request_id)
         .single(),
       supabase

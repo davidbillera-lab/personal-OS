@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 
-export type AdapterResponse = { text: string; tokens_in: number; tokens_out: number }
+export type AdapterResponse = { text: string; tokens_in: number; tokens_out: number; finish_reason?: string }
 
 let _client: Anthropic | null = null
 function client() {
