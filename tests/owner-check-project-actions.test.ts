@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 
-const { touched } = vi.hoisted(() => ({ touched: [] as string[] }))
-// Any chain resolves to an empty result; we only record which tables were reached.
+const { touched, inserted } = vi.hoisted(() => ({ touched: [] as string[], inserted: [] as Record<string, unknown>[] }))
+// Any chain resolves to an empty result; we record which tables were reached and what was inserted.
 const chain: unknown = new Proxy(() => {}, {
-  get: (_t, k) => (k === 'then' ? (res: (v: unknown) => void) => res({ data: null, error: null }) : chain),
+  get: (_t, k) => (k === 'then' ? (res: (v: unknown) => void) => res({ data: null, error: null })
+    : k === 'insert' ? (row: Record<string, unknown>) => { inserted.push(row); return chain } : chain),
   apply: () => chain,
 })
 vi.mock('@/lib/supabase', () => ({ createAdminSupabaseClient: () => ({ from: (t: string) => { touched.push(t); return chain } }) }))
@@ -45,5 +46,13 @@ describe('project actions refuse a non-owner', () => {
     expect(touched.filter(t => t !== 'mcp_audit_log')).toEqual([])
     expect(fetchSpy).not.toHaveBeenCalled()
     fetchSpy.mockRestore()
+  })
+
+  it.each(['runCodexQC', 'rerunCodexQCOnSpec'])('%s audits the refusal as owner_run_qc', async name => {
+    touched.length = 0
+    inserted.length = 0
+    await calls[name]()
+    expect(touched).toEqual(['mcp_audit_log'])
+    expect(inserted).toEqual([expect.objectContaining({ actor: 'owner', tool: 'owner_run_qc', ok: false, error: 'Not authorized' })])
   })
 })

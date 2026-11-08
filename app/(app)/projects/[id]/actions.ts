@@ -7,7 +7,8 @@ import { captureToVault } from '@/lib/vault'
 import { requireOwner } from '@/lib/owner'
 import { recordOwnerAudit, validateRequestId } from '@/lib/owner-requests'
 import { buildTaskRequest, isTaskRoute, routeWorker } from '@/lib/task-request'
-import { runCodexQCCore, rerunCodexQCCore } from '@/lib/codex-qc'
+import { runCodexQCCore, rerunCodexQCCore, type QcResult } from '@/lib/codex-qc'
+import { fetchGitHubPrDiff, parsePrUrl } from '@/lib/github'
 import { revalidatePath } from 'next/cache'
 
 // Every export here is a public POST endpoint, and proxy.ts only checks sign-in, so each one refuses non-owners.
@@ -238,14 +239,44 @@ export async function sendTaskToAgent(taskId: string, projectId: string, route: 
   }
 }
 
+// With an empty diff and a PR URL as commitUrl, the PR's diff is fetched from GitHub.
+async function ownerRunQc(taskId: string, projectId: string, diff: string, commitUrl: string | undefined, rerun: boolean): Promise<QcResult | typeof NOT_AUTHORIZED> {
+  const tool = 'owner_run_qc'
+  try {
+    const supabase = createAdminSupabaseClient()
+    if (!(await isOwner())) {
+      await recordOwnerAudit(supabase, { tool, ok: false, error: NOT_AUTHORIZED.error, request_id: null, detail: { task_id: taskId, rerun } })
+      return NOT_AUTHORIZED
+    }
+    let source = diff
+    if (!source.trim() && commitUrl && parsePrUrl(commitUrl)) {
+      try {
+        source = await fetchGitHubPrDiff(commitUrl)
+      } catch (err) {
+        const error = `Could not fetch the PR diff: ${err instanceof Error ? err.message : String(err)}`
+        await recordOwnerAudit(supabase, { tool, ok: false, error, request_id: null, detail: { task_id: taskId, rerun } })
+        return { error }
+      }
+    }
+    const res = await (rerun ? rerunCodexQCCore : runCodexQCCore)(taskId, projectId, source, commitUrl)
+    const ran = 'model' in res
+    await recordOwnerAudit(supabase, {
+      tool, ok: ran, error: ran ? undefined : res.error, request_id: null,
+      detail: { task_id: taskId, rerun, model: ran ? res.model : null, verdict: ran ? res.verdict : null },
+    })
+    return res
+  } catch (err) {
+    console.error(`[owner] ${tool} failed:`, err)
+    return { error: 'QC failed unexpectedly; refresh and try again.' }
+  }
+}
+
 export async function runCodexQC(taskId: string, projectId: string, diff: string, commitUrl?: string) {
-  if (!(await isOwner())) return NOT_AUTHORIZED
-  return runCodexQCCore(taskId, projectId, diff, commitUrl)
+  return ownerRunQc(taskId, projectId, diff, commitUrl, false)
 }
 
 export async function rerunCodexQCOnSpec(taskId: string, projectId: string, diff: string, commitUrl?: string) {
-  if (!(await isOwner())) return NOT_AUTHORIZED
-  return rerunCodexQCCore(taskId, projectId, diff, commitUrl)
+  return ownerRunQc(taskId, projectId, diff, commitUrl, true)
 }
 
 export type RepoEntry = { name: string; type: 'file' | 'dir'; path: string; html_url: string }
