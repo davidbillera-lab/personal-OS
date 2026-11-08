@@ -900,3 +900,18 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 **Reasoning:** Today only agents with write keys can change MC. Handing work off means juggling ChatGPT, Hermes, the Hermes dashboard and several VS Code windows, which breaks the tool-agnostic rule. A repo check found the dashboard pipeline (`tasks`) and the agent queue (`mc_requests`) have never been connected. This matches the v1 charter's "one-click handoff".
 
 **Made by:** David
+
+### 2026-11-08 — Dashboard step 2 approved; owner-check hardening ships first
+
+**Decision:** David approved `specs/2026-11-08-mc-dashboard-step2-plans-and-qc.md`. Step 2 adds the real Codex QC (GPT-6.1 Sol) on the task card and a way to approve Hermes plans from the card.
+- A SHIP verdict still marks the task done automatically.
+- Before step 2, a separate PR adds `requireOwner()` to every exported action in `app/(app)/projects/[id]/actions.ts`.
+
+**Reasoning:**
+- The project-page actions only check that someone is signed in, not that it's David. The `proxy.ts` sign-in check is the only gate on them.
+- Supabase sign-up uses a public endpoint and a public key. If sign-ups are enabled, a stranger could create an account and run those actions.
+- The DB has 1 auth user (David), so no one has done this so far. David confirmed on 2026-11-08 that sign-ups are OFF, so this PR is defense in depth, not an emergency fix.
+- Shipping the hardening as its own PR keeps step 2's review focused.
+- Auto-done stays because it's the smallest change, and merging is still David's call.
+
+**Made by:** David / Claude
