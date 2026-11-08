@@ -915,3 +915,15 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 - Auto-done stays because it's the smallest change, and merging is still David's call.
 
 **Made by:** David / Claude
+
+### 2026-11-08 — Applied migrations 008 + 009 to production
+
+**Decision:** Applied `008_pipeline_fields` and `009_pipeline_redesign` to the production Mission Control database. They add `tasks.spec_path`, `codex_qc_status`, `codex_qc_notes`, `tool`, `model_tier` and `agent_handoffs.spec_path`. Every change is an additive, nullable `ADD COLUMN IF NOT EXISTS`, and no data changed.
+
+**Reasoning:**
+- The step 2 live check found these columns missing in prod. The QC lookup failed and was reported as "Task not found".
+- So dashboard QC had never saved a result in prod, and the dashboard's "Generate spec" could not insert tasks (it writes `tool`, `model_tier`, `spec_path`).
+- The step 2 spec assumed "no migration" because the repo has these migrations, but the prod ledger never recorded them. 010, 011 and 015 were already applied.
+- Lesson: check a column in prod (`information_schema`) before a spec says "already exists".
+
+**Made by:** David / Claude
