@@ -726,7 +726,7 @@ function LinkedRequestPanel({ request }: { request: LinkedRequest }) {
         {request.assigned_to && <span className="text-[10px] text-gray-500">worker: {request.assigned_to}</span>}
         <a href={`/queue#${request.id}`} className="ml-auto text-[11px] text-blue-400 hover:text-blue-300">Open in queue →</a>
       </div>
-      {request.status !== 'blocked' && request.latest_progress && (
+      {request.status !== 'blocked' && !FINISHED_STATUSES.includes(request.status) && request.latest_progress && (
         <p className="text-[11px] text-gray-400">{request.latest_progress}</p>
       )}
       {request.status === 'completed' && request.result_summary && (
