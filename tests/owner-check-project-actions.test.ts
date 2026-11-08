@@ -22,6 +22,7 @@ const calls: Record<string, () => Promise<unknown>> = {
   generateSpec: () => actions.generateSpec(ID, ID, '', ''),
   approveSpec: () => actions.approveSpec(ID, ID),
   sendTaskToAgent: () => actions.sendTaskToAgent(ID, ID, 'codex'),
+  approvePlan: () => actions.approvePlan({ id: ID, projectId: ID, expectedStatus: 'submitted', expectedUpdatedAt: 'x', builder: 'codex' }),
   runCodexQC: () => actions.runCodexQC(ID, ID, 'diff'),
   rerunCodexQCOnSpec: () => actions.rerunCodexQCOnSpec(ID, ID, 'diff'),
   fetchRepoContents: () => actions.fetchRepoContents('https://github.com/o/r'),

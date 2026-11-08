@@ -156,6 +156,34 @@ export function planOwnerReassign(row: OwnerRequestRow, worker: OwnerWorker): Ow
   }
 }
 
+export type PlanBuilder = 'codex' | 'claude'
+
+// Approving a Hermes plan hands the row to a builder; there is no separate "approved" state.
+// approved_by/approved_at are not used: they belong to the push-approval gate.
+export function planOwnerApprovePlan(row: OwnerRequestRow, builder: string): OwnerPlan {
+  if (builder !== 'codex' && builder !== 'claude') return fail('Builder must be codex or claude')
+  if (row.status !== 'submitted') return fail(`Can only approve a submitted plan (this request is ${row.status})`)
+  if (row.assigned_to !== 'hermes') return fail('Only a Hermes plan can be approved')
+  if (row.phase !== 'planned') return fail('This request has no finished plan yet')
+  if (row.plan == null) return fail('This request has no plan')
+  return {
+    ok: true,
+    updates: {
+      status: 'queued',
+      assigned_to: builder,
+      preferred_worker: builder,
+      phase: null,
+      latest_progress: `Plan approved by owner; waiting for ${builder} to pick it up.`,
+    },
+    detail: {
+      builder,
+      plan_by: row.plan_by,
+      plan_submitted_at: row.plan_submitted_at,
+      plan_length: row.plan.length,
+    },
+  }
+}
+
 export type OwnerAudit = {
   tool: string
   ok: boolean

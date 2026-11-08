@@ -5,7 +5,14 @@ import { routeTask } from '@/lib/models/router'
 import { classifyBrainDump } from '@/lib/classify'
 import { captureToVault } from '@/lib/vault'
 import { requireOwner } from '@/lib/owner'
-import { recordOwnerAudit, validateRequestId } from '@/lib/owner-requests'
+import {
+  applyOwnerAction,
+  CONFLICT_MESSAGE,
+  planOwnerApprovePlan,
+  recordOwnerAudit,
+  validateRequestId,
+  type OwnerRequestRow,
+} from '@/lib/owner-requests'
 import { buildTaskRequest, isTaskRoute, routeWorker } from '@/lib/task-request'
 import { runCodexQCCore, rerunCodexQCCore, type QcResult } from '@/lib/codex-qc'
 import { fetchGitHubPrDiff, parsePrUrl } from '@/lib/github'
@@ -233,6 +240,52 @@ export async function sendTaskToAgent(taskId: string, projectId: string, route: 
     revalidatePath(`/projects/${projectId}`)
     revalidatePath('/queue')
     return warning ? { ok: true, requestId: created.id, warning } : { ok: true, requestId: created.id }
+  } catch (err) {
+    console.error(`[owner] ${tool} failed:`, err)
+    return { ok: false, error: 'Action failed unexpectedly; refresh and try again.' }
+  }
+}
+
+export type ApprovePlanResult = { ok: true } | { ok: false; error: string }
+
+// Approve a Hermes plan from the task card: hands the row to the chosen builder, plan kept.
+// Same compare-and-set as the /queue owner actions. Never throws.
+export async function approvePlan(input: {
+  id: string; projectId: string; expectedStatus: string; expectedUpdatedAt: string; builder: string
+}): Promise<ApprovePlanResult> {
+  const tool = 'owner_approve_plan'
+  let id: string
+  try {
+    id = validateRequestId(input?.id)
+  } catch (err) {
+    return { ok: false, error: (err as Error).message }
+  }
+  try {
+    const supabase = createAdminSupabaseClient()
+    const refuse = async (error: string, detail?: Record<string, unknown>): Promise<ApprovePlanResult> => {
+      await recordOwnerAudit(supabase, { tool, ok: false, error, request_id: id, detail })
+      return { ok: false, error }
+    }
+    if (!(await isOwner())) return refuse(NOT_AUTHORIZED.error)
+    if (typeof input.expectedStatus !== 'string' || typeof input.expectedUpdatedAt !== 'string') return refuse('Missing expected version')
+
+    const { data, error } = await supabase.from('mc_requests')
+      .select('id,task_id,status,updated_at,assigned_to,attempt_id,phase,plan,plan_submitted_at,plan_by,blocker,result_summary,approval_required,reviewed_sha,workspace_ref')
+      .eq('id', id).maybeSingle()
+    if (error) return refuse(`Lookup failed: ${error.message}`)
+    if (!data) return refuse('Request not found')
+    const row = data as unknown as OwnerRequestRow & { task_id: string | null }
+    if (row.status !== input.expectedStatus || row.updated_at !== input.expectedUpdatedAt) return refuse(CONFLICT_MESSAGE)
+
+    const planned = planOwnerApprovePlan(row, input.builder)
+    if (!planned.ok) return refuse(planned.reason, { task_id: row.task_id, builder: input.builder })
+    const applied = await applyOwnerAction(supabase, id, input.expectedStatus, input.expectedUpdatedAt, planned.updates, {
+      tool, detail: { task_id: row.task_id, ...planned.detail },
+    })
+    if (!applied.ok) return { ok: false, error: applied.error }
+    if (input.projectId) revalidatePath(`/projects/${input.projectId}`)
+    revalidatePath('/queue')
+    return { ok: true }
   } catch (err) {
     console.error(`[owner] ${tool} failed:`, err)
     return { ok: false, error: 'Action failed unexpectedly; refresh and try again.' }

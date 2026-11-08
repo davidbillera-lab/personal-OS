@@ -27,6 +27,8 @@ export type LinkedRequest = {
   result_summary: string | null
   artifact_refs: unknown
   plan_submitted_at: string | null
+  plan: string | null
+  plan_by: string | null
   updated_at: string
 }
 
@@ -36,7 +38,7 @@ export const FINISHED_STATUSES = ['completed', 'failed', 'cancelled']
 export function requestStatusLine(r: Pick<LinkedRequest, 'status' | 'assigned_to' | 'blocker' | 'plan_submitted_at'>): string {
   const worker = r.assigned_to ?? 'an agent'
   switch (r.status) {
-    case 'submitted': return r.plan_submitted_at ? 'Plan ready, review it in the queue' : 'Waiting for Hermes to plan'
+    case 'submitted': return r.plan_submitted_at ? 'Plan ready, review it below' : 'Waiting for Hermes to plan'
     case 'queued': return `Waiting for ${worker} to pick it up`
     case 'claimed':
     case 'in_progress': return `${worker} is working`

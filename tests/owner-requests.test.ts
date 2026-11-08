@@ -14,6 +14,7 @@ import {
   CONFLICT_MESSAGE,
   OWNER_WORKERS,
   ownerActionAvailability,
+  planOwnerApprovePlan,
   planOwnerClose,
   planOwnerReassign,
   planOwnerReopen,
@@ -209,6 +210,31 @@ describe('planOwnerReassign', () => {
       updates: { assigned_to: 'codex' },
       detail: { from_assigned: null, to_assigned: 'codex' },
     })
+  })
+})
+
+describe('planOwnerApprovePlan', () => {
+  const planned = row({ status: 'submitted', assigned_to: 'hermes', phase: 'planned', plan: '1. do it', plan_by: 'hermes', plan_submitted_at: '2026-11-08' })
+
+  it('hands a Hermes plan to the builder and keeps the plan', () => {
+    const p = planOwnerApprovePlan(planned, 'codex')
+    expect(p).toEqual({
+      ok: true,
+      updates: { status: 'queued', assigned_to: 'codex', preferred_worker: 'codex', phase: null, latest_progress: 'Plan approved by owner; waiting for codex to pick it up.' },
+      detail: { builder: 'codex', plan_by: 'hermes', plan_submitted_at: '2026-11-08', plan_length: 8 },
+    })
+    expect(p.ok && 'plan' in p.updates).toBe(false)
+    expect(planOwnerApprovePlan(planned, 'claude').ok).toBe(true)
+  })
+
+  it.each([
+    ['not submitted', { status: 'queued' }, 'codex'],
+    ['not planned', { phase: null }, 'codex'],
+    ['wrong assignee', { assigned_to: 'claude' }, 'codex'],
+    ['no plan', { plan: null }, 'codex'],
+    ['bad builder', {}, 'hermes'],
+  ] as const)('refuses: %s', (_name, over, builder) => {
+    expect(planOwnerApprovePlan({ ...planned, ...over }, builder).ok).toBe(false)
   })
 })
 

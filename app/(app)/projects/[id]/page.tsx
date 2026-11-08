@@ -41,7 +41,7 @@ export default async function ProjectWorkspacePage({ params }: Props) {
   if (taskIds.length > 0) {
     const { data: requests } = await supabase
       .from('mc_requests')
-      .select('id, task_id, status, phase, assigned_to, latest_progress, blocker, result_summary, artifact_refs, plan_submitted_at, updated_at')
+      .select('id, task_id, status, phase, assigned_to, latest_progress, blocker, result_summary, artifact_refs, plan_submitted_at, plan, plan_by, updated_at')
       .in('task_id', taskIds)
       .order('created_at', { ascending: false })
     for (const r of (requests ?? []) as LinkedRequest[]) {
