@@ -14,17 +14,21 @@ vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }))
 import { MAX_DIFF_CHARS, parseVerdict, qcStatusFor, runCodexQCCore } from '../lib/codex-qc'
 import { fetchGitHubPrDiff, parsePrUrl } from '../lib/github'
 
-// tasks: the lookup returns TASK; the update returns `saveResult`. Records every update payload.
-function fakeTasksDb(saveResult: { data: unknown; error: unknown }) {
+// tasks: the lookup returns a task; the first update is the run claim (`claimResult`), the next the save (`saveResult`).
+// Records every update payload.
+function fakeTasksDb(saveResult: { data: unknown; error: unknown }, claimResult: { data: unknown; error: unknown } = { data: { id: 't' }, error: null }) {
   const updates: unknown[] = []
   const from = () => {
     let op: 'select' | 'update' = 'select'
     const b: Record<string, unknown> = {
       select: () => b,
       eq: () => b,
+      or: () => b,
       not: () => b,
       update: (p: unknown) => { op = 'update'; updates.push(p); return b },
-      maybeSingle: async () => (op === 'update' ? saveResult : { data: { title: 'T', generated_spec: '# spec', codex_qc_status: null }, error: null }),
+      maybeSingle: async () => (op === 'select'
+        ? { data: { title: 'T', generated_spec: '# spec', codex_qc_status: null }, error: null }
+        : updates.length === 1 ? claimResult : saveResult),
       then: (res: (v: unknown) => void) => res({ data: null, error: null, count: 1 }),
     }
     return b
@@ -81,7 +85,16 @@ describe('runCodexQCCore safety', () => {
     state.route = async () => ({ text: SHIP, model: 'gpt-6.1-sol', cost_usd: 0, finish_reason: 'length' })
     const res = await runCodexQCCore('t', 'p', 'diff')
     expect(res).toMatchObject({ error: expect.stringContaining('incomplete') })
-    expect(updates).toEqual([])
+    expect(updates.some(u => (u as Record<string, unknown>).codex_qc_status)).toBe(false)
+    expect(updates.at(-1)).toEqual({ codex_qc_run_started_at: null })
+  })
+
+  it('refuses a second run while one holds the task, without calling the model', async () => {
+    const updates = fakeTasksDb({ data: { id: 't' }, error: null }, { data: null, error: null })
+    state.route = async () => { throw new Error('model must not be called') }
+    const res = await runCodexQCCore('t', 'p', 'diff')
+    expect(res).toMatchObject({ error: expect.stringContaining('already running') })
+    expect(updates).toHaveLength(1)
   })
 
   it('reports a failed save as an error, not a successful review', async () => {
@@ -96,7 +109,7 @@ describe('runCodexQCCore safety', () => {
     state.route = async () => ({ text: SHIP, model: 'gpt-6.1-sol', cost_usd: 0, finish_reason: 'stop' })
     const res = await runCodexQCCore('t', 'p', 'diff', 'https://github.com/o/r/pull/1', 'abcdef1234567')
     expect(res).toMatchObject({ status: 'passed', verdict: 'SHIP', model: 'gpt-6.1-sol' })
-    expect(updates[0]).toMatchObject({ codex_qc_status: 'passed', status: 'done', codex_qc_notes: expect.stringMatching(/^_Reviewed by gpt-6\.1-sol at abcdef1_/) })
+    expect(updates[1]).toMatchObject({ codex_qc_status: 'passed', status: 'done', codex_qc_notes: expect.stringMatching(/^_Reviewed by gpt-6\.1-sol at abcdef1_/) })
   })
 })
 
