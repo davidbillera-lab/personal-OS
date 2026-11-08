@@ -10,13 +10,16 @@ function client() {
 export async function callOpenAI(
   prompt: string,
   model: string,
-  options?: { system?: string }
+  options?: { system?: string; max_tokens?: number }
 ): Promise<AdapterResponse> {
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = []
   if (options?.system) messages.push({ role: 'system', content: options.system })
   messages.push({ role: 'user', content: prompt })
 
-  const response = await client().chat.completions.create({ model, messages, max_tokens: 1024 })
+  // gpt-5+ reasoning models reject max_tokens and spend part of the budget on reasoning.
+  const limit = options?.max_tokens ?? 1024
+  const tokenField = /^gpt-([5-9]|\d{2})/.test(model) ? { max_completion_tokens: limit } : { max_tokens: limit }
+  const response = await client().chat.completions.create({ model, messages, ...tokenField })
 
   return {
     text: response.choices[0]?.message?.content ?? '',

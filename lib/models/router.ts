@@ -22,9 +22,9 @@ type AdapterResult = { text: string; tokens_in: number; tokens_out: number }
 async function callModel(
   prompt: string,
   model: string,
-  options?: { system?: string }
+  options?: { system?: string; max_tokens?: number }
 ): Promise<AdapterResult> {
-  if (ANTHROPIC_TIERS.has(model)) return callAnthropic(prompt, model, options)
+  if (ANTHROPIC_TIERS.has(model)) return callAnthropic(prompt, model, { system: options?.system })
   if (model.startsWith('gpt') || model.startsWith('codex')) return callOpenAI(prompt, model, options)
   if (model.startsWith('gemini')) return callGemini(prompt, model, options)
   throw new Error(`Unknown model: ${model}`)
@@ -68,13 +68,15 @@ export interface RouteTaskInput {
   task_id?: string
   brain_dump_id?: string
   allow_escalate?: boolean
+  no_fallback?: boolean       // throw if the requested model fails instead of dropping a tier
+  max_tokens?: number         // OpenAI only
   supabase: SupabaseClient
 }
 
 export async function routeTask(input: RouteTaskInput): Promise<{ text: string; model: string; cost_usd: number }> {
   const {
     prompt, complexity_tier, purpose, model: modelOverride,
-    system, project_id, task_id, brain_dump_id, allow_escalate = false, supabase,
+    system, project_id, task_id, brain_dump_id, allow_escalate = false, no_fallback = false, max_tokens, supabase,
   } = input
 
   const primaryModel = modelOverride ?? TIER_MODEL[complexity_tier]
@@ -115,11 +117,13 @@ export async function routeTask(input: RouteTaskInput): Promise<{ text: string; 
 
   // Tiers 1, 2, 4: try primary, fall back one tier down, optionally escalate
   try {
-    const result = await callModel(prompt, primaryModel, { system })
+    const result = await callModel(prompt, primaryModel, { system, max_tokens })
     const cost_usd = calcCost(primaryModel, result.tokens_in, result.tokens_out)
     await logCost(supabase, { ...sharedLogFields, model: primaryModel, ...result, cost_usd })
     return { text: result.text, model: primaryModel, cost_usd }
   } catch (primaryErr) {
+    if (no_fallback) throw primaryErr
+
     // Fallback: one tier down
     const fallbackTier = Math.max(1, complexity_tier - 1) as ComplexityTier
     const fallbackModel = TIER_MODEL[fallbackTier]
