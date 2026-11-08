@@ -11,6 +11,8 @@ export const QC_MODEL = 'gpt-6.1-sol'
 export const QC_FALLBACK_MODEL = 'gpt-5.5'
 export const MAX_DIFF_CHARS = 300_000
 const MAX_REPORT_TOKENS = 9000
+// Longer than the 300s maxDuration, so a run killed mid-review frees the task on its own.
+const QC_LEASE_MS = 6 * 60_000
 
 export const REVIEWER_PROMPT = `You are an independent senior staff software engineer performing a SECOND-OPINION quality-control review for an AI-native business operator who builds every project as a clean, transferable, SELLABLE asset (default exit: acquisition / Flippa / Empire Flippers).
 
@@ -51,7 +53,6 @@ export type QcResult =
   | { error: string }
 
 // reviewedSha: the immutable head the diff was taken at (PR reviews), recorded in the report.
-// minimal: concurrent runs for one task are not de-duplicated; last writer wins. Needs a per-task attempt column.
 async function runQc(taskId: string, projectId: string, diff: string, commitUrl: string | undefined, rerun: boolean, reviewedSha?: string): Promise<QcResult> {
   if (!diff.trim()) return { error: 'The diff is empty; nothing to review.' }
   if (diff.length > MAX_DIFF_CHARS) {
@@ -62,6 +63,27 @@ async function runQc(taskId: string, projectId: string, diff: string, commitUrl:
   if (taskError) return { error: `Task lookup failed: ${taskError.message}` }
   if (!task) return { error: 'Task not found' }
 
+  // Claim the task: refused while another run holds an unexpired lease.
+  const runId = crypto.randomUUID()
+  const leaseCutoff = new Date(Date.now() - QC_LEASE_MS).toISOString()
+  const { data: claimed, error: claimError } = await supabase.from('tasks')
+    .update({ codex_qc_run_id: runId, codex_qc_run_started_at: new Date().toISOString() })
+    .eq('id', taskId).or(`codex_qc_run_started_at.is.null,codex_qc_run_started_at.lt.${leaseCutoff}`)
+    .select('id').maybeSingle()
+  if (claimError) return { error: `Could not start the review: ${claimError.message}` }
+  if (!claimed) return { error: 'A QC review is already running for this task. Wait for it to finish, then re-run.' }
+
+  try {
+    return await reviewAndRecord(supabase, task, runId, taskId, projectId, diff, commitUrl, rerun, reviewedSha)
+  } finally {
+    await supabase.from('tasks').update({ codex_qc_run_started_at: null }).eq('id', taskId).eq('codex_qc_run_id', runId)
+  }
+}
+
+async function reviewAndRecord(
+  supabase: ReturnType<typeof createAdminSupabaseClient>, task: { generated_spec: string | null; codex_qc_status: string | null },
+  runId: string, taskId: string, projectId: string, diff: string, commitUrl: string | undefined, rerun: boolean, reviewedSha?: string,
+): Promise<QcResult> {
   const prompt = `Original spec:\n${task.generated_spec ?? '(no spec recorded)'}\n\nChange under review: ${commitUrl ?? 'not provided'}\n\nGit diff:\n${diff}`
   const call = (model: string) => routeTask({
     prompt, system: REVIEWER_PROMPT, complexity_tier: 4, model, no_fallback: true, max_tokens: MAX_REPORT_TOKENS,
@@ -92,9 +114,9 @@ async function runQc(taskId: string, projectId: string, diff: string, commitUrl:
     codex_qc_status: finalStatus,
     codex_qc_notes: notes,
     status: finalStatus === 'passed' ? 'done' : 'review',
-  }).eq('id', taskId).select('id').maybeSingle()
+  }).eq('id', taskId).eq('codex_qc_run_id', runId).select('id').maybeSingle()
   if (saveError || !saved) {
-    return { error: `The review finished (${verdict ?? 'no verdict'}) but saving it failed: ${saveError?.message ?? 'task not updated'}. Nothing else changed.` }
+    return { error: `The review finished (${verdict ?? 'no verdict'}) but saving it failed: ${saveError?.message ?? 'a newer review took over this task'}. Nothing else changed.` }
   }
   if (commitUrl && finalStatus === 'passed') {
     await supabase.from('agent_handoffs').update({ status: 'done', github_commit_url: commitUrl, completed_at: new Date().toISOString() }).eq('task_id', taskId)
