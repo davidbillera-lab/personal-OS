@@ -910,7 +910,7 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 **Reasoning:**
 - The project-page actions only check that someone is signed in, not that it's David. The `proxy.ts` sign-in check is the only gate on them.
 - Supabase sign-up uses a public endpoint and a public key. If sign-ups are enabled, a stranger could create an account and run those actions.
-- The DB has 1 auth user (David), so no one has done this so far.
+- The DB has 1 auth user (David), so no one has done this so far. David confirmed on 2026-11-08 that sign-ups are OFF, so this PR is defense in depth, not an emergency fix.
 - Shipping the hardening as its own PR keeps step 2's review focused.
 - Auto-done stays because it's the smallest change, and merging is still David's call.
 

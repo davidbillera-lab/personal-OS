@@ -126,7 +126,7 @@ The new file is plain library code with no `'use server'`.
    - Its branch is `fix/owner-check-project-actions`, off `main`.
    - Add `requireOwner()` to every exported action in `app/(app)/projects/[id]/actions.ts`, using the never-throw refusal pattern. Add one test that a non-owner is refused.
    - Step 2 then branches off that branch, so the two don't conflict in `actions.ts`.
-   - David checks the Supabase "Allow new users to sign up" toggle and turns it off if it's on. The DB has 1 auth user as of 2026-11-08.
+   - Supabase "Allow new users to sign up" is OFF (David confirmed 2026-11-08). The DB has 1 auth user. The hardening is defense in depth and code hygiene for a buyer's review, not an open hole.
 
 1. **Should a SHIP verdict still mark the task done automatically?** Today it does, and the step 1 spec relies on QC being what moves a task to done.
    - The catch: a SHIP lands before you merge the PR, so "done" can come before the merge.
