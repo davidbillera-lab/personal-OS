@@ -160,7 +160,7 @@ export type OwnerAudit = {
   tool: string
   ok: boolean
   error?: string
-  request_id: string
+  request_id: string | null
   detail?: Record<string, unknown>
 }
 

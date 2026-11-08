@@ -3,6 +3,7 @@ import { createAdminSupabaseClient } from '@/lib/supabase'
 import { ProjectWorkspaceTabs } from '@/components/ProjectWorkspaceTabs'
 import { getProjectHealth } from '@/lib/health'
 import type { AgentHandoff, KillCriteriaCheck } from '@/lib/types'
+import type { LinkedRequest } from '@/lib/task-request'
 
 interface Props {
   params: Promise<{ id: string }>
@@ -33,6 +34,20 @@ export default async function ProjectWorkspacePage({ params }: Props) {
   if (!project) notFound()
 
   const health = await getProjectHealth(id).catch(() => null)
+
+  // Newest linked agent request per open task (read-through; nothing is copied into tasks).
+  const taskIds = (tasks ?? []).map(t => t.id)
+  const linkedRequests: Record<string, LinkedRequest> = {}
+  if (taskIds.length > 0) {
+    const { data: requests } = await supabase
+      .from('mc_requests')
+      .select('id, task_id, status, phase, assigned_to, latest_progress, blocker, result_summary, artifact_refs, plan_submitted_at, updated_at')
+      .in('task_id', taskIds)
+      .order('created_at', { ascending: false })
+    for (const r of (requests ?? []) as LinkedRequest[]) {
+      if (!linkedRequests[r.task_id]) linkedRequests[r.task_id] = r
+    }
+  }
 
   let claudeMd = ''
   let decisionsMd = ''
@@ -65,6 +80,7 @@ export default async function ProjectWorkspacePage({ params }: Props) {
       handoffs={(handoffs ?? []) as AgentHandoff[]}
       health={health}
       killCriteriaChecks={(killChecks ?? []) as KillCriteriaCheck[]}
+      linkedRequests={linkedRequests}
     />
   )
 }

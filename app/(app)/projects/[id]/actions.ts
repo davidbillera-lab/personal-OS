@@ -4,6 +4,9 @@ import { createAdminSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
 import { classifyBrainDump } from '@/lib/classify'
 import { captureToVault } from '@/lib/vault'
+import { requireOwner } from '@/lib/owner'
+import { recordOwnerAudit, validateRequestId } from '@/lib/owner-requests'
+import { buildTaskRequest, isTaskRoute, routeWorker } from '@/lib/task-request'
 import { revalidatePath } from 'next/cache'
 
 export async function runAdvisoryBoard(dumpId: string, projectId: string) {
@@ -131,6 +134,92 @@ export async function approveSpec(taskId: string, projectId: string, localPath?:
   revalidatePath(`/projects/${projectId}`)
   const vscodePath = localPath ? `vscode://file/${localPath.replace(/\\/g, '/')}` : null
   return { ok: true, vscodePath }
+}
+
+export type SendTaskResult =
+  | { ok: true; requestId: string; warning?: string }
+  | { ok: false; error: string; requestId?: string }
+
+// Dashboard -> agent queue bridge. Spec: specs/2026-11-06-mc-dashboard-agent-bridge.md
+// Never throws: Next redacts thrown server-action errors in production.
+export async function sendTaskToAgent(taskId: string, projectId: string, route: string): Promise<SendTaskResult> {
+  const tool = 'owner_send_task'
+  try {
+    const supabase = createAdminSupabaseClient()
+    const refuse = async (error: string, requestId: string | null = null): Promise<SendTaskResult> => {
+      await recordOwnerAudit(supabase, { tool, ok: false, error, request_id: requestId, detail: { task_id: taskId, route } })
+      return requestId ? { ok: false, error, requestId } : { ok: false, error }
+    }
+
+    try {
+      await requireOwner()
+    } catch {
+      return refuse('Not authorized')
+    }
+    if (!isTaskRoute(route)) return refuse('Unknown route')
+    try {
+      validateRequestId(taskId)
+      validateRequestId(projectId)
+    } catch {
+      return refuse('Invalid task or project id')
+    }
+
+    const [{ data: task, error: taskError }, { data: project, error: projectError }] = await Promise.all([
+      supabase.from('tasks').select('id, title, status, generated_spec, project_id')
+        .eq('id', taskId).eq('project_id', projectId).maybeSingle(),
+      supabase.from('projects').select('id, name, repo_url').eq('id', projectId).maybeSingle(),
+    ])
+    if (taskError || projectError) return refuse(`Lookup failed: ${(taskError ?? projectError)!.message}`)
+    if (!task || !project) return refuse('Task not found')
+    if (task.status === 'done' || task.status === 'killed') return refuse(`Task is ${task.status}`)
+
+    let row: ReturnType<typeof buildTaskRequest>
+    try {
+      row = buildTaskRequest(task, project, route)
+    } catch (err) {
+      return refuse((err as Error).message)
+    }
+
+    const { data: created, error: insertError } = await supabase.from('mc_requests').insert(row).select('id').single()
+    if (insertError) {
+      if (insertError.code === '23505') {
+        const { data: live } = await supabase.from('mc_requests').select('id')
+          .eq('task_id', taskId).not('status', 'in', '("completed","failed","cancelled")').maybeSingle()
+        return refuse('This task already has a live request.', live?.id ?? null)
+      }
+      return refuse(`Could not create request: ${insertError.message}`)
+    }
+
+    // The card reads the request, not the task, so a failed task write loses nothing.
+    let warning: string | undefined
+    const { data: moved, error: taskUpdateError } = await supabase.from('tasks')
+      .update({ status: 'in_progress', agent_assigned_to: routeWorker(route) })
+      .eq('id', taskId).eq('status', task.status).select('id').maybeSingle()
+    if (!taskUpdateError && !moved) {
+      // The task changed after our read. If it was closed meanwhile, the new request must not stay live.
+      const { data: now } = await supabase.from('tasks').select('status').eq('id', taskId).maybeSingle()
+      if (!now || now.status === 'done' || now.status === 'killed') {
+        const { data: undone } = await supabase.from('mc_requests')
+          .update({ status: 'cancelled', latest_progress: 'Task was closed while sending; request cancelled.' })
+          .eq('id', created.id).eq('status', row.status).select('id').maybeSingle()
+        return refuse(undone
+          ? 'Task was closed while sending; the request was cancelled.'
+          : 'Task was closed while sending and the request is already live; close it in the queue.', created.id)
+      }
+    }
+    if (taskUpdateError || !moved) warning = 'Request created, but the task status could not be updated.'
+
+    await recordOwnerAudit(supabase, {
+      tool, ok: true, request_id: created.id,
+      detail: { task_id: taskId, request_id: created.id, route, ...(warning ? { warning } : {}) },
+    })
+    revalidatePath(`/projects/${projectId}`)
+    revalidatePath('/queue')
+    return warning ? { ok: true, requestId: created.id, warning } : { ok: true, requestId: created.id }
+  } catch (err) {
+    console.error(`[owner] ${tool} failed:`, err)
+    return { ok: false, error: 'Action failed unexpectedly; refresh and try again.' }
+  }
 }
 
 export async function runCodexQC(taskId: string, projectId: string, diff: string, commitUrl?: string) {

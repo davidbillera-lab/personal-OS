@@ -14,8 +14,18 @@ import {
   createProjectBrainDump,
   fetchRepoContents,
   archiveProject,
+  sendTaskToAgent,
   type RepoEntry,
 } from '@/app/(app)/projects/[id]/actions'
+import {
+  FINISHED_STATUSES,
+  ROUTE_LABELS,
+  TASK_ROUTES,
+  firstPrUrl,
+  requestStatusLine,
+  type LinkedRequest,
+  type TaskRoute,
+} from '@/lib/task-request'
 import { ProjectChat } from '@/components/ProjectChat'
 import { ProjectGraph } from '@/components/ProjectGraph'
 import type {
@@ -77,6 +87,7 @@ interface Props {
   handoffs: AgentHandoff[]
   health: ProjectHealth | null
   killCriteriaChecks: KillCriteriaCheck[]
+  linkedRequests: Record<string, LinkedRequest>
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -645,9 +656,95 @@ function DumpCard({
   )
 }
 
+// ─── Send to agent + linked request status ───────────────────────────────────
+
+function SendToAgentControl({ taskId, projectId }: { taskId: string; projectId: string }) {
+  const [route, setRoute] = useState<TaskRoute>('hermes_plan')
+  const [isPending, startSend] = useTransition()
+  const [message, setMessage] = useState<{ kind: 'error' | 'warning'; text: string; requestId?: string } | null>(null)
+
+  function handleSend() {
+    setMessage(null)
+    startSend(async () => {
+      const res = await sendTaskToAgent(taskId, projectId, route)
+      if (!res.ok) setMessage({ kind: 'error', text: res.error, requestId: res.requestId })
+      else if (res.warning) setMessage({ kind: 'warning', text: res.warning, requestId: res.requestId })
+    })
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-2 flex-wrap">
+        <select
+          value={route}
+          onChange={e => setRoute(e.target.value as TaskRoute)}
+          disabled={isPending}
+          aria-label="Who works this task"
+          className="rounded border border-white/10 bg-black/30 px-2 py-1 text-[11px] text-gray-300"
+        >
+          {TASK_ROUTES.map(r => <option key={r} value={r}>{ROUTE_LABELS[r]}</option>)}
+        </select>
+        <button
+          onClick={handleSend}
+          disabled={isPending}
+          className="rounded bg-indigo-700/60 px-3 py-1 text-[11px] text-indigo-100 hover:bg-indigo-700/80 disabled:opacity-40"
+        >
+          {isPending ? 'Sending…' : 'Send to agent'}
+        </button>
+      </div>
+      {message && (
+        <p className={`text-[11px] rounded px-2 py-1 ${message.kind === 'error' ? 'text-red-400 bg-red-900/20' : 'text-yellow-300 bg-yellow-900/20'}`}>
+          {message.text}
+          {message.requestId && <> <a href={`/queue#${message.requestId}`} className="underline">Open in queue</a></>}
+        </p>
+      )}
+    </div>
+  )
+}
+
+const REQUEST_STATUS_COLOR: Record<string, string> = {
+  submitted:         'bg-blue-900/40 text-blue-300',
+  queued:            'bg-gray-700 text-gray-300',
+  claimed:           'bg-yellow-900/40 text-yellow-300',
+  in_progress:       'bg-yellow-900/40 text-yellow-300',
+  blocked:           'bg-orange-900/40 text-orange-300',
+  awaiting_approval: 'bg-purple-900/40 text-purple-300',
+  completed:         'bg-green-900/40 text-green-300',
+  failed:            'bg-red-900/40 text-red-300',
+  cancelled:         'bg-gray-800 text-gray-400',
+}
+
+function LinkedRequestPanel({ request }: { request: LinkedRequest }) {
+  const prUrl = request.status === 'completed' ? firstPrUrl(request.artifact_refs) : null
+  return (
+    <div className="rounded border border-white/10 bg-black/20 p-2 flex flex-col gap-1">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${REQUEST_STATUS_COLOR[request.status] ?? 'bg-gray-800 text-gray-400'}`}>
+          {request.status.replace(/_/g, ' ')}
+        </span>
+        <span className="text-[11px] text-gray-200">{requestStatusLine(request)}</span>
+        {request.assigned_to && <span className="text-[10px] text-gray-500">worker: {request.assigned_to}</span>}
+        <a href={`/queue#${request.id}`} className="ml-auto text-[11px] text-blue-400 hover:text-blue-300">Open in queue →</a>
+      </div>
+      {request.status !== 'blocked' && !FINISHED_STATUSES.includes(request.status) && request.latest_progress && (
+        <p className="text-[11px] text-gray-400">{request.latest_progress}</p>
+      )}
+      {request.status === 'completed' && request.result_summary && (
+        <p className="text-[11px] text-gray-300 whitespace-pre-wrap">{request.result_summary}</p>
+      )}
+      {prUrl && (
+        <a href={prUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] text-blue-400 hover:text-blue-300">
+          View PR →
+        </a>
+      )}
+    </div>
+  )
+}
+
 // ─── TaskSpecCard (Spec Review stage) ─────────────────────────────────────────
 
-function TaskSpecCard({ task, project }: { task: Task; project: Project }) {
+function TaskSpecCard({ task, project, linkedRequest }: { task: Task; project: Project; linkedRequest?: LinkedRequest }) {
+  const hasLiveRequest = !!linkedRequest && !FINISHED_STATUSES.includes(linkedRequest.status)
   const [isPendingApprove, startApprove] = useTransition()
   const [isPendingDone, startDone] = useTransition()
   const [approveError, setApproveError] = useState<string | null>(null)
@@ -742,6 +839,9 @@ function TaskSpecCard({ task, project }: { task: Task; project: Project }) {
           {isPendingDone ? '…' : 'Mark Done'}
         </button>
       </div>
+
+      {linkedRequest && <LinkedRequestPanel request={linkedRequest} />}
+      {task.generated_spec && !hasLiveRequest && <SendToAgentControl taskId={task.id} projectId={project.id} />}
 
       {approveError && (
         <p className="text-[11px] text-red-400 bg-red-900/20 rounded px-2 py-1">{approveError}</p>
@@ -893,6 +993,7 @@ export function ProjectWorkspaceTabs({
   handoffs,
   health,
   killCriteriaChecks,
+  linkedRequests,
 }: Props) {
   const router = useRouter()
   const [activeStage, setActiveStage] = useState<ActiveStage>('dumps')
@@ -1079,7 +1180,7 @@ export function ProjectWorkspaceTabs({
                 tasks
                   .filter(t => t.status === 'pending' && t.generated_spec != null)
                   .map(task => (
-                    <TaskSpecCard key={task.id} task={task} project={project} />
+                    <TaskSpecCard key={task.id} task={task} project={project} linkedRequest={linkedRequests[task.id]} />
                   ))
               )}
             </div>
@@ -1099,6 +1200,7 @@ export function ProjectWorkspaceTabs({
                   .filter(t => t.status === 'in_progress' || t.status === 'review')
                   .map(task => {
                     const relatedHandoff = handoffs.find(h => h.task_id === task.id)
+                    const linked = linkedRequests[task.id]
                     return (
                       <div key={task.id} className="rounded-lg border border-white/10 bg-white/5 p-3 flex flex-col gap-2">
                         <div className="flex items-center gap-2 flex-wrap">
@@ -1119,6 +1221,11 @@ export function ProjectWorkspaceTabs({
 
                         {task.codex_qc_notes && (
                           <p className="text-[11px] text-gray-400 leading-relaxed">{task.codex_qc_notes}</p>
+                        )}
+
+                        {linked && <LinkedRequestPanel request={linked} />}
+                        {linked && FINISHED_STATUSES.includes(linked.status) && task.generated_spec && (
+                          <SendToAgentControl taskId={task.id} projectId={project.id} />
                         )}
 
                         {relatedHandoff?.github_commit_url && (
