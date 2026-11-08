@@ -56,7 +56,8 @@ async function runQc(taskId: string, projectId: string, diff: string, commitUrl:
     return { error: `The diff is ${diff.length.toLocaleString()} characters, over the ${MAX_DIFF_CHARS.toLocaleString()} limit. Review it with /CodexQC locally or split the PR.` }
   }
   const supabase = createAdminSupabaseClient()
-  const { data: task } = await supabase.from('tasks').select('title, generated_spec, codex_qc_status').eq('id', taskId).single()
+  const { data: task, error: taskError } = await supabase.from('tasks').select('title, generated_spec, codex_qc_status').eq('id', taskId).maybeSingle()
+  if (taskError) return { error: `Task lookup failed: ${taskError.message}` }
   if (!task) return { error: 'Task not found' }
 
   const prompt = `Original spec:\n${task.generated_spec ?? '(no spec recorded)'}\n\nChange under review: ${commitUrl ?? 'not provided'}\n\nGit diff:\n${diff}`
