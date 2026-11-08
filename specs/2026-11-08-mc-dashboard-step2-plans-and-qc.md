@@ -1,6 +1,6 @@
 # Mission Control: dashboard step 2, approve plans and run the real QC from the project page
 
-**Status:** DRAFT, waiting for David's approval. Written 2026-11-08.
+**Status:** APPROVED by David 2026-11-08. Open question 1: keep auto-done (recommendation stands). Open question 2: a separate owner-check hardening PR, built first.
 **Builds on:** step 1, the dashboard → agent bridge (`specs/2026-11-06-mc-dashboard-agent-bridge.md`, PR #29, merged as `dac5822`).
 **MC project:** 698d6376-5819-400b-babc-cd664ee36c04
 
@@ -118,7 +118,15 @@ The new file is plain library code with no `'use server'`.
    - **The builder must not read, list or print env vars.** Check model access only through one real QC call, and by reading the `model` column of the `model_costs` row it writes.
 4. **Reject / ask Hermes to re-plan is out of scope.** Close on `/queue` plus re-send covers it for now.
 
-## Open questions for David
+## Open questions for David (answered 2026-11-08)
+
+**Answers:**
+1. Keep auto-done.
+2. Separate hardening PR, built before step 2.
+   - Its branch is `fix/owner-check-project-actions`, off `main`.
+   - Add `requireOwner()` to every exported action in `app/(app)/projects/[id]/actions.ts`, using the never-throw refusal pattern. Add one test that a non-owner is refused.
+   - Step 2 then branches off that branch, so the two don't conflict in `actions.ts`.
+   - David checks the Supabase "Allow new users to sign up" toggle and turns it off if it's on. The DB has 1 auth user as of 2026-11-08.
 
 1. **Should a SHIP verdict still mark the task done automatically?** Today it does, and the step 1 spec relies on QC being what moves a task to done.
    - The catch: a SHIP lands before you merge the PR, so "done" can come before the merge.
