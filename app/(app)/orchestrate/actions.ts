@@ -4,8 +4,10 @@ import { revalidatePath } from 'next/cache'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { routeTask } from '@/lib/models/router'
 import { captureToVault } from '@/lib/vault'
+import { requireOwner } from '@/lib/owner'
 
 export async function generateSpec(taskId: string): Promise<{ error?: string }> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
 
   const { data: task } = await supabase
@@ -138,18 +140,21 @@ SCOPE and OFF-LIMITS are required sections. Be explicit — list specific files,
 }
 
 export async function markDone(taskId: string): Promise<void> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   await supabase.from('tasks').update({ status: 'done' }).eq('id', taskId)
   revalidatePath('/orchestrate')
 }
 
 export async function archiveTask(taskId: string): Promise<void> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   await supabase.from('tasks').update({ status: 'killed' }).eq('id', taskId)
   revalidatePath('/orchestrate')
 }
 
 export async function claimTask(taskId: string, agentName: string): Promise<void> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
 
   const { data: task } = await supabase
@@ -203,6 +208,7 @@ export async function completeTask(
   taskId: string,
   commitUrl: string
 ): Promise<void> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
 
   const { data: task } = await supabase

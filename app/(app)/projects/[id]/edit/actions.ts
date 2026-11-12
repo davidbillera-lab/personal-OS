@@ -4,8 +4,10 @@ import { redirect } from 'next/navigation'
 import { revalidatePath } from 'next/cache'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import type { ProjectStage, ProjectTier } from '@/lib/types'
+import { requireOwner } from '@/lib/owner'
 
 export async function updateProject(projectId: string, formData: FormData) {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
 
   const name = (formData.get('name') as string).trim()

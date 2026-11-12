@@ -2,12 +2,14 @@
 
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { revalidatePath } from 'next/cache'
+import { requireOwner } from '@/lib/owner'
 
 export async function updateShipChecklistItem(
   projectId: string,
   key: string,
   checked: boolean
 ): Promise<{ ok?: boolean; error?: string }> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   const { data: project } = await supabase
     .from('projects')
@@ -31,6 +33,7 @@ export async function triggerGitHubWorkflow(
   workflow: string,
   ref: string = 'main'
 ): Promise<{ ok?: boolean; error?: string }> {
+  await requireOwner()
   const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/)
   if (!match) return { error: 'Invalid GitHub repo URL' }
   const [, owner, repo] = match

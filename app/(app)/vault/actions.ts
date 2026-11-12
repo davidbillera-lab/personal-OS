@@ -5,10 +5,12 @@ import { encrypt, decrypt } from '@/lib/crypto'
 import { Credential, CredentialTier, VaultItem, VaultItemType } from '@/lib/types'
 import { revalidatePath } from 'next/cache'
 import { embedVaultItem } from '@/lib/vault'
+import { requireOwner } from '@/lib/owner'
 
 export type CredentialListItem = Omit<Credential, 'value'> & { masked_value: string }
 
 export async function listCredentials(): Promise<CredentialListItem[]> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   const { data, error } = await supabase
     .from('credentials')
@@ -28,6 +30,7 @@ export async function addCredential(params: {
   is_mcp_accessible?: boolean
   notes?: string | null
 }): Promise<{ error?: string }> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   const encrypted = encrypt(params.value)
   const { error } = await supabase.from('credentials').insert({
@@ -56,6 +59,7 @@ export async function updateCredential(
     notes?: string | null
   }
 ): Promise<{ error?: string }> {
+  await requireOwner()
   // Admin client bypasses RLS — credentials table requires authenticated role,
   // but this is operator-only data with no multi-user model.
   const supabase = createAdminSupabaseClient()
@@ -72,6 +76,7 @@ export async function updateCredential(
 }
 
 export async function deleteCredential(id: string): Promise<{ error?: string }> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   const { error } = await supabase.from('credentials').delete().eq('id', id)
   if (error) return { error: error.message }
@@ -80,6 +85,7 @@ export async function deleteCredential(id: string): Promise<{ error?: string }> 
 }
 
 export async function revealCredential(id: string): Promise<{ value?: string; error?: string }> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   const { data, error } = await supabase
     .from('credentials')
@@ -108,6 +114,7 @@ export async function listVaultItems(params?: {
   type?: VaultItemType | 'all'
   search?: string
 }): Promise<VaultItemListItem[]> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   let query = supabase
     .from('vault_items')
@@ -135,6 +142,7 @@ export async function createVaultItem(params: {
   is_mcp_accessible?: boolean
   metadata?: Record<string, unknown>
 }): Promise<{ id?: string; error?: string }> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
 
   const isEncrypted = params.type === 'personal' || params.type === 'credential'
@@ -184,6 +192,7 @@ export async function updateVaultItem(
     metadata?: Record<string, unknown>
   }
 ): Promise<{ error?: string }> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
 
   const { data: existing } = await supabase
@@ -227,6 +236,7 @@ export async function updateVaultItem(
 }
 
 export async function deleteVaultItem(id: string): Promise<{ error?: string }> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   const { error } = await supabase.from('vault_items').delete().eq('id', id)
   if (error) return { error: error.message }
@@ -235,6 +245,7 @@ export async function deleteVaultItem(id: string): Promise<{ error?: string }> {
 }
 
 export async function revealVaultItemContent(id: string): Promise<{ content?: string; error?: string }> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   const { data, error } = await supabase
     .from('vault_items')
@@ -253,12 +264,14 @@ export async function revealVaultItemContent(id: string): Promise<{ content?: st
 }
 
 export async function listProjectNames(): Promise<{ id: string; name: string }[]> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   const { data } = await supabase.from('projects').select('id, name').order('name')
   return (data ?? []) as { id: string; name: string }[]
 }
 
 export async function getRelatedVaultItems(id: string): Promise<VaultItemListItem[]> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   const { data, error } = await supabase.rpc('match_vault_items_by_id', {
     source_item_id: id,

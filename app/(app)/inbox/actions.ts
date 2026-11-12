@@ -48,6 +48,7 @@ Internal tools are fine — only flag if the idea itself is incoherent or imposs
 }
 
 export async function archiveDump(id: string): Promise<void> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   await supabase
     .from('brain_dumps')
@@ -57,6 +58,7 @@ export async function archiveDump(id: string): Promise<void> {
 }
 
 export async function routeDump(id: string, projectId: string): Promise<void> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   await supabase
     .from('brain_dumps')
@@ -89,6 +91,7 @@ export async function promoteDump(
   rawText: string,
   aiSummary: string | null
 ): Promise<{ warn?: string }> {
+  await requireOwner()
   const validation = await validateIdea(rawText, aiSummary)
   if (validation.verdict === 'flag' && !validation.is_internal) {
     return { warn: validation.reason }
@@ -113,6 +116,7 @@ export async function promoteDumpAnyway(
   projectId: string | null,
   title: string
 ): Promise<void> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   await supabase.from('tasks').insert({
     brain_dump_id: id,
@@ -128,6 +132,7 @@ export async function promoteDumpAnyway(
 }
 
 export async function reclassifyDump(id: string, newType: BrainDumpType): Promise<void> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   await supabase
     .from('brain_dumps')
@@ -142,6 +147,7 @@ export async function generateSpecAction(
   rawText: string,
   projectId: string | null
 ): Promise<{ ok: boolean; error?: string }> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   try {
     const result = await routeTask({
@@ -184,6 +190,7 @@ export async function generateSpecAction(
 }
 
 export async function submitDump(rawText: string): Promise<void> {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
   const trimmed = rawText.trim()
   if (!trimmed) return
