@@ -428,10 +428,11 @@ export async function generateSuggestions(projectId: string) {
   if (!(await isOwner())) return { ...NOT_AUTHORIZED, suggestions: null }
   const supabase = createAdminSupabaseClient()
   const { data: project } = await supabase.from('projects')
-    .select('name, stage, status, next_action, blockers, description').eq('id', projectId).single()
+    .select('id, name, stage, status, next_action, blockers, description').eq('id', projectId).single()
   if (!project) return { error: 'Project not found', suggestions: null }
+  // project.id (from the DB, not the caller) is safe inside the or() filter.
   const { data: recentDumps } = await supabase.from('brain_dumps')
-    .select('raw_text, classified_type, ab_verdict').eq('project_id', projectId)
+    .select('raw_text, classified_type, ab_verdict').or(`project_id.eq.${project.id},is_global.eq.true`)
     .order('created_at', { ascending: false }).limit(5)
   const prompt = `Project: ${project.name}\nStage: ${project.stage}\nStatus: ${project.status ?? 'none'}\nNext action: ${project.next_action ?? 'none'}\nBlockers: ${project.blockers ?? 'none'}\n\nRecent brain dumps:\n${(recentDumps ?? []).map(d => `- [${d.classified_type ?? 'unclassified'}${d.ab_verdict ? `, AB: ${d.ab_verdict}` : ''}] ${d.raw_text}`).join('\n')}\n\nGive 3 concrete, actionable suggestions for what the operator should tackle next on this project. Be specific. No fluff.`
   let result: { text: string; model: string; cost_usd: number }

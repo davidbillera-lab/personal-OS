@@ -3,7 +3,7 @@
 import { useState, useTransition } from 'react'
 import Link from 'next/link'
 import { Card, CardContent } from '@/components/ui/card'
-import { archiveDump, routeDump, promoteDump, promoteDumpAnyway, reclassifyDump, generateSpecAction } from '@/app/(app)/inbox/actions'
+import { archiveDump, routeDump, routeDumpGlobal, promoteDump, promoteDumpAnyway, reclassifyDump, generateSpecAction } from '@/app/(app)/inbox/actions'
 import type { BrainDump, BrainDumpType, Project } from '@/lib/types'
 
 const typeColors: Record<BrainDumpType, string> = {
@@ -15,7 +15,9 @@ const typeColors: Record<BrainDumpType, string> = {
   unclassified:   'bg-slate-800 text-slate-400',
 }
 
-const ALL_TYPES: BrainDumpType[] = ['idea', 'task', 'bug', 'decision', 'kill_candidate', 'unclassified']
+const GLOBAL = '__global__'
+
+const ALL_TYPES: BrainDumpType[] =['idea', 'task', 'bug', 'decision', 'kill_candidate', 'unclassified']
 
 function timeSince(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime()
@@ -70,6 +72,9 @@ export function InboxItem({ dump, projects, task }: Props) {
           {confidence && (
             <span className="text-[10px] text-muted-foreground">{confidence} confidence</span>
           )}
+          {dump.is_global && (
+            <span className="rounded px-1.5 py-0.5 text-[10px] font-medium bg-emerald-900/50 text-emerald-400">Global</span>
+          )}
           {dump.project_name && (
             <span className="text-[10px] font-medium text-foreground/70">{dump.project_name}</span>
           )}
@@ -102,14 +107,19 @@ export function InboxItem({ dump, projects, task }: Props) {
           {/* Route to project */}
           <select
             disabled={isPending}
-            defaultValue={dump.project_id ?? ''}
+            defaultValue={dump.is_global ? GLOBAL : (dump.project_id ?? '')}
             onChange={e => {
               const val = e.target.value
-              if (val) startTransition(() => routeDump(dump.id, val))
+              if (val === GLOBAL) startTransition(async () => {
+                const res = await routeDumpGlobal(dump.id)
+                if (!res.ok) setWarn(`Could not mark Global: ${res.error}`)
+              })
+              else if (val) startTransition(() => routeDump(dump.id, val))
             }}
             className="rounded border border-input bg-background px-2 py-1 text-[11px] text-foreground disabled:opacity-50"
           >
             <option value="">Route to project…</option>
+            <option value={GLOBAL}>Global (all projects)</option>
             {projects.map(p => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}

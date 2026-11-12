@@ -6,6 +6,7 @@ import { routeTask } from '@/lib/models/router'
 import type { BrainDumpType, IdeaValidationResult } from '@/lib/types'
 import { captureToVault } from '@/lib/vault'
 import { classifyBrainDump } from '@/lib/classify'
+import { requireOwner } from '@/lib/owner'
 
 async function validateIdea(rawText: string, summary: string | null): Promise<IdeaValidationResult> {
   const supabase = createAdminSupabaseClient()
@@ -59,9 +60,26 @@ export async function routeDump(id: string, projectId: string): Promise<void> {
   const supabase = createAdminSupabaseClient()
   await supabase
     .from('brain_dumps')
-    .update({ project_id: projectId, status: 'actioned' })
+    .update({ project_id: projectId, is_global: false, status: 'actioned' })
     .eq('id', id)
   revalidatePath('/inbox')
+}
+
+// Global: the dump applies to every project (shown on each project page and fed to its suggestions).
+export async function routeDumpGlobal(id: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await requireOwner()
+  } catch {
+    return { ok: false, error: 'Not authorized' }
+  }
+  const supabase = createAdminSupabaseClient()
+  const { error } = await supabase
+    .from('brain_dumps')
+    .update({ project_id: null, is_global: true, status: 'actioned' })
+    .eq('id', id)
+  if (error) return { ok: false, error: error.message }
+  revalidatePath('/inbox')
+  return { ok: true }
 }
 
 export async function promoteDump(
