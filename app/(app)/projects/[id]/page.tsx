@@ -14,6 +14,8 @@ interface Props {
 
 export default async function ProjectWorkspacePage({ params }: Props) {
   const { id } = await params
+  // id goes into a PostgREST or() filter below; only a UUID may reach it.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) notFound()
   const supabase = createAdminSupabaseClient()
 
   const [
@@ -26,7 +28,7 @@ export default async function ProjectWorkspacePage({ params }: Props) {
     { data: killChecks },
   ] = await Promise.all([
     supabase.from('projects').select('*').eq('id', id).single(),
-    supabase.from('brain_dumps').select('*').eq('project_id', id).order('created_at', { ascending: false }),
+    supabase.from('brain_dumps').select('*').or(`project_id.eq.${id},is_global.eq.true`).order('created_at', { ascending: false }),
     supabase.from('tasks').select('*').eq('project_id', id).not('status', 'in', '("done","killed")').order('created_at', { ascending: false }),
     supabase.from('project_chats').select('*').eq('project_id', id).order('created_at', { ascending: true }).limit(50),
     supabase.from('agent_handoffs').select('*').eq('project_id', id).order('started_at', { ascending: false }).limit(20),

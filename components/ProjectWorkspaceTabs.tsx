@@ -641,7 +641,11 @@ function DumpCard({
             {dump.classified_type.replace('_', ' ')}
           </span>
         )}
-        {dump.project_id && (
+        {dump.is_global ? (
+          <span className="rounded px-1.5 py-0.5 text-[10px] bg-emerald-900/50 text-emerald-400">
+            Global
+          </span>
+        ) : dump.project_id && (
           <span className="rounded px-1.5 py-0.5 text-[10px] bg-white/10 text-gray-400">
             project assigned
           </span>

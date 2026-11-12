@@ -87,6 +87,7 @@ export interface BrainDump {
   classified_type: BrainDumpType | null
   classification_confidence: number | null
   project_id: string | null
+  is_global: boolean
   status: BrainDumpStatus
   ai_summary: string | null
   ab_verdict: AbVerdict | null
