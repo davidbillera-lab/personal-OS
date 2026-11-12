@@ -3,8 +3,10 @@
 import { redirect } from 'next/navigation'
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import type { ProjectStage, ProjectTier } from '@/lib/types'
+import { requireOwner } from '@/lib/owner'
 
 export async function createProject(formData: FormData) {
+  await requireOwner()
   const supabase = createAdminSupabaseClient()
 
   const name = (formData.get('name') as string).trim()

@@ -3,8 +3,10 @@
 import { createAdminSupabaseClient } from '@/lib/supabase'
 import { classifyBrainDump } from '@/lib/classify'
 import { captureToVault } from '@/lib/vault'
+import { requireOwner } from '@/lib/owner'
 
 export async function quickDump(formData: FormData) {
+  await requireOwner()
   const text = (formData.get('text') as string | null)?.trim()
   if (!text) return
 
