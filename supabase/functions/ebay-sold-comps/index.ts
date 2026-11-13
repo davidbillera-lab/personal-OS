@@ -30,12 +30,22 @@ const CREDENTIAL_ENCRYPTION_KEY = Deno.env.get("CREDENTIAL_ENCRYPTION_KEY") ?? "
 const FLIPRADAR_PROJECT_ID = "95e468ba-d76b-4329-aef0-3c56289a96fa";
 // Cache freshness window.
 const CACHE_TTL_DAYS = 7;
-// Sold-listings source (Apify pay-per-event pricing, checked 2026-10-31).
-// minimal: one actor, no fallback; khadinakbar~ebay-sold-comps-analytics-scraper
-// is the researched backup if this one degrades.
+// Primary sold-listings source (Apify pay-per-event pricing, checked 2026-10-31).
+// The fallback below replaced khadinakbar~ebay-sold-comps-analytics-scraper as
+// the backup (that actor was "under maintenance" on 2026-11-12).
 const APIFY_ACTOR = "blackfalcondata~ebay-sold-listings-scraper";
 const APIFY_COST_PER_RUN_USD = 0.01;
 const APIFY_COST_PER_LISTING_USD = 0.0024;
+// v7 (2026-11-12): fallback source. The primary actor came back empty on every
+// lookup from ~21:20 UTC on 2026-11-12 (eBay restricting it; its changelog shows
+// four access fixes since 11-10). When it returns no usable sale or errors, the
+// same query runs once on a second vendor's actor. The cost log's `model` names
+// which actor served, so the two can be compared and the order swapped later.
+// minimal: per-listing price is the store's "from $5 / 1,000" rate; verify on
+// Apify Billing > Usage.
+const FALLBACK_ACTOR = "memo23~ebay-search-scraper-ppe";
+const FALLBACK_COST_PER_RUN_USD = 0;
+const FALLBACK_COST_PER_LISTING_USD = 0.005;
 // eBay's sold search covers ~90 days; anything older, or without a real item
 // number, is not a sale we can stand behind. Mirrors FlipRadar comps-guard.ts.
 const MAX_SOLD_AGE_DAYS = 120;
@@ -130,7 +140,7 @@ function isPlausibleSold(r) {
   if (!id || /^(\d)\1+$/.test(id) || "01234567890123456789".includes(id) || "98765432109876543210".includes(id)) {
     return false;
   }
-  const sold = Date.parse(r.soldDate ?? "");
+  const sold = parseSoldDate(r.soldDate);
   if (Number.isNaN(sold)) return false;
   const ageDays = (Date.now() - sold) / 86_400_000;
   return ageDays >= -2 && ageDays <= MAX_SOLD_AGE_DAYS;
@@ -172,6 +182,76 @@ async function fetchSoldListings(apiToken, query, limit) {
     rows: rows.filter(isPlausibleSold).slice(0, limit),
     billed: items.length
   };
+}
+// "Oct 31, 2026", "Sold Oct 31, 2026" or ISO; NaN when unreadable.
+function parseSoldDate(v) {
+  if (typeof v !== "string" || !v.trim()) return NaN;
+  const direct = Date.parse(v);
+  return Number.isNaN(direct) ? Date.parse(v.replace(/^\s*sold\s+/i, "")) : direct;
+}
+// 52.99, "52.99", "$1,052.99" -> number; NaN when absent.
+function parsePrice(v) {
+  if (typeof v === "number") return v;
+  if (typeof v === "string") return Number(v.replace(/[^0-9.]/g, ""));
+  if (v && typeof v === "object") return parsePrice(v.value ?? v.amount);
+  return NaN;
+}
+// Fallback source: same contract as fetchSoldListings (trusted rows + billed).
+async function fetchSoldListingsFallback(apiToken, query, limit) {
+  const res = await fetch(`https://api.apify.com/v2/acts/${FALLBACK_ACTOR}/run-sync-get-dataset-items?timeout=120`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      searchQuery: query,
+      mode: "sold",
+      marketplace: "ebay.com",
+      maxItems: limit,
+      soldWithinDays: 90,
+      excludeFewerWordMatches: true,
+      includeSummary: false,
+      includeLegacyFields: false
+    })
+  });
+  if (!res.ok) {
+    if (res.status === 401) secretsPromise = null;
+    const txt = await res.text();
+    throw new Error(`Apify fallback sold scrape failed: ${res.status} ${txt.slice(0, 200)}`);
+  }
+  const items = await res.json();
+  if (!Array.isArray(items)) throw new Error("Apify fallback sold scrape returned no item list");
+  const listings = items.filter((r)=>r && r.type !== "sold-price-summary" && !r._analytics);
+  const rows = listings.map((r)=>({
+      title: r.title,
+      price: parsePrice(r.priceValue ?? r.soldPrice ?? r.price),
+      currency: r.currency ?? r.priceCurrency,
+      condition: r.condition,
+      url: r.url ?? r.itemUrl ?? (r.itemId ? `https://www.ebay.com/itm/${r.itemId}` : undefined),
+      soldDate: r.soldDate ?? r.soldAt ?? r.endDate
+    }));
+  const trusted = rows.filter(isPlausibleSold).slice(0, limit);
+  // Field names were taken from the actor's README; if rows arrive but none
+  // pass, log one row's keys so a renamed field is visible in the function logs.
+  if (listings.length && !trusted.length) {
+    console.warn(`[ebay-sold-comps] fallback rows unusable; first row keys: ${Object.keys(listings[0]).join(",")}`);
+  }
+  return {
+    rows: trusted,
+    billed: listings.length
+  };
+}
+async function logApifyCost(actor, costUsd) {
+  await admin.from("model_costs").insert({
+    project_id: FLIPRADAR_PROJECT_ID,
+    provider: "apify",
+    model: actor,
+    tokens_in: 0,
+    tokens_out: 0,
+    cost_usd: Number(costUsd.toFixed(4)),
+    purpose: "ebay_sold_comps"
+  });
 }
 // --- Normalisation + stat logic (ported verbatim from ebay.ts:108-132) ----
 function normQuery(q) {
@@ -277,28 +357,37 @@ Deno.serve(async (req)=>{
       });
     }
   }
-  // Live scrape via provider seam.
-  let result;
-  let billed = 0;
+  // Live scrape: primary actor, then the fallback when it errors or returns no
+  // usable sale. Each attempt is cost-logged under its own actor name.
+  let rows = [];
+  let source = APIFY_ACTOR;
+  let primaryError = null;
   try {
     const sold = await fetchSoldListings(secrets.apifyToken, query, limit);
-    billed = sold.billed;
-    result = aggregate(query, sold.rows);
+    rows = sold.rows;
+    await logApifyCost(APIFY_ACTOR, APIFY_COST_PER_RUN_USD + sold.billed * APIFY_COST_PER_LISTING_USD);
   } catch (e) {
-    return json({
-      error: `scrape failed: ${String(e)}`
-    }, 502);
+    primaryError = e;
+    await logApifyCost(APIFY_ACTOR, APIFY_COST_PER_RUN_USD);
   }
-  // Cost log (real model_costs schema).
-  await admin.from("model_costs").insert({
-    project_id: FLIPRADAR_PROJECT_ID,
-    provider: "apify",
-    model: APIFY_ACTOR,
-    tokens_in: 0,
-    tokens_out: 0,
-    cost_usd: Number((APIFY_COST_PER_RUN_USD + billed * APIFY_COST_PER_LISTING_USD).toFixed(4)),
-    purpose: "ebay_sold_comps"
-  });
+  if (rows.length === 0) {
+    try {
+      const sold = await fetchSoldListingsFallback(secrets.apifyToken, query, limit);
+      rows = sold.rows;
+      source = FALLBACK_ACTOR;
+      await logApifyCost(FALLBACK_ACTOR, FALLBACK_COST_PER_RUN_USD + sold.billed * FALLBACK_COST_PER_LISTING_USD);
+    } catch (e) {
+      console.error(`[ebay-sold-comps] fallback failed for "${query}": ${String(e)}`);
+      if (primaryError) {
+        return json({
+          error: `scrape failed: ${String(primaryError)}; fallback: ${String(e)}`
+        }, 502);
+      }
+    }
+  }
+  console.log(`[ebay-sold-comps] "${query}": ${rows.length} sale(s) via ${rows.length ? source : "none"}${primaryError ? ` (primary error: ${String(primaryError).slice(0, 120)})` : ""}`);
+  const result = aggregate(query, rows);
+  result.source = rows.length ? source : null;
   // Cache write (upsert) — only persist non-empty results.
   if (result.count > 0) {
     await admin.from("ebay_sold_comps").upsert({
