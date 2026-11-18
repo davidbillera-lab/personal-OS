@@ -357,35 +357,40 @@ Deno.serve(async (req)=>{
       });
     }
   }
-  // Live scrape: primary actor, then the fallback when it errors or returns no
-  // usable sale. Each attempt is cost-logged under its own actor name.
+  // Live scrape: try each source in order until one returns a usable sale.
+  // v9 (2026-11-17): memo23 goes first. blackfalcondata failed every lookup on
+  // 2026-11-17 ("run-failed"), so calling it first only added its $0.01 start
+  // fee and a long wait before memo23 answered anyway. Swap back here if it recovers.
+  // Each attempt is cost-logged under its own actor name.
+  const SOURCES = [
+    { actor: FALLBACK_ACTOR, fetch: fetchSoldListingsFallback, perRun: FALLBACK_COST_PER_RUN_USD, perListing: FALLBACK_COST_PER_LISTING_USD },
+    { actor: APIFY_ACTOR, fetch: fetchSoldListings, perRun: APIFY_COST_PER_RUN_USD, perListing: APIFY_COST_PER_LISTING_USD }
+  ];
   let rows = [];
-  let source = APIFY_ACTOR;
-  let primaryError = null;
-  try {
-    const sold = await fetchSoldListings(secrets.apifyToken, query, limit);
-    rows = sold.rows;
-    await logApifyCost(APIFY_ACTOR, APIFY_COST_PER_RUN_USD + sold.billed * APIFY_COST_PER_LISTING_USD);
-  } catch (e) {
-    primaryError = e;
-    await logApifyCost(APIFY_ACTOR, APIFY_COST_PER_RUN_USD);
-  }
-  if (rows.length === 0) {
+  let source = null;
+  const errors = [];
+  for (const s of SOURCES) {
     try {
-      const sold = await fetchSoldListingsFallback(secrets.apifyToken, query, limit);
-      rows = sold.rows;
-      source = FALLBACK_ACTOR;
-      await logApifyCost(FALLBACK_ACTOR, FALLBACK_COST_PER_RUN_USD + sold.billed * FALLBACK_COST_PER_LISTING_USD);
-    } catch (e) {
-      console.error(`[ebay-sold-comps] fallback failed for "${query}": ${String(e)}`);
-      if (primaryError) {
-        return json({
-          error: `scrape failed: ${String(primaryError)}; fallback: ${String(e)}`
-        }, 502);
+      const sold = await s.fetch(secrets.apifyToken, query, limit);
+      await logApifyCost(s.actor, s.perRun + sold.billed * s.perListing);
+      if (sold.rows.length) {
+        rows = sold.rows;
+        source = s.actor;
+        break;
       }
+    } catch (e) {
+      errors.push(`${s.actor}: ${String(e)}`);
+      await logApifyCost(s.actor, s.perRun);
     }
   }
-  console.log(`[ebay-sold-comps] "${query}": ${rows.length} sale(s) via ${rows.length ? source : "none"}${primaryError ? ` (primary error: ${String(primaryError).slice(0, 120)})` : ""}`);
+  // Every source errored (none merely found nothing): a failed pull, not "no sales".
+  if (errors.length === SOURCES.length) {
+    console.error(`[ebay-sold-comps] all sources failed for "${query}": ${errors.join("; ")}`);
+    return json({
+      error: `scrape failed: ${errors.join("; ")}`
+    }, 502);
+  }
+  console.log(`[ebay-sold-comps] "${query}": ${rows.length} sale(s) via ${source ?? "none"}${errors.length ? ` (errors: ${errors.join("; ").slice(0, 160)})` : ""}`);
   const result = aggregate(query, rows);
   result.source = rows.length ? source : null;
   // Cache write (upsert) — only persist non-empty results.
