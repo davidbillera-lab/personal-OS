@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { comparable } from "./comparable.ts";
 // ---------------------------------------------------------------------------
 // Shared eBay Sold-Comps Service (Mission Control)
 // Returns aggregated eBay SOLD-price comps (trimmed mean / median / count /
@@ -50,8 +51,10 @@ const FALLBACK_COST_PER_LISTING_USD = 0.005;
 // number, is not a sale we can stand behind. Mirrors FlipRadar comps-guard.ts.
 const MAX_SOLD_AGE_DAYS = 120;
 // Cache rows written by this source. v5's rows ("ebay_sold") are fabricated
-// and are never served.
-const DATA_SOURCE = "ebay_sold_apify";
+// and are never served. v10 (2026-11-18) retired "ebay_sold_apify": 14 of its
+// rows were Danish-krone prices stored as dollars (~6x high), and none had the
+// comparable-sale filter below.
+const DATA_SOURCE = "ebay_sold_apify_v2";
 const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -136,6 +139,8 @@ function loadSecrets() {
 // such as 1234567890), and sold within MAX_SOLD_AGE_DAYS.
 function isPlausibleSold(r) {
   if (typeof r.price !== "number" || !(r.price > 0) || !r.title) return false;
+  // A proxy outside the US makes eBay show local currency (DKK seen 2026-11-14..16).
+  if (r.currency && String(r.currency).toUpperCase() !== "USD") return false;
   const id = r.url?.match(/ebay\.com\/itm\/(?:[^/?#]+\/)?(\d{9,15})(?:[/?#]|$)/)?.[1];
   if (!id || /^(\d)\1+$/.test(id) || "01234567890123456789".includes(id) || "98765432109876543210".includes(id)) {
     return false;
@@ -262,7 +267,7 @@ function itemIdFromUrl(url, idx) {
   return m ? m[1] : `sold-${idx}`;
 }
 function aggregate(query, raw) {
-  const listings = raw.map((r, i)=>({
+  const listings = comparable(raw).map((r, i)=>({
       itemId: itemIdFromUrl(r.url, i),
       title: r.title,
       price: Number(r.price),
