@@ -70,7 +70,7 @@ After the container starts, **no host `git` or `node` process ever runs with `cw
 4. Run QC on the trusted checkout, from the recorded base to `sha`.
 5. List the commits from the trusted repo.
 
-**The Docker preflight no longer suggests the host executor.** Remove the `DISPATCHER_EXECUTOR=claude` suggestion from its error message (:353-359). A Docker failure is a stop condition.
+**The Docker preflight no longer suggests the host executor.** Remove the `DISPATCHER_EXECUTOR=claude` suggestion from its error message (:363). A Docker failure is a stop condition.
 
 **The legacy host adapter refuses clones.** `claudeExecutorAdapter.launch()` throws if it is given a `cloneTarget`. That adapter runs the build on the host with no sandbox (:244), so a real repo must never go there.
 
