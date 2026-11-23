@@ -13,12 +13,15 @@
 //     every dispatcher safety path (claim, gate, recovery) with a local bare remote.
 
 import { spawnSync } from 'child_process'
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs'
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, lstatSync, appendFileSync, readdirSync, statSync, copyFileSync, unlinkSync } from 'fs'
 import { join, dirname, resolve } from 'path'
 import { isCredentialPath } from './clone-target.mjs'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import { sanitizeForMC } from './sanitize-result.mjs'
+import {
+  readWorkspaceHead, openTrusted, provisionRecordPath, qcRecordPath, qcReportDir, writeJson, BUDGET,
+} from './trusted-git.mjs'
 
 // ---- resolve the real claude binary ----
 // On Windows, `claude` on PATH is an npm shim (claude.cmd/.ps1) that Node's spawnSync
@@ -38,8 +41,11 @@ export function resolveClaudeBin() {
 }
 
 // ---- git helpers (throw on nonzero) ----
+// PRE-CONTAINER ONLY. This runs git with the repo's own config, which is trusted only
+// until the box can write it. Everything after the container starts goes through
+// trusted-git.mjs instead.
 function git(cwd, args) {
-  const r = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' })
+  const r = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout: BUDGET.gitTimeoutMs })
   if (r.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed (${r.status}): ${(r.stderr || r.stdout || '').trim()}`)
   }
@@ -63,25 +69,56 @@ function gitInitRepo(workspace) {
 
 // Remove credential-shaped files from a freshly cloned tree BEFORE the container starts.
 // Returns the list of removed repo-relative paths (logged, never their contents).
-// Uses git's own file list so it only ever considers tracked files.
-export function scrubClonedCredentials(workspace) {
-  let tracked = []
-  try { tracked = git(workspace, ['ls-files']).split('\n').filter(Boolean) } catch { return [] }
-  const removed = []
-  for (const rel of tracked) {
-    if (!isCredentialPath(rel)) continue
-    try { rmSync(resolve(workspace, rel), { force: true }); removed.push(rel) } catch { /* best effort */ }
+// Uses git's own file list so it only ever considers tracked files. This runs on the host's
+// own fresh clone, before the box exists, so git here is trusted.
+//
+// FAILS CLOSED: a listing failure or a removal failure throws, which fails the build before
+// the container starts. `-z` output is parsed raw (the git() helper trims, and non-z output
+// C-quotes non-ASCII names, which the old split silently missed). Absence is then confirmed
+// on the FILESYSTEM — ls-files would still list a deleted file until the index changes.
+//
+// unlinkSync, not rmSync: on Node 24 / Windows, rmSync({ force: true }) silently no-ops on
+// non-ASCII paths (no error, file stays). Found by this very check on 2026-11-23.
+const unlinkIfPresent = (p) => {
+  try { unlinkSync(p) } catch (e) { if (e.code !== 'ENOENT') throw e }
+}
+export function scrubClonedCredentials(workspace, { remove = unlinkIfPresent } = {}) {
+  const r = spawnSync('git', ['-C', workspace, 'ls-files', '-z'], {
+    encoding: 'utf8', timeout: BUDGET.gitTimeoutMs, maxBuffer: 64 * 1024 * 1024,
+  })
+  if (r.error || r.status !== 0) {
+    throw new Error(`credential scrub: git ls-files failed (${r.error?.code || `exit ${r.status}`})`)
   }
-  return removed
+  const flagged = (r.stdout || '').split('\0').filter((p) => p !== '' && isCredentialPath(p))
+  for (const rel of flagged) {
+    try { remove(resolve(workspace, rel)) } catch (e) {
+      throw new Error(`credential scrub: could not remove a flagged file (${e.code || e.message})`)
+    }
+  }
+  for (const rel of flagged) {
+    let present = true
+    try { lstatSync(resolve(workspace, rel)) } catch (e) {
+      if (e.code === 'ENOENT') present = false
+      else throw new Error(`credential scrub: could not confirm removal (${e.code || e.message})`)
+    }
+    if (present) throw new Error('credential scrub: a flagged file is still present after removal')
+  }
+  return flagged
 }
 
 // Provision the build workspace. With no clone target this is exactly the old
 // gitInitRepo() — an empty repo, byte-for-byte the prior behaviour. With one, the HOST
 // clones shallow + single-branch (no history in the box), scrubs credential files, and
 // commits the scrub so the build starts from a clean, reviewable base.
-// Returns { cloned, baseSha, removed }.
-export function provisionWorkspace(workspace, cloneTarget) {
-  if (!cloneTarget) { gitInitRepo(workspace); return { cloned: false, baseSha: null, removed: [] } }
+// Either way it writes <workspace>.provision.json BESIDE the workspace (only the workspace is
+// mounted, so the box can't touch it). Origin and base come only from this record later.
+// Returns { cloned, baseSha, removed } (+ originSha when cloned).
+export function provisionWorkspace(workspace, cloneTarget, { requestId = null } = {}) {
+  if (!cloneTarget) {
+    gitInitRepo(workspace)
+    writeJson(provisionRecordPath(workspace), { requestId, slug: null, originSha: null, baseSha: null })
+    return { cloned: false, baseSha: null, removed: [] }
+  }
 
   mkdirSync(dirname(workspace), { recursive: true })
   const r = spawnSync('git', ['clone', '--depth', '1', '--single-branch', cloneTarget.url, workspace], {
@@ -101,9 +138,11 @@ export function provisionWorkspace(workspace, cloneTarget) {
   // removes the blobs, rather than just removing the paths that point at them.
   //
   // Nothing of value is lost — --depth 1 means there was only ever one commit of history.
-  // The new initial commit becomes the QC base, so runHostQc's `sha^` still resolves to
-  // exactly the pre-build tree.
+  // The new initial commit becomes the recorded QC base (baseSha), so QC reviews the whole
+  // build from exactly the pre-build tree, however many commits it makes.
   rmSync(join(workspace, '.git'), { recursive: true, force: true })
+  // rmSync can no-op silently (see scrub note); a surviving .git would keep the old blobs.
+  if (existsSync(join(workspace, '.git'))) throw new Error('could not discard clone history: .git survived removal')
   const r2 = spawnSync('git', ['-C', workspace, 'init'], { encoding: 'utf8' })
   if (r2.status !== 0) throw new Error(`git init after scrub failed: ${(r2.stderr || '').trim()}`)
   gitIdentity(workspace)
@@ -111,7 +150,19 @@ export function provisionWorkspace(workspace, cloneTarget) {
   git(workspace, ['commit', '-m', `base: ${cloneTarget.slug} @ ${originSha.slice(0, 12)} (${removed.length} credential file(s) stripped)`])
 
   const baseSha = git(workspace, ['rev-parse', 'HEAD'])
+  writeJson(provisionRecordPath(workspace), { requestId, slug: cloneTarget.slug, originSha, baseSha })
   return { cloned: true, baseSha, originSha, removed }
+}
+
+// Inject the executor's permission policy, and keep it OUT of the change: `.claude/` goes in
+// .git/info/exclude first, so the builder's instructed `git add -A` never stages it. A build
+// that force-adds it anyway is off-task, and build-to-pr refuses that change. Pre-container.
+export function injectExecutorSettings(workspace) {
+  const info = join(workspace, '.git', 'info')
+  mkdirSync(info, { recursive: true })
+  appendFileSync(join(info, 'exclude'), '\n.claude/\n')
+  mkdirSync(join(workspace, '.claude'), { recursive: true })
+  writeFileSync(join(workspace, '.claude', 'settings.json'), JSON.stringify(WORKSPACE_SETTINGS, null, 2))
 }
 
 // ---- mock adapter ----
@@ -123,7 +174,7 @@ export const mockExecutorAdapter = {
     writeFileSync(join(workspace, 'BUILD.txt'), `mock build ${new Date().toISOString()}\n`)
     git(workspace, ['add', '-A'])
     git(workspace, ['commit', '-m', 'mock build'])
-    const reviewedSha = git(workspace, ['rev-parse', 'HEAD'])
+    const reviewedSha = readWorkspaceHead(workspace)
     return { reviewedSha, qcVerdict: 'SHIP', commits: ['mock build'] }
   },
 }
@@ -181,31 +232,98 @@ function codexQcPath() {
   return existsSync(p) ? p : null
 }
 
-// Review exactly the diff `sha` introduced. Fresh build workspaces usually have a single
-// commit (no parent), so fall back to the empty tree — `git diff <empty-tree> HEAD` is the
-// whole build. Never throws: a missing key or a QC failure returns UNKNOWN, not a dead build.
-export function runHostQc({ workspace, sha, timeoutMs = 300000 }) {
-  const script = codexQcPath()
-  if (!script) return { verdict: 'UNKNOWN', output: 'host QC skipped: codex-qc.mjs not found' }
+const listMd = (dir) => {
+  try { return readdirSync(dir).filter((f) => f.endsWith('.md')) } catch { return [] }
+}
 
-  let base
-  try { base = git(workspace, ['rev-parse', '--verify', '--quiet', `${sha}^`]) } catch { base = EMPTY_TREE }
+// Review the WHOLE build: from the recorded base to `sha`, which is exactly the range
+// build-to-pr exports. Empty-init builds have no base, so the empty tree stands in and
+// `git diff <empty-tree> <sha>` is the whole build.
+//
+// QC never runs in the workspace (its .git is hostile). It runs in a checkout of `sha` made
+// from the trusted repo, in a host temp dir. Before that dir is removed, the report and a
+// verdict record are written BESIDE the workspace: <workspace>.qc/<sha>.md and
+// <workspace>.qc.json. That record is the only place build-to-pr reads the verdict from.
+//
+// Never throws on a QC failure: a missing key or a QC crash records UNKNOWN, not a dead build.
+export function runHostQc({ workspace, sha, baseSha = null, requestId = null, trusted, timeoutMs = 300000, script = codexQcPath() }) {
+  const qcBase = baseSha || EMPTY_TREE
+  const cwd = trusted.checkout(sha)
+  const reportsDir = join(cwd, '.codex-qc')
+  // A build can commit its own .codex-qc/*.md. Only files QC creates in THIS run count.
+  const before = new Set(listMd(reportsDir))
 
-  // HOST env on purpose — this is where the OpenAI key legitimately lives.
-  const r = spawnSync('node', [script, '--base', base], {
-    cwd: workspace, env: process.env, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024,
-  })
-  const output = `${r.stdout || ''}\n${r.stderr || ''}`.trim()
-  if (r.error || r.status !== 0) {
-    const why = r.error ? (r.error.code || r.error.message) : `exit ${r.status}`
-    // QC output is model-authored text — sanitize before it lands in the pm2 log (C6-P5).
-    console.log(`[host-qc] unavailable (${why}): ${sanitizeForMC(output, { maxLen: 300 })}`)
-    return { verdict: 'UNKNOWN', output }
+  let verdict = 'UNKNOWN'
+  let output
+  if (!script) {
+    output = 'host QC skipped: codex-qc.mjs not found'
+  } else {
+    // HOST env on purpose — this is where the OpenAI key legitimately lives.
+    const r = spawnSync('node', [script, '--base', qcBase], {
+      cwd, env: process.env, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, windowsHide: true,
+    })
+    output = `${r.stdout || ''}\n${r.stderr || ''}`.trim()
+    if (r.error || r.status !== 0) {
+      const why = r.error ? (r.error.code || r.error.message) : `exit ${r.status}`
+      // QC output is model-authored text — sanitize before it lands in the pm2 log (C6-P5).
+      console.log(`[host-qc] unavailable (${why}): ${sanitizeForMC(output, { maxLen: 300 })}`)
+    } else {
+      // Prefer the report's explicit verdict line; a bare keyword anywhere in the prose is a
+      // false-RECONSIDER risk, and RECONSIDER fails the build.
+      const explicit = output.match(/\*\*Verdict:\*\*\s*(SHIP|FIX-FIRST|RECONSIDER)/)
+      verdict = explicit ? explicit[1] : parseVerdict(output)
+    }
   }
-  // Prefer the report's explicit verdict line; a bare keyword anywhere in the prose is a
-  // false-RECONSIDER risk, and RECONSIDER fails the build.
-  const explicit = output.match(/\*\*Verdict:\*\*\s*(SHIP|FIX-FIRST|RECONSIDER)/)
-  return { verdict: explicit ? explicit[1] : parseVerdict(output), output }
+
+  // Durable record, written before the trusted checkout is cleaned up.
+  const outDir = qcReportDir(workspace)
+  mkdirSync(outDir, { recursive: true })
+  const reportPath = join(outDir, `${sha}.md`)
+  const fresh = listMd(reportsDir).filter((f) => !before.has(f))
+    .map((f) => join(reportsDir, f))
+    .filter((p) => lstatSync(p).isFile())
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)
+  // minimal: no report file → keep QC's stdout as the report, so the record always has evidence.
+  if (fresh.length) copyFileSync(fresh[0], reportPath)
+  else writeFileSync(reportPath, output || '')
+  writeJson(qcRecordPath(workspace), { requestId, baseSha, sha, verdict, reportPath })
+  return { verdict, output, reportPath }
+}
+
+// Docker adapter's teardown proof. Only a "no such container" answer counts as gone; a
+// daemon error, a timeout, or a container that still exists all throw.
+export function confirmContainerGone(containerName, dockerFn = docker) {
+  const r = dockerFn(['inspect', containerName], { timeout: 30000 })
+  if (r?.error) throw new Error(`teardown unconfirmed: docker inspect failed (${r.error.code || r.error.message})`)
+  if (r?.status === 0) throw new Error(`teardown unconfirmed: container ${containerName} still exists`)
+  if (!/no such (object|container)/i.test(`${r?.stderr || ''}${r?.stdout || ''}`)) {
+    throw new Error(`teardown unconfirmed: unexpected docker inspect result (exit ${r?.status})`)
+  }
+}
+
+// The post-build sequence, shared by both real adapters. Each step fails closed, in order:
+//   1. confirm the writer is gone   2. read HEAD as text, open the trusted repo
+//   3. no-op check                  4. QC from the recorded base   5. list commits
+// Nothing here runs git or node with its cwd in the workspace.
+export function finishBuild({
+  workspace, requestId = null, baseSha = null, confirmWriterGone,
+  readHead = readWorkspaceHead, open = openTrusted, runQc = runHostQc,
+}) {
+  if (typeof confirmWriterGone !== 'function') throw new Error('finishBuild: confirmWriterGone is required')
+  confirmWriterGone()
+  const reviewedSha = readHead(workspace)
+  if (!reviewedSha) throw new Error('no commit produced by executor')
+  if (baseSha && reviewedSha === baseSha) throw new Error('no change produced')
+  const trusted = open(workspace)
+  try {
+    if (!trusted.hasCommit(reviewedSha)) throw new Error('workspace HEAD names a commit that is not in its object store')
+    const { verdict: qcVerdict } = runQc({ workspace, sha: reviewedSha, baseSha, requestId, trusted })
+    if (qcVerdict === 'RECONSIDER') throw new Error('CodexQC verdict RECONSIDER — build not approvable')
+    const commits = trusted.log(reviewedSha)
+    return { reviewedSha, qcVerdict, commits }
+  } finally {
+    trusted.close()
+  }
 }
 
 // Gap B (second-half relay): a Hermes-deposited plan (mc_requests.plan) is the full
@@ -236,7 +354,7 @@ export function buildPrompt(request, { cloned = false } = {}) {
     opening,
     `Task: ${task}.`,
     steps,
-    `then \`git commit -m "${shortMsg}"\` as a SINGLE commit (host-side review diffs HEAD against its parent).`,
+    `then \`git commit -m "${shortMsg}"\` as a SINGLE commit (host-side review covers everything since the starting commit).`,
     'Stay inside this workspace — do not read or write files outside it.',
     'DO NOT run git push or gh — you cannot, and must not try.',
   ].join(' ')
@@ -255,11 +373,12 @@ export function buildPrompt(request, { cloned = false } = {}) {
 export const claudeExecutorAdapter = {
   name: 'claude',
   async launch({ workspace, request, env, timeoutMs, skipPermissions, cloneTarget = null }) {
-    // 1. Provision isolated, push-denied workspace (empty repo, or a scrubbed shallow clone).
-    const { cloned, removed } = provisionWorkspace(workspace, cloneTarget)
-    if (cloned) console.log(`[executor] cloned ${cloneTarget.slug} (scrubbed ${removed.length} credential file(s))`)
-    mkdirSync(join(workspace, '.claude'), { recursive: true })
-    writeFileSync(join(workspace, '.claude', 'settings.json'), JSON.stringify(WORKSPACE_SETTINGS, null, 2))
+    // No sandbox here, so a real repo must never come this way. Refuse before provisioning.
+    if (cloneTarget) throw new Error('host executor refuses clone targets: real repos build only in the docker sandbox')
+
+    // 1. Provision isolated, push-denied workspace (an empty repo).
+    const { baseSha } = provisionWorkspace(workspace, null, { requestId: request?.id ?? null })
+    injectExecutorSettings(workspace)
 
     // 2. Stamp trust so headless Claude doesn't block on the trust dialog.
     stampTrust(workspace)
@@ -275,7 +394,7 @@ export const claudeExecutorAdapter = {
     // CLAUDECODE deliberately omitted (recursion guard must stay unset).
 
     // 4. Launch headless Claude with a hard timeout. Deny-list blocks push regardless.
-    const prompt = buildPrompt(request, { cloned })
+    const prompt = buildPrompt(request, { cloned: false })
 
     // skipPermissions defaults OFF and must stay off here. On the host path the
     // deny-list + stripped env are the ONLY controls that exist; turning permissions
@@ -299,14 +418,8 @@ export const claudeExecutorAdapter = {
       throw new Error(`executor exited ${r.status}: ${(r.stderr || r.stdout || '').trim().slice(0, 400)}`)
     }
 
-    // 5. Harvest the committed SHA, then QC it host-side (child has exited).
-    let reviewedSha
-    try { reviewedSha = git(workspace, ['rev-parse', 'HEAD']) } catch { reviewedSha = null }
-    if (!reviewedSha) throw new Error('no commit produced by executor')
-    const { verdict: qcVerdict } = runHostQc({ workspace, sha: reviewedSha })
-    if (qcVerdict === 'RECONSIDER') throw new Error('CodexQC verdict RECONSIDER — build not approvable')
-    const commits = git(workspace, ['log', '--oneline']).split('\n').filter(Boolean)
-    return { reviewedSha, qcVerdict, commits }
+    // 5. Harvest + QC host-side. spawnSync returned, so the child has exited.
+    return finishBuild({ workspace, requestId: request?.id ?? null, baseSha, confirmWriterGone: () => {} })
   },
 }
 
@@ -360,7 +473,7 @@ function preflight() {
   if (v.error || v.status !== 0) {
     throw new Error(
       `docker executor unavailable: cannot reach the Docker daemon (${v.error?.code || `exit ${v.status}`}). ` +
-      'Start Docker Desktop, or set DISPATCHER_EXECUTOR=claude.',
+      'Start Docker Desktop. This is a stop condition: do not switch executors to get around it.',
     )
   }
   const image = EXECUTOR_IMAGE()
@@ -480,10 +593,10 @@ export const dockerClaudeExecutorAdapter = {
     // 1. Provision the workspace host-side (the container only ever sees the mount).
     // The HOST clones — the container never receives a git credential, so the zero-secrets
     // childEnv invariant is unchanged. See lib/clone-target.mjs for the security shape.
-    const { cloned, removed } = provisionWorkspace(workspace, cloneTarget)
+    const requestId = request?.id ?? null
+    const { cloned, removed, baseSha } = provisionWorkspace(workspace, cloneTarget, { requestId })
     if (cloned) console.log(`[executor] cloned ${cloneTarget.slug} (scrubbed ${removed.length} credential file(s))`)
-    mkdirSync(join(workspace, '.claude'), { recursive: true })
-    writeFileSync(join(workspace, '.claude', 'settings.json'), JSON.stringify(WORKSPACE_SETTINGS, null, 2))
+    injectExecutorSettings(workspace)
     // No stampTrust(): that mutates the HOST ~/.claude.json. The image pre-seeds
     // onboarding + /workspace trust instead, so the host config is never touched.
 
@@ -510,14 +623,8 @@ export const dockerClaudeExecutorAdapter = {
       throw new Error(`executor container exited ${r.status}: ${(r.stderr || r.stdout || '').trim().slice(0, 400)}`)
     }
 
-    // 2. Container is gone. Harvest + QC host-side, exactly as the claude adapter does.
-    let reviewedSha
-    try { reviewedSha = git(workspace, ['rev-parse', 'HEAD']) } catch { reviewedSha = null }
-    if (!reviewedSha) throw new Error('no commit produced by executor')
-    const { verdict: qcVerdict } = runHostQc({ workspace, sha: reviewedSha })
-    if (qcVerdict === 'RECONSIDER') throw new Error('CodexQC verdict RECONSIDER — build not approvable')
-    const commits = git(workspace, ['log', '--oneline']).split('\n').filter(Boolean)
-    return { reviewedSha, qcVerdict, commits }
+    // 2. Prove the container is gone, then harvest + QC host-side through the trusted repo.
+    return finishBuild({ workspace, requestId, baseSha, confirmWriterGone: () => confirmContainerGone(containerName) })
   },
 }
 

@@ -104,7 +104,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
 import { pathToFileURL } from 'url'
-import { provisionWorkspace } from '../scripts/lib/claude-executor-adapter.mjs'
+import { provisionWorkspace, scrubClonedCredentials } from '../scripts/lib/claude-executor-adapter.mjs'
 
 const g = (cwd: string, args: string[]) => spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' })
 
@@ -153,6 +153,53 @@ describe('provisionWorkspace (integration)', () => {
 
     rmSync(root, { recursive: true, force: true })
   }, 30_000)
+
+  // Fixture: a file:// source repo with tracked credential files, one with a non-ASCII name
+  // (non -z ls-files C-quotes it, which the old split silently missed).
+  const credFixture = () => {
+    const root = mkdtempSync(join(tmpdir(), 'mc-scrub-'))
+    const source = join(root, 'source')
+    mkdirSync(join(source, 'café'), { recursive: true })
+    g(source, ['init'])
+    g(source, ['config', 'user.email', 't@t'])
+    g(source, ['config', 'user.name', 't'])
+    writeFileSync(join(source, 'index.js'), 'export const x = 1\n')
+    writeFileSync(join(source, '.env.local'), 'A=1\n')
+    writeFileSync(join(source, 'café', '.env.production'), 'B=2\n')
+    writeFileSync(join(source, 'clé.pem'), 'KEY\n')
+    g(source, ['add', '-A', '-f'])
+    g(source, ['commit', '-m', 'seed'])
+    return { root, source }
+  }
+
+  it('scrubs non-ASCII credential names too, and none survive', () => {
+    const { root, source } = credFixture()
+    const ws = join(root, 'ws')
+    const res = provisionWorkspace(ws, { slug: 'test/fixture', url: pathToFileURL(source).href })
+    expect(res.removed.sort()).toEqual(['.env.local', 'café/.env.production', 'clé.pem'].sort())
+    for (const f of ['.env.local', join('café', '.env.production'), 'clé.pem']) {
+      expect(existsSync(join(ws, f)), `${f} should be scrubbed`).toBe(false)
+    }
+    expect(existsSync(join(ws, 'index.js'))).toBe(true)
+    rmSync(root, { recursive: true, force: true })
+  }, 30_000)
+
+  it('the scrub FAILS CLOSED: a removal error throws, and so does a file that is still present', () => {
+    const { root, source } = credFixture()
+    const ws = join(root, 'ws')
+    const c = spawnSync('git', ['clone', '-q', '--depth', '1', pathToFileURL(source).href, ws], { encoding: 'utf8' })
+    expect(c.status).toBe(0)
+    expect(() => scrubClonedCredentials(ws, { remove: () => { throw Object.assign(new Error('x'), { code: 'EBUSY' }) } }))
+      .toThrow(/could not remove/)
+    expect(() => scrubClonedCredentials(ws, { remove: () => {} })).toThrow(/still present/)
+    rmSync(root, { recursive: true, force: true })
+  }, 30_000)
+
+  it('the scrub FAILS CLOSED when git cannot list files', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mc-scrub-nogit-'))
+    expect(() => scrubClonedCredentials(root)).toThrow(/ls-files failed/)
+    rmSync(root, { recursive: true, force: true })
+  })
 
   it('with no clone target it git-inits an empty repo, exactly as before', () => {
     const root = mkdtempSync(join(tmpdir(), 'mc-init-'))
