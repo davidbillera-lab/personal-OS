@@ -5,7 +5,8 @@
 - **Round 2** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-23T13-38-30-724Z.md`).
   - Blockers 1 and 3 restate current-code bugs that piece 1 fixes. They are kept as acceptance tests.
   - Blockers 2, 4 and 5 and both should-fixes were spec gaps, now closed.
-- **Gates:** CodexQC round 3 (David runs it), then David's approval, then a fresh build window for pieces 1-3, then CodexQC on that PR (David runs it), then the rig run.
+- **Round 3** (`.codex-qc/codex-qc-2026-11-23T14-04-55-493Z.md`) found no new design issue. Its 4 blockers are current-code bugs, covered by piece 1 and kept as pre-run acceptance checks. Its 4 should-fixes are folded in.
+- **Gates:** David's approval, then a fresh build window for pieces 1-3, then CodexQC on that PR (David runs it), then the rig run.
 **Step 3 of 3** toward running Mission Control from the dashboard (`decisions.md` 2026-11-06). Steps 1 and 2 shipped in PRs #29, #32 and #33.
 **Why a spike and not the full step 3 spec:** step 3 rests on one unproven claim, that the rig's sandbox can build against an existing repo and hand back a reviewable PR. If that claim fails, the step 3 design changes. One run settles it before any multi-piece build gets specced.
 
@@ -61,7 +62,7 @@ After the container starts, **no host `git` or `node` process ever runs with `cw
 
 **Order of operations after the build,** in both adapters. Each step fails closed.
 1. **Confirm the writer is gone.**
-   - Docker adapter: after `docker rm -f` (:503), run `docker inspect <name>`. It must report the container doesn't exist; otherwise throw.
+   - Docker adapter: after `docker rm -f` (:503), run `docker inspect <name>`. Only a "no such container" result counts as gone. A daemon error, a timeout, or a container that still exists all throw.
    - Host adapter: the child must have exited.
    - Nothing below starts while a writer can still be live.
 2. Read HEAD as text, then open the trusted repo.
@@ -69,13 +70,22 @@ After the container starts, **no host `git` or `node` process ever runs with `cw
 4. Run QC on the trusted checkout, from the recorded base to `sha`.
 5. List the commits from the trusted repo.
 
+**The Docker preflight no longer suggests the host executor.** Remove the `DISPATCHER_EXECUTOR=claude` suggestion from its error message (:353-359). A Docker failure is a stop condition.
+
 **The legacy host adapter refuses clones.** `claudeExecutorAdapter.launch()` throws if it is given a `cloneTarget`. That adapter runs the build on the host with no sandbox (:244), so a real repo must never go there.
 
 - **`openTrusted(workspace)`** reads build output safely.
   - Create a fresh repo in a host temp dir outside the workspace.
   - Copy `<workspace>/.git/objects` into it. Copy regular files only, refuse symlinks and anything else, and skip `objects/info/` (no alternates are followed).
   - Never read the workspace's config, hooks, `info/` or `packed-refs` through git.
-  - Every git call on the trusted repo also passes `-c core.fsmonitor= -c core.hooksPath=<empty dir> --no-ext-diff --no-textconv`, as a second layer.
+  - Every git call on the trusted repo also passes `-c core.fsmonitor= -c core.hooksPath=<empty dir>`, as a second layer.
+  - `diff` and `log -p` calls additionally pass `--no-ext-diff --no-textconv`. Those two are diff options, not global ones.
+  - Test each exact command used: checkout, ancestry check, log, and patch export.
+- **A resource budget,** because the container's limits stop applying once it exits. Exceeding any of these fails the build with `output over budget`:
+  - the objects being copied: 200 MB and 50,000 files at most;
+  - the trusted checkout: 500 MB at most;
+  - the patch: 5 MB at most;
+  - every host git call: 120 s, and the QC run keeps its existing timeout.
 - **`readWorkspaceHead(workspace)`.** Resolve `.git/HEAD`, and the one loose ref it names, as plain text files: regular files only, and the result must be 40 hex characters. This replaces any `git rev-parse` in the workspace.
 - **A provision record outside the mount.** `provisionWorkspace()` writes `<workspace>.provision.json` beside the workspace with `{requestId, slug, originSha (full 40), baseSha}`. Only the workspace is mounted (adapter :440). Empty-init builds record `baseSha: null`, so QC keeps today's empty-tree base.
 - **`runHostQc({ workspace, sha, baseSha })`.**
@@ -97,6 +107,7 @@ After the container starts, **no host `git` or `node` process ever runs with `cw
   - A provisioning failure fails the build before the container starts.
 - **Tests.**
   - `tests/trusted-git.test.ts`: a workspace whose `.git/config` sets `core.fsmonitor` (and `diff.external`) to a command that writes a marker file. Reading HEAD, opening the trusted repo and diffing through it must never create the marker.
+  - The same malicious workspace through the **real post-build flow**: call the adapter's post-container sequence (teardown check, harvest, no-op check, QC with a stub `codex-qc` script, commit list) with injected `docker` and QC functions. The marker must never appear.
   - Same file: a symlink inside `objects/` is refused.
   - Same file: a two-commit build reviews from the recorded base, not `sha^`. Test the range computation, not Codex.
   - Extend the scrub cases in `tests/clone-target.test.ts`:
@@ -121,7 +132,11 @@ The CLI runs on the host with David's own `gh` login. Nothing it uses ever enter
    - `readWorkspaceHead()` must equal `--sha`, the SHA from the approval ping.
    - In the trusted repo, the recorded `baseSha` must exist and be an ancestor of `--sha`.
    - Read `<workspace>.qc.json`. Its `sha` and `baseSha` must equal `--sha` and the provision record's `baseSha`, and its `requestId` must match.
-   - Refuse if that record is missing or its verdict is `RECONSIDER` or `UNKNOWN`.
+   - The record must parse and match the expected schema:
+     - `requestId` is a UUID;
+     - `baseSha` and `sha` are 40 hex characters;
+     - `verdict` is exactly `SHIP` or `FIX-FIRST`. That is an allowlist: anything else, including `UNKNOWN`, `RECONSIDER` or a malformed record, is refused.
+   - Test the malformed cases.
 4. **Build the patch** in the trusted repo with `diff --binary --no-ext-diff --no-textconv <baseSha> <sha>`. That is the same range QC reviewed. Refuse in any of these cases:
    - The patch is empty.
    - Any changed path matches no `--allow` glob.
