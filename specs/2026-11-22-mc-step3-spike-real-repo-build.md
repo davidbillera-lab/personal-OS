@@ -1,6 +1,11 @@
 # Spike: one sandbox build against a real repo, landed as a draft PR
 
-**Status:** DRAFT r2, 2026-11-23. CodexQC round 1 returned FIX-FIRST with 5 blockers (`.codex-qc/codex-qc-2026-11-23T05-57-37-469Z.md`). All 5 were confirmed against the code and are folded in below, along with one risk Codex missed (Vercel preview builds). Gates: CodexQC round 2 (David runs it), then David's approval, then a fresh build window for pieces 1-3, then CodexQC on that PR (David runs it), then the rig run.
+**Status:** DRAFT r3, 2026-11-23.
+- **CodexQC round 1** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-23T05-57-37-469Z.md`). All 5 blockers were confirmed, along with one risk Codex missed (Vercel preview builds).
+- **Round 2** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-23T13-38-30-724Z.md`).
+  - Blockers 1 and 3 restate current-code bugs that piece 1 fixes. They are kept as acceptance tests.
+  - Blockers 2, 4 and 5 and both should-fixes were spec gaps, now closed.
+- **Gates:** CodexQC round 3 (David runs it), then David's approval, then a fresh build window for pieces 1-3, then CodexQC on that PR (David runs it), then the rig run.
 **Step 3 of 3** toward running Mission Control from the dashboard (`decisions.md` 2026-11-06). Steps 1 and 2 shipped in PRs #29, #32 and #33.
 **Why a spike and not the full step 3 spec:** step 3 rests on one unproven claim, that the rig's sandbox can build against an existing repo and hand back a reviewable PR. If that claim fails, the step 3 design changes. One run settles it before any multi-piece build gets specced.
 
@@ -21,7 +26,7 @@ David still approves at two points, as today: he wakes the rig, and he decides o
 | Wake on demand, sleep after 15 idle minutes | `scripts/lib/rig-wake.mjs`, `scripts/lib/idle-sleep.mjs`, `docs/runbooks/on-demand-relay.md` | Built. Not run since the dispatcher was switched off on 2026-10-17. |
 | npm inside the box | `docker/executor-proxy/allowlist.txt` allows `registry.npmjs.org` | Present. |
 
-## Two gaps
+## Three gaps
 
 **Gap A: no path from the box to a PR on the real repo.**
 - The approved push always goes to the private sandbox `davidbillera-lab/mc-spike-test` (`SANDBOX_REPO`, `dispatcher.mjs:99`). That is by design.
@@ -47,6 +52,25 @@ All three code pieces happen in one build window, one commit per piece. `scripts
 
 After the container starts, **no host `git` or `node` process ever runs with `cwd` or `--git-dir` inside the workspace.** The workspace's `.git` is hostile input.
 
+**Every call site to convert.** These are the git calls on build output today, in both adapters. Each moves to the trusted reader:
+- the SHA harvest `git rev-parse HEAD` (adapter :304, :514);
+- the commit list `git log --oneline` (:308, :518);
+- the `${sha}^` base lookup and the `codex-qc.mjs` spawn with `cwd: workspace`, both inside `runHostQc()` (:187-196).
+
+**Acceptance check:** after the change, grep the adapter for `git(workspace` and `cwd: workspace`. Matches are allowed only in code that runs before the container starts.
+
+**Order of operations after the build,** in both adapters. Each step fails closed.
+1. **Confirm the writer is gone.**
+   - Docker adapter: after `docker rm -f` (:503), run `docker inspect <name>`. It must report the container doesn't exist; otherwise throw.
+   - Host adapter: the child must have exited.
+   - Nothing below starts while a writer can still be live.
+2. Read HEAD as text, then open the trusted repo.
+3. **No-op check.** If HEAD equals the recorded `baseSha`, the result is `no change produced`. It is a distinct build failure, and QC is not run.
+4. Run QC on the trusted checkout, from the recorded base to `sha`.
+5. List the commits from the trusted repo.
+
+**The legacy host adapter refuses clones.** `claudeExecutorAdapter.launch()` throws if it is given a `cloneTarget`. That adapter runs the build on the host with no sandbox (:244), so a real repo must never go there.
+
 - **`openTrusted(workspace)`** reads build output safely.
   - Create a fresh repo in a host temp dir outside the workspace.
   - Copy `<workspace>/.git/objects` into it. Copy regular files only, refuse symlinks and anything else, and skip `objects/info/` (no alternates are followed).
@@ -58,16 +82,29 @@ After the container starts, **no host `git` or `node` process ever runs with `cw
   - Check out `sha` from the trusted repo into a fresh host temp dir, then run `codex-qc.mjs --base <baseSha>` there.
   - QC therefore reviews the whole build, from the recorded base to `sha`. That is exactly the range piece 2 exports.
   - `launch()` passes the recorded `baseSha` through. Temp dirs are deleted in every exit path.
+- **A durable QC record, kept outside the mount and written before cleanup.**
+  - Copy the report out of the temp checkout to `<workspace>.qc/<sha>.md`.
+  - Write `<workspace>.qc.json` with `{requestId, baseSha, sha, verdict, reportPath}`.
+  - This is the evidence for pass/fail check 4, and the only place the exporter gets the verdict from.
+- **The executor's settings stay out of the change.**
+  - Before the container starts, the host appends `.claude/` to `<workspace>/.git/info/exclude`, so the builder's instructed `git add -A` never stages the injected `.claude/settings.json`.
+  - A build that force-adds it is off-task, and the exporter refuses that change (piece 2).
 - **The scrub fails closed.**
   - List files with `git ls-files -z`. This runs on the host's own fresh clone, before the box exists, so it is trusted.
+  - Parse the NUL-separated output raw. The existing `git()` helper trims its output (adapter :46), so don't use it here.
   - Throw if listing fails or any removal fails.
-  - Re-list after removal and throw if any credential path is still present.
+  - Then check the **filesystem** for each flagged path: `lstat` must report it absent, or throw. Don't re-run `ls-files`, which still lists deleted files until the index changes.
   - A provisioning failure fails the build before the container starts.
 - **Tests.**
   - `tests/trusted-git.test.ts`: a workspace whose `.git/config` sets `core.fsmonitor` (and `diff.external`) to a command that writes a marker file. Reading HEAD, opening the trusted repo and diffing through it must never create the marker.
   - Same file: a symlink inside `objects/` is refused.
   - Same file: a two-commit build reviews from the recorded base, not `sha^`. Test the range computation, not Codex.
-  - Extend the scrub cases in `tests/clone-target.test.ts`: a credential file with a non-ASCII name is removed, and a removal failure throws.
+  - Extend the scrub cases in `tests/clone-target.test.ts`:
+    - A clone with tracked credential files, one with a non-ASCII name, provisions successfully and none of them survive.
+    - A removal failure throws.
+  - Cleanup refusal: when the container-removal check fails (inject the `docker` function), neither the harvest nor QC is ever called.
+  - No-op: HEAD equal to the recorded base returns `no change produced`, and QC is not called.
+  - Host adapter: given a clone target, it throws.
 
 ### Piece 2: `scripts/build-to-pr.mjs` (CLI) + `exportBuild()` in `scripts/lib/build-patch.mjs` + `tests/build-patch.test.ts`
 
@@ -83,6 +120,8 @@ The CLI runs on the host with David's own `gh` login. Nothing it uses ever enter
 3. **Bind to what QC reviewed.**
    - `readWorkspaceHead()` must equal `--sha`, the SHA from the approval ping.
    - In the trusted repo, the recorded `baseSha` must exist and be an ancestor of `--sha`.
+   - Read `<workspace>.qc.json`. Its `sha` and `baseSha` must equal `--sha` and the provision record's `baseSha`, and its `requestId` must match.
+   - Refuse if that record is missing or its verdict is `RECONSIDER` or `UNKNOWN`.
 4. **Build the patch** in the trusted repo with `diff --binary --no-ext-diff --no-textconv <baseSha> <sha>`. That is the same range QC reviewed. Refuse in any of these cases:
    - The patch is empty.
    - Any changed path matches no `--allow` glob.
@@ -99,7 +138,11 @@ The CLI runs on the host with David's own `gh` login. Nothing it uses ever enter
 6. **Without `--push`** (the default): print the **full diff** and the branch name, then stop. David reads that diff before anything leaves the machine, and that is the human gate.
 7. **With `--push`:**
    - Refuse if the branch already exists on the remote.
-   - Push, then run `gh pr create --draft --base main`. The PR body carries the request id, the reviewed SHA, the QC verdict and "built in the MC sandbox; CodexQC before merge".
+   - Push, then run `gh pr create --draft --base main`. The PR body carries:
+     - the request id;
+     - the reviewed SHA;
+     - the verdict from `<workspace>.qc.json`;
+     - "built in the MC sandbox; CodexQC before merge".
    - Print the PR URL.
    - **It never merges.** `main` on personal-OS is branch-protected (verified 2026-11-22).
 8. Delete temp dirs in every exit path.
@@ -109,6 +152,12 @@ The CLI runs on the host with David's own `gh` login. Nothing it uses ever enter
 - The test passes a `file://` scratch repo built the way `tests/clone-target.test.ts:112` does, then runs the full dry-run path (record, trusted read, patch, apply) offline.
 - No env var or CLI flag can switch the URL in production.
 - Unit-test the path policy (allow globs plus the always-refused list) and the argument validation as pure functions.
+- **The ordinary path, end to end.**
+  1. Provision a scratch clone and write the executor settings the way the adapter does.
+  2. Make a source change and run the instructed `git add -A` and commit.
+  3. Write the QC record.
+  4. Run the export dry run.
+  - It must succeed and carry only the source change.
 
 ### Piece 3: no preview deployments for sandbox branches, `vercel.json`
 
@@ -145,6 +194,8 @@ Claude can't start the executor. The auto-mode classifier blocks it by design, s
    - The task is a real bug, found 2026-11-22: `repoSlug()` strips `.git` before it strips the trailing slash.
    - The plan states only the symptom, so a correct fix proves the build read the existing code.
 4. **Wake the rig** following `docs/runbooks/on-demand-relay.md`.
+   - `DISPATCHER_EXECUTOR` must be `docker`.
+   - If the Docker preflight fails, stop. That counts as a failed attempt. **Never switch to the `claude` (host) executor**, even though the preflight message suggests it: that removes the sandbox.
    - Use `pm2 delete` + `pm2 start ecosystem.config.cjs`, not `pm2 restart`. A saved definition can predate the env change (`decisions.md`, the pm2 note).
    - Confirm the dispatcher log shows `clone=davidbillera-lab/personal-OS` and `cloned ... (scrubbed N credential file(s))`.
 5. **Wait for the approval ping.** It carries the SHA and the QC verdict. The workspace path is in the `[build] start` log line.
@@ -171,7 +222,7 @@ Record each measurement below with its evidence (a log line, the PR URL, a `mode
 | 1 | The clone happened | The dispatcher log `cloned davidbillera-lab/personal-OS` |
 | 2 | The fix is correct and needed the existing code | The diff changes `repoSlug()`, and the new test fails on the pre-fix code |
 | 3 | Tests ran inside the box | The build output shows the clone-target tests passing. `npm ci` time is recorded |
-| 4 | QC produced a real verdict | SHIP or FIX-FIRST, not UNKNOWN, and the report is on disk |
+| 4 | QC produced a real verdict on the whole build | SHIP or FIX-FIRST in `<workspace>.qc.json`, its `baseSha` equals the provision record's, and the report is at `<workspace>.qc/<sha>.md` |
 | 5 | The draft PR opened cleanly on personal-OS | The PR URL. `git apply` needed no manual help |
 | 6 | The rig slept on its own | Within 20 min of the reject, with no Docker "cannot connect" prompts during the run |
 | 7 | It was fast enough to be worth it | Wake to PR in 45 min or less, counting only machine time |
