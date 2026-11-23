@@ -1,6 +1,6 @@
 # Spike: one sandbox build against a real repo, landed as a draft PR
 
-**Status:** DRAFT, 2026-11-22. Gates: Codex attack (David runs it), then David's approval, then a fresh build window for piece 1, then CodexQC on that PR (David runs it), then the rig run.
+**Status:** DRAFT r2, 2026-11-23. CodexQC round 1 returned FIX-FIRST with 5 blockers (`.codex-qc/codex-qc-2026-11-23T05-57-37-469Z.md`). All 5 were confirmed against the code and are folded in below, along with one risk Codex missed (Vercel preview builds). Gates: CodexQC round 2 (David runs it), then David's approval, then a fresh build window for pieces 1-3, then CodexQC on that PR (David runs it), then the rig run.
 **Step 3 of 3** toward running Mission Control from the dashboard (`decisions.md` 2026-11-06). Steps 1 and 2 shipped in PRs #29, #32 and #33.
 **Why a spike and not the full step 3 spec:** step 3 rests on one unproven claim, that the rig's sandbox can build against an existing repo and hand back a reviewable PR. If that claim fails, the step 3 design changes. One run settles it before any multi-piece build gets specced.
 
@@ -21,48 +21,109 @@ David still approves at two points, as today: he wakes the rig, and he decides o
 | Wake on demand, sleep after 15 idle minutes | `scripts/lib/rig-wake.mjs`, `scripts/lib/idle-sleep.mjs`, `docs/runbooks/on-demand-relay.md` | Built. Not run since the dispatcher was switched off on 2026-10-17. |
 | npm inside the box | `docker/executor-proxy/allowlist.txt` allows `registry.npmjs.org` | Present. |
 
-## The one gap: no path from the box to a PR on the real repo
+## Two gaps
 
+**Gap A: no path from the box to a PR on the real repo.**
 - The approved push always goes to the private sandbox `davidbillera-lab/mc-spike-test` (`SANDBOX_REPO`, `dispatcher.mjs:99`). That is by design.
-- The box's git history can't be pushed to the real repo even if we wanted to. `provisionWorkspace()` deletes `.git` and re-inits after the scrub, so stale credential blobs don't survive (lines 96-106). The build commit therefore shares no ancestry with the real `main`, and GitHub can't open a PR from it.
-- What survives is enough to rebuild the change: the base commit's subject records the origin commit (`base: <slug> @ <12-hex>`), and `git diff base..reviewed` is exactly the build's change.
+- `provisionWorkspace()` deletes `.git` and re-inits after the scrub, so stale credential blobs don't survive (adapter :96-106). The build commit therefore shares no ancestry with the real `main`, and GitHub can't open a PR from it.
+- The fix is to carry the change across as a patch, on the host.
 
-**Fix (piece 1):** a host-side script that carries the change across as a patch. It never touches the dispatcher's push gate.
+**Gap B: the host already trusts the box's output.** These are pre-existing and present in every build since August. They're dormant only because the dispatcher is off, and they must be closed before it comes back on.
+- **Hostile `.git` (Critical).** `runHostQc()` (adapter :187) runs `git` and `codex-qc.mjs` with `cwd` set to the workspace and the host's env loaded. The box can write `.git/config`, so a `core.fsmonitor` or `diff.external` entry runs a command on the host with the dispatcher's credentials in its environment.
+- **QC reviews the last commit only.** It diffs `sha^..sha` (adapter :192). A build that makes two commits gets its first one through unreviewed.
+- **The scrub fails open.** `scrubClonedCredentials()` (adapter :67) returns `[]` when listing files fails and swallows removal errors. It also splits non-`-z` output, which mangles quoted (non-ASCII) filenames.
+- **Executor policy leaks into the build.** The adapter writes `.claude/settings.json` after the base commit (adapter :262, :486). personal-OS doesn't track `.claude/`, so a builder's `git add -A` commits that file into the change.
 
-## Scope: 1 code piece, 1 run, 1 report
+**Gap C (found while checking Codex's CI finding): Vercel builds every pushed branch.**
+- GitHub Actions is not the exposure. The only workflow is `secret-scan.yml` (gitleaks on push/PR, default `GITHUB_TOKEN`, runs no repo code).
+- Vercel's git integration is. It builds every pushed branch as a Preview deployment, which runs the branch's code (`npm install`, `next build`, config files) with Preview-scoped env vars.
+- The Next.js app also imports from `scripts/lib` (`app/api/queue/dispatch/route.ts:4`, `lib/owner-requests.ts:3`), so a "scripts-only" change can still run in that build.
 
-### Piece 1: `scripts/build-to-pr.mjs` + pure helpers in `scripts/lib/build-patch.mjs` + `tests/build-patch.test.ts` (one commit)
+## Scope: 3 code pieces, 1 run, 1 report
+
+All three code pieces happen in one build window, one commit per piece. `scripts/dispatcher.mjs` is not changed.
+
+### Piece 1: host-side hardening, `scripts/lib/trusted-git.mjs` (new) + `scripts/lib/claude-executor-adapter.mjs`
+
+After the container starts, **no host `git` or `node` process ever runs with `cwd` or `--git-dir` inside the workspace.** The workspace's `.git` is hostile input.
+
+- **`openTrusted(workspace)`** reads build output safely.
+  - Create a fresh repo in a host temp dir outside the workspace.
+  - Copy `<workspace>/.git/objects` into it. Copy regular files only, refuse symlinks and anything else, and skip `objects/info/` (no alternates are followed).
+  - Never read the workspace's config, hooks, `info/` or `packed-refs` through git.
+  - Every git call on the trusted repo also passes `-c core.fsmonitor= -c core.hooksPath=<empty dir> --no-ext-diff --no-textconv`, as a second layer.
+- **`readWorkspaceHead(workspace)`.** Resolve `.git/HEAD`, and the one loose ref it names, as plain text files: regular files only, and the result must be 40 hex characters. This replaces any `git rev-parse` in the workspace.
+- **A provision record outside the mount.** `provisionWorkspace()` writes `<workspace>.provision.json` beside the workspace with `{requestId, slug, originSha (full 40), baseSha}`. Only the workspace is mounted (adapter :440). Empty-init builds record `baseSha: null`, so QC keeps today's empty-tree base.
+- **`runHostQc({ workspace, sha, baseSha })`.**
+  - Check out `sha` from the trusted repo into a fresh host temp dir, then run `codex-qc.mjs --base <baseSha>` there.
+  - QC therefore reviews the whole build, from the recorded base to `sha`. That is exactly the range piece 2 exports.
+  - `launch()` passes the recorded `baseSha` through. Temp dirs are deleted in every exit path.
+- **The scrub fails closed.**
+  - List files with `git ls-files -z`. This runs on the host's own fresh clone, before the box exists, so it is trusted.
+  - Throw if listing fails or any removal fails.
+  - Re-list after removal and throw if any credential path is still present.
+  - A provisioning failure fails the build before the container starts.
+- **Tests.**
+  - `tests/trusted-git.test.ts`: a workspace whose `.git/config` sets `core.fsmonitor` (and `diff.external`) to a command that writes a marker file. Reading HEAD, opening the trusted repo and diffing through it must never create the marker.
+  - Same file: a symlink inside `objects/` is refused.
+  - Same file: a two-commit build reviews from the recorded base, not `sha^`. Test the range computation, not Codex.
+  - Extend the scrub cases in `tests/clone-target.test.ts`: a credential file with a non-ASCII name is removed, and a removal failure throws.
+
+### Piece 2: `scripts/build-to-pr.mjs` (CLI) + `exportBuild()` in `scripts/lib/build-patch.mjs` + `tests/build-patch.test.ts`
 
 The CLI runs on the host with David's own `gh` login. Nothing it uses ever enters the box.
 
-`node scripts/build-to-pr.mjs --workspace <path> --sha <reviewed sha> --repo <owner/repo> --request <mc request id> [--push]`
+`node scripts/build-to-pr.mjs --workspace <path> --sha <reviewed sha> --repo <owner/repo> --request <mc request id> --allow <glob> [--allow <glob> ...] [--push]`
 
-1. **Validate inputs.** `--sha` is 40 hex characters and `--request` is a UUID. `--repo` must be on `cloneAllowlist()`, so it reuses the same opt-in as the clone.
-2. **Bind to what QC reviewed.** The workspace `HEAD` must equal `--sha`, the SHA from the approval ping. Otherwise refuse.
-3. **Find the base.** Take `git rev-list --max-parents=0 HEAD`. There must be exactly one root commit, and its subject must match `^base: <repo> @ ([0-9a-f]{12}) ` (repo compared case-insensitively). Otherwise refuse.
-4. **Build the patch** with `git diff --binary <base> <sha>`. Refuse in any of these cases:
+1. **Validate inputs.**
+   - `--sha` is 40 hex characters and `--request` is a UUID.
+   - `--repo` must be on `cloneAllowlist()`.
+   - At least one `--allow` glob is required.
+2. **Bind to the provision record.** Read `<workspace>.provision.json`. Its `requestId` and `slug` must match `--request` and `--repo` (slug compared case-insensitively). Origin and base come only from this record, never from anything inside the workspace.
+3. **Bind to what QC reviewed.**
+   - `readWorkspaceHead()` must equal `--sha`, the SHA from the approval ping.
+   - In the trusted repo, the recorded `baseSha` must exist and be an ancestor of `--sha`.
+4. **Build the patch** in the trusted repo with `diff --binary --no-ext-diff --no-textconv <baseSha> <sha>`. That is the same range QC reviewed. Refuse in any of these cases:
    - The patch is empty.
-   - It touches a path `isCredentialPath()` flags.
-   - It touches anything under `.github/`. A same-repo branch runs Actions with the repo's secrets, so a build must not be able to change a workflow.
+   - Any changed path matches no `--allow` glob.
+   - Any changed path is on the always-refused list, whatever `--allow` says:
+     - credential paths (`isCredentialPath()`)
+     - `.claude/`, `.github/`
+     - `vercel.json`, `.gitleaks.toml`
+     - `package.json`, any lockfile
+     - `CLAUDE.md`, `AGENTS.md`
 5. **Rebuild the change on the real repo.**
-   - Clone the real repo into a fresh temp directory (`--filter=blob:none`).
-   - Resolve the 12-hex origin to exactly one commit. Refuse if it's ambiguous or missing.
-   - Run `git checkout -b mc-build-<request id> <origin>`, then `git apply --index --3way`, then commit. The commit message names the request id and the reviewed SHA.
-6. **Without `--push`** (the default): print the diffstat and the branch name, then stop. That is the dry run.
+   - Clone the real repo into a fresh host temp directory.
+   - Run `git checkout -b mc-build-<request id> <originSha>` using the full recorded SHA. Refuse if it's missing.
+   - Then `git apply --index --3way` and commit. The commit message names the request id and the reviewed SHA.
+6. **Without `--push`** (the default): print the **full diff** and the branch name, then stop. David reads that diff before anything leaves the machine, and that is the human gate.
 7. **With `--push`:**
    - Refuse if the branch already exists on the remote.
-   - Push the branch, then run `gh pr create --draft --base main`. The PR body carries the request id, the reviewed SHA and "built in the MC sandbox; CodexQC before merge".
+   - Push, then run `gh pr create --draft --base main`. The PR body carries the request id, the reviewed SHA, the QC verdict and "built in the MC sandbox; CodexQC before merge".
    - Print the PR URL.
-   - **It never merges.** `main` on personal-OS is branch-protected (verified 2026-11-22), so it also couldn't.
-8. Delete the temp clone in every exit path.
+   - **It never merges.** `main` on personal-OS is branch-protected (verified 2026-11-22).
+8. Delete temp dirs in every exit path.
 
-**Helpers to unit-test** (pure, no git, no network): `parseBaseSubject(subject, repo)`, `checkPatchPaths(paths)` (credential paths and `.github/` are refused) and `validateArgs(argv, allowlist)`.
+**Test seam.**
+- `exportBuild({ ..., cloneUrlFor })` takes the clone URL builder as a parameter. The CLI always passes the GitHub one.
+- The test passes a `file://` scratch repo built the way `tests/clone-target.test.ts:112` does, then runs the full dry-run path (record, trusted read, patch, apply) offline.
+- No env var or CLI flag can switch the URL in production.
+- Unit-test the path policy (allow globs plus the always-refused list) and the argument validation as pure functions.
 
-- Add one integration test that builds a real scratch repo the way `tests/clone-target.test.ts:112` does, makes a build commit, and checks the dry run's diffstat.
-- No network, no push.
-- Run vitest from the PowerShell tool with `Set-Location C:\Users\david\Documents\personal-os`. Lowercase `c:` breaks it.
+### Piece 3: no preview deployments for sandbox branches, `vercel.json`
 
-### Piece 2: the rig run (David drives; Claude can guide from a session)
+- **Change.** Add `"git": { "deploymentEnabled": { "mc-build-*": false } }`.
+  - The builder checks the key against Vercel's docs before committing.
+  - This must be merged to `main` and deployed before the run.
+  - The exporter builds the branch from `main` plus a patch that can't touch `vercel.json`, so the branch carries `main`'s setting.
+- **Effect.** Together with Gap C's finding about Actions, pushing a sandbox branch runs no repo code anywhere, and the `--allow` list is defense in depth.
+- **Cost.** Sandbox PRs get no preview URL.
+
+**For all three pieces:** run vitest from the PowerShell tool with `Set-Location C:\Users\david\Documents\personal-os`. Lowercase `c:` breaks it.
+
+### Piece 4: the rig run (David drives; Claude can guide from a session)
+
+Pieces 1-3 must be merged, and piece 3 deployed, before step 2.
 
 Claude can't start the executor. The auto-mode classifier blocks it by design, so David runs steps 3-6.
 
@@ -87,14 +148,17 @@ Claude can't start the executor. The auto-mode classifier blocks it by design, s
    - Use `pm2 delete` + `pm2 start ecosystem.config.cjs`, not `pm2 restart`. A saved definition can predate the env change (`decisions.md`, the pm2 note).
    - Confirm the dispatcher log shows `clone=davidbillera-lab/personal-OS` and `cloned ... (scrubbed N credential file(s))`.
 5. **Wait for the approval ping.** It carries the SHA and the QC verdict. The workspace path is in the `[build] start` log line.
-6. **Run `build-to-pr.mjs`**: a dry run first, then `--push`. David can run it, or Claude in a session, since it only pushes a feature branch and opens a draft PR.
+6. **Run `build-to-pr.mjs`** with `--allow scripts/lib/clone-target.mjs --allow "tests/**"`.
+   - Do a dry run first. David reads the full diff it prints.
+   - Then run it with `--push`. David can run it, or Claude in a session, since it only pushes a feature branch and opens a draft PR.
+   - After the push, confirm Vercel created **no** deployment for `mc-build-<id>`.
 7. **Reject the request** with `node scripts/rig-test.mjs reject <id>`. The build's copy must not also go to `mc-spike-test`, and an `awaiting_approval` row keeps the rig awake.
 8. **Turn it back off.**
    - Remove `DISPATCHER_CLONEABLE_REPOS` from the rig config.
    - Confirm the rig slept: the dispatcher exited, the executor network is down, and Docker Desktop quit.
 9. The resulting PR is real work. It gets CodexQC like any other PR and is David's to merge or close.
 
-### Piece 3: spike report `specs/2026-11-2x-step3-spike-report.md` + `decisions.md` entry + MC status
+### Piece 5: spike report `specs/2026-11-2x-step3-spike-report.md` + `decisions.md` entry + MC status
 
 Record each measurement below with its evidence (a log line, the PR URL, a `model_costs` row).
 
@@ -111,8 +175,16 @@ Record each measurement below with its evidence (a log line, the PR URL, a `mode
 | 5 | The draft PR opened cleanly on personal-OS | The PR URL. `git apply` needed no manual help |
 | 6 | The rig slept on its own | Within 20 min of the reject, with no Docker "cannot connect" prompts during the run |
 | 7 | It was fast enough to be worth it | Wake to PR in 45 min or less, counting only machine time |
+| 8 | Nothing ran sandbox code outside the box | No Vercel deployment for the branch. Piece 1's hostile-`.git` test passes on the rig |
 
-**Also record** (these don't decide pass or fail): total wall time, `npm ci` time, the CodexQC cost from `model_costs`, every manual intervention, and any Docker nag.
+**Also record** (these don't decide pass or fail):
+- total wall time;
+- `npm ci` time;
+- the CodexQC cost from `model_costs`;
+- every manual intervention and any Docker nag;
+- **every founder-dependent step**: David's `gh` identity, manual SQL, the uncommitted pm2 edit, log reading, the reject command.
+
+Before any of this goes into the dispatcher, the step 3 spec must replace each of those with a committed config or a documented service identity.
 
 **Stop-loss:** two run attempts at most. If both fail, for any reason, stop and write the report. The answer is then "redesign", not "debug the rig for a week".
 
@@ -132,23 +204,27 @@ Record each measurement below with its evidence (a log line, the PR URL, a `mode
 ## Decisions made in this spec (David can override)
 
 1. **The dispatcher comes back on for this one run, then goes off again.** The 2026-10-17 decision ("dispatcher stays off, no autonomous builds") stands until the report says otherwise. Rio keeps watching.
-2. **The PR path is a separate host-side script, not a change to the dispatcher's push gate.** The gate's "never a portfolio repo" guarantee stays intact. Folding the script into the gate is a step 3 decision.
+2. **The PR path is a separate host-side script, not a change to the dispatcher's push gate.** The gate's "never a portfolio repo" guarantee stays intact. Folding the script into the gate is a step 3 decision. Piece 1 changes the adapter's host side, because Gap B is live risk the moment the dispatcher runs.
 3. **The test target is personal-OS.** It's public, so cloning it exposes nothing new, and it's the repo step 3 will mostly build against. `main` is protected.
 
 ## Out of scope
 
-- Any dispatcher code change.
+- Any change to `scripts/dispatcher.mjs`.
 - Committing `DISPATCHER_CLONEABLE_REPOS`.
 - Private repos.
 - Dashboard UI.
 - Notifications.
 - Running the dispatcher as a background service.
 
-**Stop and re-scope** if piece 1 runs past one build session, or if the run needs a dispatcher code change to get through.
+**Stop and re-scope** if pieces 1-3 run past one build session, or if the run needs a `dispatcher.mjs` change to get through.
 
-## Rules for the build window (piece 1)
+## Rules for the build window (pieces 1-3)
 
-- Read `~/.claude/CLAUDE.md`, the project `CLAUDE.md`, and this spec. Read only `scripts/lib/clone-target.mjs`, `scripts/lib/claude-executor-adapter.mjs:60-115` and `tests/clone-target.test.ts`.
+- Read `~/.claude/CLAUDE.md`, the project `CLAUDE.md`, and this spec. Read only these:
+  - `scripts/lib/clone-target.mjs`
+  - `scripts/lib/claude-executor-adapter.mjs` (provisioning :60-115, `runHostQc` :187-210, the two `launch()` paths around :259 and :483)
+  - `tests/clone-target.test.ts`
+  - `vercel.json`
 - Don't import `scripts/dispatcher.mjs`. Its env bootstrap loads production credentials. Use `node --check` only.
 - Never read `.env*`, `settings.local.json` or `.mcp.json`. Never print process command lines.
-- Branch `build/step3-spike-build-to-pr`, one commit, open a PR, **do not merge**. David runs CodexQC on it.
+- Branch `build/step3-spike-build-to-pr`, one commit per piece, open a PR, **do not merge**. David runs CodexQC on it.
