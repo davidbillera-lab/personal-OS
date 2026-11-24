@@ -1,7 +1,7 @@
 // Step 3 spike, piece 1: after the sandbox exits, <workspace>/.git is hostile input.
 // No host git/node call may ever run with its cwd or --git-dir inside the workspace.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync, readFileSync, symlinkSync, readdirSync, unlinkSync, lstatSync } from 'fs'
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync, readFileSync, symlinkSync, readdirSync, unlinkSync, lstatSync, chmodSync, copyFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
@@ -88,7 +88,7 @@ describe('hostile workspace .git', () => {
       expect(readFileSync(join(t.dir, 'b.txt'), 'utf8').trim()).toBe('two')
     } finally { t.close() }
     expect(existsSync(marker), 'hostile .git/config ran a command on the host').toBe(false)
-  })
+  }, 30_000)
 
   it('the real post-build flow (teardown check, harvest, QC with a stub script, commit list) never fires it', () => {
     const script = stubQcScript()
@@ -159,6 +159,21 @@ describe('trusted reader refusals', () => {
     } finally { t.close() }
     expect(readdirSync(outside)).toEqual([])
   }, 30_000)
+
+  it('refuses a swapped object: the file stored under the base SHA holds another commit', () => {
+    const objPath = (s: string) => join(ws, '.git', 'objects', s.slice(0, 2), s.slice(2))
+    const build1 = g(ws, ['rev-parse', `${sha}^`])
+    chmodSync(objPath(baseSha), 0o644)
+    copyFileSync(objPath(build1), objPath(baseSha))
+    // Positive control: ordinary git believes the swap (no re-hash on read).
+    const fake = spawnSync('git', ['-C', ws, '-c', 'core.fsmonitor=', 'cat-file', '-p', baseSha], { encoding: 'utf8' }).stdout
+    expect(fake).toMatch(/^parent /m)
+    expect(() => openTrusted(ws)).toThrow(/object integrity check/)
+  })
+
+  it('fails "output over budget" when declared object sizes inflate past the budget', () => {
+    expect(() => openTrusted(ws, { budget: { ...BUDGET, inflatedBytes: 10 } })).toThrow(/inflate past/)
+  })
 
   it('fails the build with "output over budget" past the object budget', () => {
     expect(() => openTrusted(ws, { budget: { ...BUDGET, objectsFiles: 2 } })).toThrow(OverBudgetError)

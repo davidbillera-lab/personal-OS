@@ -15,7 +15,7 @@
 
 import { spawnSync } from 'child_process'
 import {
-  mkdtempSync, mkdirSync, lstatSync, readdirSync, copyFileSync, readFileSync, writeFileSync, rmSync,
+  mkdtempSync, mkdirSync, lstatSync, opendirSync, copyFileSync, readFileSync, writeFileSync, rmSync,
 } from 'fs'
 import { join, resolve, relative, isAbsolute } from 'path'
 import { tmpdir } from 'os'
@@ -24,6 +24,8 @@ import { tmpdir } from 'os'
 export const BUDGET = {
   objectsBytes: 200 * 1024 * 1024,
   objectsFiles: 50_000,
+  inflatedBytes: 1024 * 1024 * 1024, // declared (uncompressed) object sizes, summed
+
   checkoutBytes: 500 * 1024 * 1024,
   patchBytes: 5 * 1024 * 1024,
   gitTimeoutMs: 120_000,
@@ -148,27 +150,47 @@ function copyObjects(src, dst, budget) {
   let bytes = 0
   const walk = (from, to, depth) => {
     mkdirSync(to, { recursive: true })
-    for (const name of readdirSync(from)) {
-      if (depth === 0 && name === 'info') continue // no alternates, no commit-graph
-      const f = join(from, name)
-      const st = lstatSync(f)
-      if (st.isDirectory()) {
-        if (depth > 0 || !OBJECT_DIR_RE.test(name)) {
-          throw new Error(`refusing unexpected directory in workspace objects: ${relative(src, f)}`)
-        }
-        walk(f, join(to, name), depth + 1)
-        continue
+    // Iterate, don't readdirSync: a huge directory trips the file budget before it is listed.
+    const it = opendirSync(from)
+    try { for (let ent; (ent = it.readSync()) !== null;) visit(from, to, depth, ent.name) } finally { it.closeSync() }
+  }
+  const visit = (from, to, depth, name) => {
+    if (depth === 0 && name === 'info') return // no alternates, no commit-graph
+    const f = join(from, name)
+    const st = lstatSync(f)
+    if (st.isDirectory()) {
+      if (depth > 0 || !OBJECT_DIR_RE.test(name)) {
+        throw new Error(`refusing unexpected directory in workspace objects: ${relative(src, f)}`)
       }
-      if (!st.isFile()) throw new Error(`refusing non-regular file in workspace objects: ${relative(src, f)}`)
-      if (depth === 0) throw new Error(`refusing unexpected file in workspace objects: ${name}`)
-      files += 1
-      bytes += st.size
-      if (files > budget.objectsFiles) throw new OverBudgetError(`more than ${budget.objectsFiles} object files`)
-      if (bytes > budget.objectsBytes) throw new OverBudgetError(`objects over ${budget.objectsBytes} bytes`)
-      copyFileSync(f, join(to, name))
+      return walk(f, join(to, name), depth + 1)
     }
+    if (!st.isFile()) throw new Error(`refusing non-regular file in workspace objects: ${relative(src, f)}`)
+    if (depth === 0) throw new Error(`refusing unexpected file in workspace objects: ${name}`)
+    files += 1
+    bytes += st.size
+    if (files > budget.objectsFiles) throw new OverBudgetError(`more than ${budget.objectsFiles} object files`)
+    if (bytes > budget.objectsBytes) throw new OverBudgetError(`objects over ${budget.objectsBytes} bytes`)
+    copyFileSync(f, join(to, name))
   }
   walk(src, dst, 0)
+}
+
+// Ordinary git reads do NOT re-hash objects: a box that rewrote the file stored under the
+// recorded base would be believed. So, before anything reads a commit:
+//   1. sum the DECLARED object sizes (headers only, nothing inflated) against the budget —
+//      git never inflates past a declared size, so this bounds what fsck will allocate;
+//   2. fsck re-hashes every object and fails on any mismatch.
+// minimal: no OS-level memory cap on these git processes (Windows host). Upgrade path: run
+// the trusted reader in its own throwaway, credential-free container with a memory limit.
+function verifyObjects(dir, budget) {
+  let inflated = 0
+  for (const s of hardGit(dir, ['cat-file', '--batch-check=%(objectsize)', '--batch-all-objects']).split('\n')) {
+    inflated += Number(s) || 0
+    if (inflated > budget.inflatedBytes) throw new OverBudgetError(`objects inflate past ${budget.inflatedBytes} bytes`)
+  }
+  try { hardGit(dir, ['fsck', '--full', '--no-dangling', '--no-progress']) } catch (e) {
+    throw new Error(`build output failed the object integrity check: ${String(e.message).slice(0, 300)}`)
+  }
 }
 
 function isInside(child, parent) {
@@ -194,6 +216,7 @@ export function openTrusted(workspace, { budget = BUDGET } = {}) {
     mkdirSync(dir)
     hardGit(dir, ['init', '-q'])
     copyObjects(objects, join(dir, '.git', 'objects'), budget)
+    verifyObjects(dir, budget)
   } catch (e) { close(); throw e }
 
   const git = (args, opts) => hardGit(dir, args, opts)
