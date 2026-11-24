@@ -117,11 +117,13 @@ export function checkQcRecord(rec, { requestId, baseSha, sha }) {
 /**
  * Dry run by default: returns { branch, diff, paths, verdict } and pushes nothing.
  * With push: true, also pushes the branch and opens a draft PR; returns { ..., prUrl }.
- * `cloneUrlFor` is the test seam; the CLI always passes githubCloneUrl.
+ * `cloneUrlFor` and `gh` are test seams; the CLI always passes githubCloneUrl and real gh.
  */
+const runGh = (args, cwd) => spawnSync('gh', args, { cwd, encoding: 'utf8', timeout: 120000, windowsHide: true })
+
 export function exportBuild({
   workspace, sha, repo, request, allow, push = false,
-  cloneUrlFor, allowlist = cloneAllowlist(), budget = BUDGET,
+  cloneUrlFor, allowlist = cloneAllowlist(), budget = BUDGET, gh = runGh,
 }) {
   if (typeof cloneUrlFor !== 'function') throw new Error('exportBuild: cloneUrlFor is required')
   const args = validateArgs({ workspace, sha, repo, request, allow }, allowlist)
@@ -176,10 +178,23 @@ export function exportBuild({
     // 6. Dry run stops here. The operator reads the full diff before anything leaves.
     if (!push) return result
 
-    // 7. Push + draft PR. Never merges.
+    // 7. Push + draft PR. Never merges. A retry after a failed `gh pr create` finds the branch
+    // already pushed: it is reused only if it is this same export (same tree, on the origin).
     const remote = rg(['ls-remote', '--heads', 'origin', `refs/heads/${branch}`])
-    if (remote) throw new Error(`branch ${branch} already exists on the remote`)
-    rg(['push', '-q', 'origin', `HEAD:refs/heads/${branch}`], { timeoutMs: 300000 })
+    if (remote) {
+      rg(['fetch', '-q', 'origin', `refs/heads/${branch}`])
+      const [, ...parents] = rg(['rev-list', '--parents', '-n', '1', 'FETCH_HEAD']).split(' ')
+      const same = rg(['rev-parse', 'FETCH_HEAD^{tree}']) === rg(['rev-parse', 'HEAD^{tree}'])
+        && parents.length === 1 && parents[0] === prov.originSha
+      if (!same) throw new Error(`branch ${branch} already exists on the remote with different content`)
+    } else {
+      rg(['push', '-q', 'origin', `HEAD:refs/heads/${branch}`], { timeoutMs: 300000 })
+    }
+    const ghFail = (what, r) => new Error(`gh ${what} failed: ${(r.stderr || r.error?.message || '').trim().slice(0, 300)}`)
+    const open = gh(['pr', 'list', '--repo', args.slug, '--head', branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url'], real)
+    if (open.status !== 0) throw ghFail('pr list', open)
+    const existingUrl = (open.stdout || '').trim()
+    if (existingUrl) return { ...result, prUrl: existingUrl }
     const body = [
       `Request: ${args.requestId}`,
       `Reviewed SHA: ${args.sha}`,
@@ -187,11 +202,11 @@ export function exportBuild({
       '',
       'Built in the MC sandbox; CodexQC before merge.',
     ].join('\n')
-    const pr = spawnSync('gh', [
+    const pr = gh([
       'pr', 'create', '--draft', '--base', 'main', '--head', branch, '--repo', args.slug,
       '--title', `mc-build ${args.requestId}`, '--body', body,
-    ], { cwd: real, encoding: 'utf8', timeout: 120000, windowsHide: true })
-    if (pr.status !== 0) throw new Error(`gh pr create failed: ${(pr.stderr || pr.error?.message || '').trim().slice(0, 300)}`)
+    ], real)
+    if (pr.status !== 0) throw ghFail('pr create', pr)
     return { ...result, prUrl: (pr.stdout || '').trim() }
   } finally {
     // 8. Temp dirs go in every exit path.

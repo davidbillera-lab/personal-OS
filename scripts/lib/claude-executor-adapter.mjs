@@ -157,10 +157,15 @@ export function provisionWorkspace(workspace, cloneTarget, { requestId = null } 
 // Inject the executor's permission policy, and keep it OUT of the change: `.claude/` goes in
 // .git/info/exclude first, so the builder's instructed `git add -A` never stages it. A build
 // that force-adds it anyway is off-task, and build-to-pr refuses that change. Pre-container.
+// If the source repo TRACKS .claude/settings.json, exclude has no effect on it, so it is also
+// marked skip-worktree: `git add -A` then never stages the overwrite.
 export function injectExecutorSettings(workspace) {
   const info = join(workspace, '.git', 'info')
   mkdirSync(info, { recursive: true })
   appendFileSync(join(info, 'exclude'), '\n.claude/\n')
+  if (git(workspace, ['ls-files', '--', '.claude/settings.json'])) {
+    git(workspace, ['update-index', '--skip-worktree', '--', '.claude/settings.json'])
+  }
   mkdirSync(join(workspace, '.claude'), { recursive: true })
   writeFileSync(join(workspace, '.claude', 'settings.json'), JSON.stringify(WORKSPACE_SETTINGS, null, 2))
 }

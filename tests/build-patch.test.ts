@@ -175,6 +175,43 @@ describe('exportBuild dry run (file:// scratch repo)', () => {
     expect(() => run(sha)).toThrow(/not SHIP or FIX-FIRST/)
   }, 60_000)
 
+  it('keeps the injected settings out of the patch when the source repo TRACKS .claude/settings.json', () => {
+    mkdirSync(join(source, '.claude'))
+    writeFileSync(join(source, '.claude', 'settings.json'), '{"shared":true}\n')
+    g(source, ['add', '-A']); g(source, ['commit', '-q', '-m', 'shared settings'])
+    rmSync(ws, { recursive: true, force: true })
+    provisionWorkspace(ws, { slug: SLUG, url: sourceUrl }, { requestId: REQ })
+    injectExecutorSettings(ws)
+    const res = run(build())
+    expect(res.paths).toEqual(['src/lib.js'])
+  }, 60_000)
+
+  it('--push: a failed gh pr create can be retried; the pushed branch is reused, not refused', () => {
+    const sha = build()
+    const calls: string[] = []
+    const gh = (createOk: boolean) => (a: string[]) => {
+      calls.push(a[1])
+      if (a[1] === 'list') return { status: 0, stdout: '', stderr: '' }
+      return createOk ? { status: 0, stdout: 'https://example.test/pr/1\n', stderr: '' } : { status: 1, stdout: '', stderr: 'HTTP 502' }
+    }
+    expect(() => run(sha, { push: true, gh: gh(false) })).toThrow(/gh pr create failed: HTTP 502/)
+    g(source, ['rev-parse', `refs/heads/mc-build-${REQ}`]) // the branch did get pushed
+    expect(run(sha, { push: true, gh: gh(true) }).prUrl).toBe('https://example.test/pr/1')
+    expect(calls).toEqual(['list', 'create', 'list', 'create'])
+    // An open PR already there: returned as-is, nothing created.
+    const listed = (a: string[]) => (calls.push(a[1]), { status: 0, stdout: 'https://example.test/pr/1\n', stderr: '' })
+    expect(run(sha, { push: true, gh: listed }).prUrl).toBe('https://example.test/pr/1')
+    expect(calls.slice(4)).toEqual(['list'])
+  }, 120_000)
+
+  it('--push refuses an existing remote branch that holds different content', () => {
+    const sha = build()
+    const other = g(source, ['commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'not this export'])
+    g(source, ['update-ref', `refs/heads/mc-build-${REQ}`, other])
+    const gh = () => { throw new Error('gh must not be called') }
+    expect(() => run(sha, { push: true, gh })).toThrow(/already exists on the remote with different content/)
+  }, 60_000)
+
   it('refuses a provision record for another request or repo', () => {
     const sha = build()
     expect(() => run(sha, { request: '99999999-2222-4333-8444-555555555555' })).toThrow(/different request/)
