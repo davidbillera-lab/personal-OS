@@ -197,6 +197,28 @@ describe('provisionWorkspace (integration)', () => {
     rmSync(root, { recursive: true, force: true })
   }, 30_000)
 
+  it('host global git ignores cannot drop tracked files from the base commit', () => {
+    const { root, source } = credFixture()
+    writeFileSync(join(source, 'tooling.json'), '{}\n')
+    g(source, ['add', '-A', '-f'])
+    g(source, ['commit', '-m', 'tooling'])
+    const gcfg = join(root, 'gitconfig')
+    writeFileSync(join(root, 'global-ignore'), 'tooling.json\n')
+    writeFileSync(gcfg, `[core]\n\texcludesFile = ${join(root, 'global-ignore').replace(/\\/g, '/')}\n`)
+    const prev = process.env.GIT_CONFIG_GLOBAL
+    process.env.GIT_CONFIG_GLOBAL = gcfg
+    try {
+      const ws = join(root, 'ws')
+      provisionWorkspace(ws, { slug: 'test/fixture', url: pathToFileURL(source).href })
+      expect(g(ws, ['ls-files']).stdout.split('\n')).toContain('tooling.json')
+      expect(g(ws, ['status', '--porcelain']).stdout.trim()).toBe('')
+    } finally {
+      if (prev === undefined) delete process.env.GIT_CONFIG_GLOBAL
+      else process.env.GIT_CONFIG_GLOBAL = prev
+    }
+    rmSync(root, { recursive: true, force: true })
+  }, 30_000)
+
   it('the scrub FAILS CLOSED: a removal error throws, and so does a file that is still present', () => {
     const { root, source } = credFixture()
     const ws = join(root, 'ws')

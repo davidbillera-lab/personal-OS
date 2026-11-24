@@ -146,6 +146,8 @@ export function provisionWorkspace(workspace, cloneTarget, { requestId = null } 
   const r2 = spawnSync('git', ['-C', workspace, 'init'], { encoding: 'utf8' })
   if (r2.status !== 0) throw new Error(`git init after scrub failed: ${(r2.stderr || '').trim()}`)
   gitIdentity(workspace)
+  // The host's global git ignore must not drop tracked files from the base commit (the box has none).
+  git(workspace, ['config', 'core.excludesFile', join(workspace, '.git', 'info', 'no-global-excludes')])
   git(workspace, ['add', '-A'])
   git(workspace, ['commit', '-m', `base: ${cloneTarget.slug} @ ${originSha.slice(0, 12)} (${removed.length} credential file(s) stripped)`])
 
