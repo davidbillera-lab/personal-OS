@@ -159,7 +159,9 @@ export function exportBuild({
 
     // 5. Rebuild the change on a fresh clone of the real repo, from the recorded origin.
     const real = join(tmp, 'repo')
-    const c = spawnSync('git', ['clone', '-q', cloneUrlFor(args.slug), real], {
+    // Blobless + no checkout: history metadata only; the checkout below fetches just the
+    // origin tree's blobs. A server without filter support ignores the flag (full clone).
+    const c = spawnSync('git', ['clone', '-q', '--filter=blob:none', '--no-checkout', cloneUrlFor(args.slug), real], {
       encoding: 'utf8', timeout: 300000, windowsHide: true,
     })
     if (c.status !== 0) throw new Error(`clone of ${args.slug} failed: ${(c.stderr || c.error?.message || '').trim().slice(0, 300)}`)
