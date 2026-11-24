@@ -184,6 +184,23 @@ describe('provisionWorkspace (integration)', () => {
     rmSync(root, { recursive: true, force: true })
   }, 30_000)
 
+  it('builder `git add -A` never stages re-created scrubbed files, .tmp-* dirs, or protected-file churn', () => {
+    const { root, source } = credFixture()
+    writeFileSync(join(source, 'package.json'), '{"a":1}\n')
+    g(source, ['add', '-A', '-f'])
+    g(source, ['commit', '-m', 'pkg'])
+    const ws = join(root, 'ws')
+    provisionWorkspace(ws, { slug: 'test/fixture', url: pathToFileURL(source).href })
+    writeFileSync(join(ws, '.env.local'), 'A=1\n')
+    mkdirSync(join(ws, '.tmp-x'), { recursive: true })
+    writeFileSync(join(ws, '.tmp-x', 'f.txt'), 'x\n')
+    writeFileSync(join(ws, 'package.json'), '{"a":2}\n')
+    writeFileSync(join(ws, 'index.js'), 'export const x = 2\n')
+    g(ws, ['add', '-A'])
+    expect(g(ws, ['diff', '--cached', '--name-only']).stdout.trim()).toBe('index.js')
+    rmSync(root, { recursive: true, force: true })
+  }, 30_000)
+
   it('the scrub FAILS CLOSED: a removal error throws, and so does a file that is still present', () => {
     const { root, source } = credFixture()
     const ws = join(root, 'ws')

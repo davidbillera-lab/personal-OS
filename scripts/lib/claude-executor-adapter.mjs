@@ -16,6 +16,7 @@ import { spawnSync } from 'child_process'
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, lstatSync, appendFileSync, readdirSync, statSync, copyFileSync, unlinkSync } from 'fs'
 import { join, dirname, resolve } from 'path'
 import { isCredentialPath } from './clone-target.mjs'
+import { alwaysRefused } from './build-patch.mjs'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import { sanitizeForMC } from './sanitize-result.mjs'
@@ -148,6 +149,19 @@ export function provisionWorkspace(workspace, cloneTarget, { requestId = null } 
   gitIdentity(workspace)
   git(workspace, ['add', '-A'])
   git(workspace, ['commit', '-m', `base: ${cloneTarget.slug} @ ${originSha.slice(0, 12)} (${removed.length} credential file(s) stripped)`])
+
+  // The builder is told to `git add -A`. Keep scrubbed files, scratch dirs and churn on
+  // protected tracked files (build-to-pr would refuse them) out of its commit.
+  const esc = (p) => '/' + p.replace(/[\\*?[]/g, '\\$&').replace(/^\/([#!])/, '/\\$1')
+  mkdirSync(join(workspace, '.git', 'info'), { recursive: true })
+  appendFileSync(join(workspace, '.git', 'info', 'exclude'), `\n${removed.map(esc).join('\n')}\n/.tmp-*/\n`)
+  const tracked = (git(workspace, ['ls-files', '-z']).split('\0')).filter((p) => p && alwaysRefused(p))
+  if (tracked.length) {
+    const u = spawnSync('git', ['-C', workspace, 'update-index', '--skip-worktree', '-z', '--stdin'], {
+      encoding: 'utf8', input: tracked.join('\0') + '\0', timeout: BUDGET.gitTimeoutMs,
+    })
+    if (u.status !== 0) throw new Error(`skip-worktree failed: ${(u.stderr || '').trim()}`)
+  }
 
   const baseSha = git(workspace, ['rev-parse', 'HEAD'])
   writeJson(provisionRecordPath(workspace), { requestId, slug: cloneTarget.slug, originSha, baseSha })
