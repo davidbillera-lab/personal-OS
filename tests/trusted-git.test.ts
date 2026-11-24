@@ -1,7 +1,7 @@
 // Step 3 spike, piece 1: after the sandbox exits, <workspace>/.git is hostile input.
 // No host git/node call may ever run with its cwd or --git-dir inside the workspace.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync, readFileSync, symlinkSync, readdirSync, unlinkSync } from 'fs'
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync, readFileSync, symlinkSync, readdirSync, unlinkSync, lstatSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
@@ -133,6 +133,32 @@ describe('trusted reader refusals', () => {
       expect(() => openTrusted(ws)).toThrow(/refusing non-regular file/)
     } finally { unlinkSync(link); rmSync(target, { recursive: true, force: true }) }
   })
+
+  it('refuses directories outside git\'s object layout (bounded walk)', () => {
+    mkdirSync(join(ws, '.git', 'objects', 'junk'))
+    expect(() => openTrusted(ws)).toThrow(/unexpected directory in workspace objects: junk/)
+    rmSync(join(ws, '.git', 'objects', 'junk'), { recursive: true })
+    const loose = readdirSync(join(ws, '.git', 'objects')).find((n) => /^[0-9a-f]{2}$/.test(n))!
+    mkdirSync(join(ws, '.git', 'objects', loose, 'a', 'b'), { recursive: true })
+    expect(() => openTrusted(ws)).toThrow(/unexpected directory in workspace objects/)
+  })
+
+  it('a committed .codex-qc symlink cannot redirect host QC outside the checkout', () => {
+    const outside = join(root, 'outside')
+    mkdirSync(outside)
+    const blob = spawnSync('git', ['-C', ws, 'hash-object', '-w', '--stdin'], { input: fwd(outside), encoding: 'utf8' }).stdout.trim()
+    g(ws, ['update-index', '--add', '--cacheinfo', `120000,${blob},.codex-qc`])
+    g(ws, ['commit', '-q', '-m', 'evil link'])
+    const linkSha = g(ws, ['rev-parse', 'HEAD'])
+    const t = openTrusted(ws)
+    try {
+      expect(t.git(['config', 'core.symlinks'])).toBe('false') // applied on every platform
+      const res = runHostQc({ workspace: ws, sha: linkSha, baseSha, trusted: t, script: stubQcScript() })
+      expect(lstatSync(join(t.dir, '.codex-qc')).isSymbolicLink()).toBe(false)
+      expect(res.verdict).toBe('UNKNOWN') // QC could not make its report dir: fails closed
+    } finally { t.close() }
+    expect(readdirSync(outside)).toEqual([])
+  }, 30_000)
 
   it('fails the build with "output over budget" past the object budget', () => {
     expect(() => openTrusted(ws, { budget: { ...BUDGET, objectsFiles: 2 } })).toThrow(OverBudgetError)

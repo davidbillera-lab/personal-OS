@@ -61,6 +61,10 @@ function hardenFlags() {
     '-c', 'gc.auto=0', // the copied objects are unreferenced; never let auto-gc prune them
     '-c', 'core.longpaths=true',
     '-c', 'advice.detachedHead=false',
+    // Checked-out content is untrusted too: a committed symlink (e.g. `.codex-qc` or
+    // CLAUDE.md pointing outside the checkout) would redirect host QC's reads and writes.
+    // With this off, git writes every symlink as a plain file holding the target text.
+    '-c', 'core.symlinks=false',
   ]
 }
 
@@ -135,7 +139,10 @@ export function readWorkspaceHead(workspace) {
   return sha
 }
 
-// Copy <src> (objects/) into <dst>, regular files only, under budget.
+// Copy <src> (objects/) into <dst>, regular files only, under budget. Only git's own layout
+// is accepted — objects/pack/ and objects/<2 hex>/, one level deep, files only — so the
+// walk is bounded at 257 directories and depth 1 whatever the box wrote.
+const OBJECT_DIR_RE = /^(pack|[0-9a-f]{2})$/
 function copyObjects(src, dst, budget) {
   let files = 0
   let bytes = 0
@@ -145,8 +152,15 @@ function copyObjects(src, dst, budget) {
       if (depth === 0 && name === 'info') continue // no alternates, no commit-graph
       const f = join(from, name)
       const st = lstatSync(f)
-      if (st.isDirectory()) { walk(f, join(to, name), depth + 1); continue }
+      if (st.isDirectory()) {
+        if (depth > 0 || !OBJECT_DIR_RE.test(name)) {
+          throw new Error(`refusing unexpected directory in workspace objects: ${relative(src, f)}`)
+        }
+        walk(f, join(to, name), depth + 1)
+        continue
+      }
       if (!st.isFile()) throw new Error(`refusing non-regular file in workspace objects: ${relative(src, f)}`)
+      if (depth === 0) throw new Error(`refusing unexpected file in workspace objects: ${name}`)
       files += 1
       bytes += st.size
       if (files > budget.objectsFiles) throw new OverBudgetError(`more than ${budget.objectsFiles} object files`)
