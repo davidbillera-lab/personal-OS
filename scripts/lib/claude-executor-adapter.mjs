@@ -149,6 +149,11 @@ export function provisionWorkspace(workspace, cloneTarget, { requestId = null } 
   git(workspace, ['add', '-A'])
   git(workspace, ['commit', '-m', `base: ${cloneTarget.slug} @ ${originSha.slice(0, 12)} (${removed.length} credential file(s) stripped)`])
 
+  // The builder is told to `git add -A`. Keep scrubbed files and scratch dirs out of its commit.
+  const esc = (p) => '/' + p.replace(/[\\*?[]/g, '\\$&')
+  mkdirSync(join(workspace, '.git', 'info'), { recursive: true })
+  appendFileSync(join(workspace, '.git', 'info', 'exclude'), `\n${removed.map(esc).join('\n')}\n/.tmp-*/\n`)
+
   const baseSha = git(workspace, ['rev-parse', 'HEAD'])
   writeJson(provisionRecordPath(workspace), { requestId, slug: cloneTarget.slug, originSha, baseSha })
   return { cloned: true, baseSha, originSha, removed }
@@ -355,9 +360,11 @@ export function buildPrompt(request, { cloned = false } = {}) {
   const steps = cloned
     ? 'Steps: (1) read the existing code first; (2) make the minimal change; (3) `git add -A`;'
     : 'Steps: (1) implement it as minimal working files; (2) `git add -A`;'
+  const protectedRule = 'Do not modify package.json, lockfiles, CLAUDE.md, AGENTS.md, vercel.json, or anything under .claude/ or .github/. Install deps with `npm ci`, never `npm install`. If the task needs a dependency or config change, stop and say so instead of making it.'
   return [
     opening,
     `Task: ${task}.`,
+    protectedRule,
     steps,
     `then \`git commit -m "${shortMsg}"\` as a SINGLE commit (host-side review covers everything since the starting commit).`,
     'Stay inside this workspace — do not read or write files outside it.',
