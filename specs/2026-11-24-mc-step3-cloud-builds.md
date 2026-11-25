@@ -1,7 +1,10 @@
 # Mission Control step 3: approved plans build themselves on Managed Agents
 
-**Status:** DRAFT r1, 2026-11-24. Approved in outline by David the same day.
-**Gates:** David runs CodexQC on this spec. He then does piece 0 himself. Pieces 1–3 follow in a fresh build window via `phase-relay`, one piece per relay.
+**Status:** DRAFT r2, 2026-11-25. Approved in outline by David 2026-11-24.
+- **CodexQC round 1** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-25T05-12-42-970Z.md`). All 4 blockers, both should-fixes and the nit were confirmed and are folded in below.
+- **Gap Codex missed:** `queue/dispatch` is not in the `vercel.json` cron list. The only crons are the daily digest and the twice-daily `stuck-jobs`, so a 10-minute backup check doesn't exist. Recovery is redesigned around that (§ Finishing).
+
+**Gates:** David runs CodexQC round 2 on this spec. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
 **Step 3 of 3** toward running Mission Control from the dashboard (`decisions.md` 2026-11-06). Steps 1 and 2 shipped in PRs #29, #32 and #33.
 **Why this path:** the home-rig spike failed its stop-loss (`specs/2026-11-24-step3-spike-report.md`). David chose Claude Managed Agents over Claude Code routines and GitHub Actions on 2026-11-24 (`decisions.md`). Codex cloud and Claude Code web sessions were ruled out, because neither can be started by a server.
 
@@ -18,7 +21,8 @@ David clicks **Approve plan** on a project card and picks **Claude (cloud)**. Fr
 | PR diff fetch | `fetchGitHubPrDiff()` `lib/github.ts:14`, using `GITHUB_PAT` (already set on Vercel prod) |
 | Protected-file check | `alwaysRefused(path)` `scripts/lib/build-patch.mjs:61` |
 | No preview deploys of build branches | `vercel.json` `git.deploymentEnabled` `mc-build-*: false` |
-| Cron with `CRON_SECRET` auth + Telegram ping | `app/api/queue/dispatch/route.ts` |
+| Scheduled cron with `CRON_SECRET` auth + Telegram ping | `app/api/alerts/stuck-jobs/route.ts`, which runs at 22:00 and 05:59 UTC (`vercel.json`). `queue/dispatch` has the same auth but is **not** scheduled. |
+| One QC run per task at a time (lease) | `tasks.codex_qc_run_id` / `codex_qc_run_started_at`, migration 031 |
 | Owner audit rows | `recordOwnerAudit()` in the projects actions |
 | Anthropic SDK with the beta agents and environments calls | `@anthropic-ai/sdk` 0.95.1, already in `package.json` |
 
@@ -28,18 +32,22 @@ David clicks **Approve plan** on a project card and picks **Claude (cloud)**. Fr
 
 1. **Approve.**
    - `approvePlan` gets a third builder, `claude_cloud`. The row gets `assigned_to: 'claude'`, so the worker check constraints don't change.
+   - **Start claim.** The same conditional update (it already checks `expectedStatus` + `expectedUpdatedAt`, so a double click loses) also sets `status: 'in_progress'` and `cloud_start_claimed_at: now()`. This intent is saved *before* any call to Anthropic.
    - The action then calls `startCloudBuild(requestId)`.
-   - A request counts as a cloud build when `cloud_session_id` is set. No new status is added.
+   - A request counts as a cloud build when `cloud_start_claimed_at` is set. No new status is added.
 2. **Start.** `startCloudBuild` does the following:
    - **Repo check.** Reads the project's `repo_url` and refuses unless it is in `CLOUD_BUILD_REPOS`. v1 allows `davidbillera-lab/personal-OS` only.
+   - **Idempotency.** If the SDK or API accepts an idempotency key on session create, send `mc-start-<request id>`. Piece 1 verifies this in the SDK source; it doesn't assume it.
    - **Session create.** Calls `client.beta.sessions.create` with:
      - the stored agent ID and environment ID;
      - a `github_repository` resource (`url`, `authorization_token: CLOUD_BUILD_GITHUB_TOKEN`, `checkout` = default branch);
      - `budget: {type: 'limit', max_list_cost: {amount: '500', currency: 'USD'}}`, a $5 hard cap;
      - `metadata: {mc_request_id}`;
      - `initial_events` holding a single `user.message` with the build prompt. A non-empty `initial_events` creates the session already running.
-   - **Write back.** Writes `cloud_session_id`, `cloud_branch`, `status: 'in_progress'` and `latest_progress`.
-   - **On failure.** If the create call fails, the row goes to `blocked` with the error. It never sits in `in_progress` with no session.
+   - **Write back.** Writes `cloud_session_id`, `cloud_branch` and `latest_progress`.
+   - **Clear failure.** The API returns a 4xx before any session exists. The row goes to `blocked` with the error.
+   - **Unclear failure.** This covers a timeout, a 5xx, or a successful create whose write-back then fails. Don't assume no session exists. Leave the row `in_progress` with `cloud_session_id` null and let **start recovery** (§ Finishing) settle it.
+   - **Never re-create automatically.** A retry could start a second paid builder. Only start recovery or David may decide a new start is needed.
 3. **Build** (inside the Anthropic sandbox). The agent:
    - works in `/workspace/personal-OS`;
    - runs `npm ci` and makes the change;
@@ -58,11 +66,33 @@ It carries:
 - the branch name;
 - the rules from the spike that still apply:
   - "Do not modify package.json, lockfiles, CLAUDE.md, AGENTS.md, vercel.json, or anything under .claude/ or .github/. Install deps with `npm ci`, never `npm install`. If the task needs a dependency or config change, stop and say so instead of making it."
-  - Never push to `main`. Push only `mc-build-<id>`.
+  - Never push to `main`. Push only `mc-build-<id>`. GitHub enforces this too (§ Git containment); the prompt is not the control.
   - Run the tests that cover the change and report the exact command and result. "Tests not run" counts as a failure to report, not a pass. Spike check 3 failed exactly this way.
-  - End with the summary block (fixed headings, parsed by piece 2).
+  - End with the summary block below.
 
-Request text and plan are wrapped as untrusted input. The agent's power is bounded by its tools, not by the prompt.
+Request text and plan are wrapped as untrusted input. The agent's power is bounded by its tools and by GitHub, not by the prompt.
+
+### The summary contract (`parseCloudSummary` in `lib/cloud-build.ts`, pure)
+
+The agent's last message must contain this block:
+
+```
+## MC-BUILD-SUMMARY
+CHANGED: <one line per file, or "none">
+TESTS_COMMAND: <exact command>
+TESTS_RESULT: passed | failed | not_run
+NOTES: <free text, may be empty>
+## END
+```
+
+| Parsed result | Outcome |
+|---|---|
+| Block present, `TESTS_RESULT: passed`, `CHANGED` not `none` | Continue to the protected-file check and the PR |
+| `TESTS_RESULT: failed` or `not_run` | `blocked` ("tests failed / not run, per agent"). No PR; the branch is kept for inspection |
+| Block missing, malformed, or two blocks | `blocked` ("no valid summary"). No PR |
+| `CHANGED: none` | `blocked` ("agent reports no change") |
+
+The test result is **agent-reported**. Nothing on our side re-runs the tests. The PR body and the card label it "Tests (agent-reported): passed", and CodexQC is the independent check. Server-side CI on `mc-build-*` is out of scope.
 
 ### Agent and environment (created once, by `scripts/setup-cloud-builder.mjs`)
 
@@ -84,25 +114,72 @@ Request text and plan are wrapped as untrusted input. The agent's power is bound
 - Our server already holds `GITHUB_PAT`.
 - Opening it server-side puts the protected-file check *before* any PR exists, like `build-to-pr.mjs` did on the rig.
 
-## Scope: piece 0 (David) + 3 code pieces, one commit each
+### Git containment (enforced by GitHub, not by the prompt)
 
-### Piece 0: credentials and registration (David, by hand)
+A fine-grained token can't be limited to some branches. A token on David's account would also act with his admin rights. So the builder pushes as its own identity, and GitHub limits what that identity can do:
+
+1. **Machine account** `mc-builder-bot`, a separate GitHub user owned by David. It gets **Write** role on `personal-OS` only.
+   - **Its token:** fine-grained, `personal-OS` only.
+     - **Granted:** Contents read/write, Metadata read.
+     - **Not granted:** Workflows. GitHub refuses any push that adds or changes `.github/workflows/*` from a token without it, so the builder can't plant a workflow that runs on its own push.
+2. **Branch ruleset** `mc-builder-refs`:
+   - target: all branches **except** `mc-build-*`;
+   - rules: restrict creations, restrict updates, restrict deletions, block force pushes;
+   - bypass list: Repository admin (David).
+   - Effect: the bot can create and update only `mc-build-*`, and David's own pushes are unaffected.
+   - **`main`:** the existing PR-only protection stays on top of this.
+3. **Tag ruleset** `mc-builder-tags`:
+   - target: all tags;
+   - rules: restrict creations, updates and deletions;
+   - bypass list: Repository admin.
+4. **What still runs on a bot push:** `secret-scan.yml` (gitleaks, default `GITHUB_TOKEN`, runs no repo code). Vercel skips `mc-build-*`. Nothing else is triggered.
+5. **The `alwaysRefused` check after the push is defense in depth.** It decides whether a PR is opened. It is not the containment.
+
+**Containment proof is a prerequisite** (piece 0a, step 4). Before the first build, David checks each of these with the bot's token from his own shell. Each must be refused by GitHub:
+- push to `main`;
+- push to a branch named `not-mc-build-x`;
+- push a tag;
+- push a commit touching `.github/workflows/`;
+- delete an `mc-build-*` branch belonging to someone else.
+
+A push to `mc-build-proof` must succeed. If any refusal doesn't happen, stop. Don't start piece 1.
+
+## Scope: pieces 0a and 0b (David) + 3 code pieces, one commit each
+
+Order: 0a → 1 → 2 → (merge, deploy) → 0b → 3.
+
+### Piece 0a: credentials and containment (David, by hand, before piece 1)
 
 Under the credential rule, Claude never creates, reads or pastes these.
 1. **Console workspace** `mission-control-builds` with a monthly spend limit (suggest $50). Create an API key in it and set it as `CLOUD_BUILD_ANTHROPIC_API_KEY` on Vercel prod. Use a separate key, not the existing `ANTHROPIC_API_KEY`, so build spend shows up on its own line and can be capped.
-2. **Fine-grained GitHub token:** repo `personal-OS` only, Contents read/write and Metadata read, 90-day expiry. Set it as `CLOUD_BUILD_GITHUB_TOKEN`.
-3. **Webhook.** Console → Manage → Webhooks:
+2. **Machine account and token.** Create the `mc-builder-bot` account and the token described in § Git containment, with a 90-day expiry. Set the token as `CLOUD_BUILD_GITHUB_TOKEN`.
+3. **Rulesets.** Create the two rulesets from § Git containment.
+4. **Containment proof.** Run the refusal checks from § Git containment and paste the results, not the token, into the build window.
+5. **Allowlist:** set `CLOUD_BUILD_REPOS=davidbillera-lab/personal-OS`.
+
+### Piece 0b: registration (David, after pieces 1–2 are merged and deployed)
+
+1. **Setup script:** run `node scripts/setup-cloud-builder.mjs` locally with the workspace key in his own shell. Put the two printed IDs into Vercel env as `CLOUD_BUILD_AGENT_ID` and `CLOUD_BUILD_ENVIRONMENT_ID`.
+2. **Webhook.** Console → Manage → Webhooks:
    - URL: `https://<prod domain>/api/cloud-builds/webhook`;
    - subscribe to `session.status_idled` and `session.status_terminated`;
-   - set the `whsec_` secret (shown once) as `CLOUD_BUILD_WEBHOOK_SECRET`.
+   - set the `whsec_` secret (shown once) as `CLOUD_BUILD_WEBHOOK_SECRET`, then redeploy.
    - Subscribe *before* the first run, because events are not backfilled.
-4. **Allowlist:** set `CLOUD_BUILD_REPOS=davidbillera-lab/personal-OS`.
-5. **Setup script:** run `node scripts/setup-cloud-builder.mjs` locally with the workspace key in his own shell. Put the two printed IDs into Vercel env.
 
 ### Piece 1: start a cloud build
 
-- **Migration `033_cloud_builds.sql`:** add to `mc_requests` the columns `cloud_session_id TEXT UNIQUE`, `cloud_branch TEXT`, `cloud_cost_cents INTEGER` and `cloud_pr_url TEXT`.
-  - Index `cloud_session_id`.
+- **Migration `033_cloud_builds.sql`:** add these columns to `mc_requests`:
+  - `cloud_start_claimed_at TIMESTAMPTZ`;
+  - `cloud_session_id TEXT UNIQUE`;
+  - `cloud_branch TEXT`;
+  - `cloud_finish_requested_at TIMESTAMPTZ`, the durable "finish needed" marker;
+  - `cloud_finish_lease_id UUID` and `cloud_finish_lease_at TIMESTAMPTZ`, the finishing claim;
+  - `cloud_cost_cents INTEGER`;
+  - `cloud_pr_url TEXT`;
+  - `cloud_notified_at TIMESTAMPTZ`;
+  - `cloud_session_ended_at TIMESTAMPTZ`, set only once Anthropic confirms the session stopped.
+  - Index `cloud_session_id`, plus a partial index on rows where `cloud_start_claimed_at IS NOT NULL AND cloud_session_ended_at IS NULL`.
+  - Add a `cloud_build_events` table (`event_id TEXT PRIMARY KEY`, `session_id`, `received_at`) for webhook dedupe, unless migration 026's ledger fits exactly.
   - Check prod `information_schema` before and after. Prod has drifted before (memory: mc-prod-schema-drift).
 - **`scripts/setup-cloud-builder.mjs`:** as described above.
 - **`lib/cloud-build.ts`:**
@@ -118,42 +195,101 @@ Under the credential rule, Claude never creates, reads or pastes these.
   - the pure functions (prompt contains the rules, branch, untrusted wrapping; allowlist accepts and refuses);
   - `planOwnerApprovePlan` with `claude_cloud`;
   - `startCloudBuild` with a mocked client: the session gets the budget, resource, metadata and `initial_events`, and a create failure blocks the row.
-- **Live check:** start one session against a trivial request. Confirm it in the Console session viewer, and confirm the branch lands on GitHub. This answers the `allowed_hosts` question.
+- **Cloud builds require a linked task.** QC records against `task_id` (migration 031's lease lives on `tasks`), so `approvePlan` refuses `claude_cloud` on a request with no `task_id`.
+- **Verify in the SDK source, don't assume:**
+  - whether session create takes an idempotency key;
+  - how `sessions.list` pages and orders, and whether it filters by metadata;
+  - the call that ends a session and how its confirmation reads.
+  - Record the answers in the piece 1 handoff.
 
-### Piece 2: the webhook, the backup check, and handing back
+### Piece 2: finishing (webhook, recovery, cleanup)
 
-- **`app/api/cloud-builds/webhook/route.ts`:**
-  - Verify the HMAC signature with `CLOUD_BUILD_WEBHOOK_SECRET`, using the SDK's webhook verify helper if 0.95.1 has one, otherwise standard-webhooks verification. Fail closed: no secret or a bad signature gets a 401.
-  - Dedupe on the event `id`, using the existing alert dedup ledger table from migration 026 if its shape fits, otherwise a small one in 033.
-  - Return 2xx fast. Never a 3xx, because a redirect auto-disables the endpoint.
-- **`finishCloudBuild(sessionId)`** in `lib/cloud-build.ts`. The webhook and the backup check both call it. It is idempotent by state and acts only on rows that are `in_progress` with that session ID. It:
-  1. fetches the session and its events, and reads the last `session.status_idle` `stop_reason`;
-     - `budget_reached` → `blocked` ("hit the $5 cap");
-     - `requires_action` → `blocked`, which shouldn't happen under `always_allow`;
-     - terminated with an error → `failed`;
-  2. parses the agent's summary block;
-  3. records `usage.list_cost` into `cloud_cost_cents` and logs a `model_costs` row with `purpose: 'cloud_build'`;
-  4. lists the branch's changed files via the GitHub compare API (`main...mc-build-<id>`) and runs `alwaysRefused` on each;
-     - any hit → `blocked` with the paths, and no PR;
-     - no branch or no changes → `blocked` ("agent pushed nothing");
-  5. opens a draft PR with `GITHUB_PAT`. The body holds the summary, the session link and the cost;
-  6. runs `runCodexQCCore` on the PR diff;
-  7. sets `awaiting_approval` with `cloud_pr_url` and `result_summary`, and pings Telegram with the verdict, the PR link and the cost.
-- **Ending the session.** When it reaches step 7 or a terminal error, `finishCloudBuild` ends the session through the documented session-ending call, so an idle session stops accruing runtime. That call is to be confirmed in piece 2. It ends the session; it never archives or deletes it.
-- **Backup check** in `app/api/queue/dispatch/route.ts`:
-  - also select rows that are `in_progress` with a `cloud_session_id` and an `updated_at` older than 10 minutes, and call `finishCloudBuild` when the session is idle or terminated;
-  - rows older than 2 hours go to `blocked` ("cloud build stalled").
-  - This exists because webhooks are dropped after 3 failed attempts.
-- **Tests:**
-  - signature verify (good, bad, missing secret);
-  - dedupe;
-  - `finishCloudBuild` with mocked session and GitHub calls: happy path; budget reached; protected-file hit; nothing pushed; already finished (no-op);
-  - backup-check selection.
+#### The webhook: `app/api/cloud-builds/webhook/route.ts`
+
+1. **Verify the HMAC signature** with `CLOUD_BUILD_WEBHOOK_SECRET`. Use the SDK's helper if 0.95.1 has one, otherwise standard-webhooks verification. Fail closed: no secret or a bad signature gets a 401.
+2. **Persist before acknowledging.** In this order:
+   - insert the event `id` into `cloud_build_events`. A conflict means a duplicate; carry on, because the marker below is idempotent;
+   - set `cloud_finish_requested_at = coalesce(cloud_finish_requested_at, now())` on the row whose `cloud_session_id` matches `data.id`. Only rows still `in_progress` are touched.
+   - Only after both writes succeed, return 2xx. If either fails, return 500 so Anthropic retries. Never return a 3xx, because a redirect auto-disables the endpoint.
+3. **Process after responding.** Call `finishCloudBuild(requestId)` from Next's `after()`. That's best-effort; the saved marker is what makes it durable. If the function dies mid-way, recovery picks the row up.
+
+#### `finishCloudBuild(requestId)` in `lib/cloud-build.ts`
+
+**1. Claim.** One conditional update:
+- **sets** `cloud_finish_lease_id = <new uuid>` and `cloud_finish_lease_at = now()`;
+- **only on a row that is:**
+  - `status = 'in_progress'`;
+  - `cloud_finish_requested_at IS NOT NULL`;
+  - holding no lease, or a lease older than 6 minutes (longer than the 300 s function limit, same reasoning as migration 031).
+- **No row returned:** someone else holds the claim, or the row is already finished. Return.
+- **Every later write** filters on `cloud_finish_lease_id = <mine>`, so a stale run can't overwrite a newer one.
+
+**2. Steps, each safe to repeat:**
+
+| # | Step | Safe to repeat because |
+|---|---|---|
+| a | Fetch the session and its events, and read the last `session.status_idle` `stop_reason`. `budget_reached` → `blocked` ("hit the $5 cap"). `requires_action` → `blocked`. Still `running` → clear the marker and return; a later idle event re-sets it. Terminated with an error → `failed` | Read-only |
+| b | `parseCloudSummary` → outcomes per the summary contract | Pure |
+| c | Record cost: `update … set cloud_cost_cents = X where cloud_cost_cents is null returning`. Insert the `model_costs` row (`purpose: 'cloud_build'`) **only if that update returned a row** | Write-once column gates the insert |
+| d | GitHub compare `main...mc-build-<id>`, then `alwaysRefused` on each changed path. Any hit → `blocked` with the paths. No branch or no diff → `blocked` ("agent pushed nothing") | Read-only |
+| e | PR: if `cloud_pr_url` is set, skip. Otherwise first look up an existing PR with head `mc-build-<id>` (any state) and adopt it. Only if none exists, open a draft PR with `GITHUB_PAT`. Save `cloud_pr_url` | Lookup before create |
+| f | QC: `runCodexQCCore` on the PR diff with `reviewedSha` = PR head. Skip if the task already has a verdict for that sha. Migration 031's lease stops a parallel run | Existing QC lease plus a sha check |
+| g | Final status `awaiting_approval` (or the blocked/failed status from earlier) with `result_summary`. Clear the lease in the same update | Lease-guarded |
+| h | Telegram ping only if `cloud_notified_at` is null, then set it | `minimal:` a crash between send and mark can send twice; acceptable for a ping |
+
+#### Recovery: `reconcileCloudBuilds()`
+
+Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Recovery has three passes:
+
+1. **Start recovery.** Targets rows that are `in_progress`, have `cloud_start_claimed_at` older than 5 minutes, and have no `cloud_session_id`.
+   - Look for a session tagged `metadata.mc_request_id` = row id, created after the claim.
+   - **Found:** adopt it.
+   - **Not found:** `blocked` ("start didn't happen; re-approve to retry").
+   - **Never create.**
+2. **Finish recovery.** Targets rows that are `in_progress` with a session ID and either a stale marker (no lease, or an expired lease) or no marker but a session that is now idle or terminated.
+   - Set the marker if it's missing, then call `finishCloudBuild`.
+   - **Stall rule:** a session still `running` 2 hours after the claim goes to `blocked` ("cloud build stalled").
+3. **Cleanup.** Targets every row with a `cloud_session_id`, `cloud_session_ended_at IS NULL`, and a status other than `in_progress`.
+   - End the session with the documented ending call. It never archives or deletes.
+   - Re-fetch it, and set `cloud_session_ended_at` only once Anthropic reports it ended.
+   - A failure leaves the column null, so the next pass retries.
+
+**Where it runs:**
+- **Scheduled:** the existing `stuck-jobs` cron (22:00 and 05:59 UTC) calls it.
+- **On demand:** a **Retry finish** owner action on the card, behind the same owner check as the others.
+- `minimal:` with a healthy webhook a build finishes within seconds. If the webhook fails, recovery can take up to ~16 hours unless David clicks Retry. The upgrade path is Supabase `pg_cron` + `pg_net` hitting a `CRON_SECRET`-gated reconcile route every 10 minutes. That needs a secret stored in Supabase Vault, so it's David's step.
+
+#### Tests
+
+- **Webhook signature:** good, bad and missing secret.
+- **Webhook writes:** a duplicate event id still sets the marker. A failed marker write returns 500.
+- **Claim:** two concurrent `finishCloudBuild` calls; exactly one proceeds.
+- **Finishing cases:**
+  - happy path;
+  - budget reached;
+  - protected-file hit;
+  - nothing pushed;
+  - each summary-contract outcome;
+  - a re-run after a crash at each of steps c, e and f, with no duplicate cost row, PR or QC;
+  - an already-finished row (no-op).
+- **Recovery:**
+  - start recovery: adopt vs blocked, and never create;
+  - finish recovery selection;
+  - the stall rule;
+  - cleanup sets `cloud_session_ended_at` only after confirmation, and retries when the end call fails.
 
 ### Piece 3: show it on the card, then the live runs
 
 - **The card shows:** "Building in the cloud" with the Console session link while `in_progress`, then the PR link, the cost and the QC verdict.
 - **Optional:** an Opus toggle on Approve.
+- **Runbook:** `docs/runbooks/cloud-builds.md`, written for someone who isn't David. It covers:
+  - rotating each credential (bot token, workspace key, webhook secret);
+  - verifying the webhook in the Console;
+  - recovering a failed or stuck run (Retry finish, then the Console session viewer);
+  - confirming a session ended;
+  - re-running the containment proof;
+  - handing the bot account and workspace to a new owner.
+- **Smoke check first:** before live run 1, a trivial request that changes one line. It settles the `allowed_hosts` question and proves webhook → PR end to end.
 - **Live run 1:** a real small request on personal-OS (for example the flaky `trusted-git` temp-dir test, already on the next-action list). End to end: no window opened, draft PR, QC ran, tests actually ran.
 - **Live run 2:** a second, different request.
 - **Report:** `specs/2026-11-2x-step3-cloud-report.md`, covering the two runs (time, cost, QC, correctness) and a founder-dependence update.
@@ -166,7 +302,7 @@ Under the credential rule, Claude never creates, reads or pastes these.
 2. **`always_allow` permissions.**
    - Gained: unattended runs never stall.
    - Given up: per-call approval.
-   - What contains it: a sandbox with no secrets, limited network, a token scoped to one repo, protected `main`, the protected-file check, and David's merge.
+   - What contains it: a sandbox with no secrets, limited network, a bot identity that GitHub rulesets confine to `mc-build-*` with no workflow-write, the protected-file check before any PR, and David's merge.
 3. **The server opens the PR.**
    - Gained: the check runs before the PR exists, and no GitHub MCP login.
    - Given up: the agent can't iterate on PR review comments. That's v2.
@@ -186,7 +322,7 @@ Under the credential rule, Claude never creates, reads or pastes these.
 
 | Item | v1 | Fix later |
 |---|---|---|
-| GitHub token | Fine-grained token on David's account | Machine user or GitHub App |
+| GitHub identity | `mc-builder-bot` machine account owned by David, 90-day token | Transfer the account; or move to a GitHub App |
 | Console workspace | David's org | Transfers with the org |
 | Webhook registration | Console UI, by hand | No API exists yet; documented in the runbook |
 | Approval and merge | David | Intended: that's the human gate |
@@ -197,6 +333,9 @@ Under the credential rule, Claude never creates, reads or pastes these.
 - Both live runs finish with nobody opening a window, a draft PR, QC on it, and the agent's summary showing the tests ran.
 - Each run cost under $5, and the cost is recorded.
 - A forced protected-file edit (a test request that asks to touch `vercel.json`) ends `blocked` with no PR.
+- The containment proof (piece 0a) passed, and is re-run after the live runs.
+- Every live-run session has `cloud_session_ended_at` set.
+- The runbook exists.
 
 ## Stop-loss
 
