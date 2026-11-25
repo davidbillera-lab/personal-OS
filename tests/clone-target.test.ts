@@ -27,6 +27,19 @@ describe('repoSlug', () => {
     ]) expect(repoSlug(input)).toBe('davidbillera-lab/vzt')
   })
 
+  it('strips a trailing slash AFTER .git — `repo.git/` must not resolve to the slug `repo.git`', () => {
+    // A repo_url stored with both suffixes kept its `.git`, so the slug never matched the
+    // allowlist and the build silently got an empty workspace instead of the clone.
+    for (const input of [
+      'https://github.com/davidbillera-lab/vzt.git/',
+      'https://github.com/davidbillera-lab/vzt.git//',
+      'git@github.com:davidbillera-lab/vzt.git/',
+      'davidbillera-lab/vzt.git/',
+    ]) expect(repoSlug(input), input).toBe('davidbillera-lab/vzt')
+    expect(resolveCloneTarget('https://github.com/davidbillera-lab/vzt.git/', LIST))
+      .toEqual({ slug: 'davidbillera-lab/vzt', url: 'https://github.com/davidbillera-lab/vzt.git' })
+  })
+
   it('returns null for anything it cannot confidently parse', () => {
     for (const bad of ['', '   ', 'not a url', 'https://github.com/onlyowner', null, undefined, 42, {}]) {
       expect(repoSlug(bad as any)).toBeNull()
