@@ -118,10 +118,11 @@ The test result is **agent-reported**. Nothing on our side re-runs the tests. Th
 
 A fine-grained token can't be limited to some branches. A token on David's account would also act with his admin rights. So the builder pushes as its own identity, and GitHub limits what that identity can do:
 
-1. **Machine account** `mc-builder-bot`, a separate GitHub user owned by David. It gets **Write** role on `personal-OS` only.
-   - **Its token:** fine-grained, `personal-OS` only.
-     - **Granted:** Contents read/write, Metadata read.
-     - **Not granted:** Workflows. GitHub refuses any push that adds or changes `.github/workflows/*` from a token without it, so the builder can't plant a workflow that runs on its own push.
+1. **Machine account** `mc-builder-bot`, a separate GitHub user owned by David, added as a collaborator on `personal-OS` only (personal-account repos have no role choice; collaborators get push).
+   - **Its token: classic, not fine-grained.** `personal-OS` is owned by a personal account, and GitHub doesn't let fine-grained tokens write to a personal-account repo where the token owner is only a collaborator (GitHub docs, "Managing your personal access tokens", limitations; checked 2026-11-25).
+     - **Scope:** `public_repo` only. The bot is a collaborator on nothing else, so in practice it reaches one repo. If `personal-OS` goes private, this becomes `repo`, which has the same one-repo reach.
+     - **Not granted:** `workflow`. GitHub refuses any push that adds or changes `.github/workflows/*` from a token without it, so the builder can't plant a workflow that runs on its own push.
+     - **Upgrade path:** a GitHub App installed on the repo (short-lived installation tokens). That's more setup, so it's deferred until a second repo joins the allowlist.
 2. **Branch ruleset** `mc-builder-refs`:
    - target: all branches **except** `mc-build-*`;
    - rules: restrict creations, restrict updates, restrict deletions, block force pushes;
@@ -140,9 +141,13 @@ A fine-grained token can't be limited to some branches. A token on David's accou
 - push to a branch named `not-mc-build-x`;
 - push a tag;
 - push a commit touching `.github/workflows/`;
-- delete an `mc-build-*` branch belonging to someone else.
+- delete a branch that isn't `mc-build-*`, for example a throwaway `proof-delete-me` that David creates first.
 
-A push to `mc-build-proof` must succeed. If any refusal doesn't happen, stop. Don't start piece 1.
+Two pushes must succeed:
+- a push to `mc-build-proof` with the bot's token;
+- David's own push of a new non-`mc-build-*` branch, which proves the admin bypass works on a personal-account repo.
+
+The bot *can* delete other `mc-build-*` branches. That's accepted, because those are all its own work. If any refusal doesn't happen, or either push fails, stop. Don't start piece 1.
 
 ## Scope: pieces 0a and 0b (David) + 3 code pieces, one commit each
 
@@ -152,7 +157,7 @@ Order: 0a → 1 → 2 → (merge, deploy) → 0b → 3.
 
 Under the credential rule, Claude never creates, reads or pastes these.
 1. **Console workspace** `mission-control-builds` with a monthly spend limit (suggest $50). Create an API key in it and set it as `CLOUD_BUILD_ANTHROPIC_API_KEY` on Vercel prod. Use a separate key, not the existing `ANTHROPIC_API_KEY`, so build spend shows up on its own line and can be capped.
-2. **Machine account and token.** Create the `mc-builder-bot` account and the token described in § Git containment, with a 90-day expiry. Set the token as `CLOUD_BUILD_GITHUB_TOKEN`.
+2. **Machine account and token.** Create the `mc-builder-bot` account and invite it as a collaborator. Then create the classic token described in § Git containment (`public_repo` only, no `workflow`), with a 90-day expiry. Set the token as `CLOUD_BUILD_GITHUB_TOKEN`.
 3. **Rulesets.** Create the two rulesets from § Git containment.
 4. **Containment proof.** Run the refusal checks from § Git containment and paste the results, not the token, into the build window.
 5. **Allowlist:** set `CLOUD_BUILD_REPOS=davidbillera-lab/personal-OS`.
