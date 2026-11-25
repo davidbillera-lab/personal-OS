@@ -40,7 +40,10 @@ const isGitHubHost = (h) => /^(www\.)?github\.com$/i.test(h)
 
 export function repoSlug(repoUrl) {
   if (typeof repoUrl !== 'string') return null
-  const s = repoUrl.trim().replace(/\.git$/, '').replace(/\/+$/, '')
+  // Trailing slashes come off FIRST: a repo_url of `.../repo.git/` would otherwise keep its
+  // `.git` and resolve to the slug `owner/repo.git`, which never matches the allowlist and
+  // silently falls back to an empty workspace.
+  const s = repoUrl.trim().replace(/\/+$/, '').replace(/\.git$/, '')
   if (!s) return null
   // Host must be GitHub when one is present. resolveCloneTarget() always clones from
   // github.com, so accepting a gitlab/bitbucket repo_url here would silently clone a
