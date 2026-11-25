@@ -11,7 +11,7 @@
 
 **The stop-loss was also exceeded.** The spec allows two run attempts and this took three. Runs 1 and 2 both failed check 5 because the export refused them. Each refusal exposed a real bug in our own pipeline, and those were fixed (PRs #41 and #42) before the next run. None of the failures were caused by the rig itself being unreliable.
 
-The spec's rule is: "FAIL, or a marginal pass on check 6 or 7 → step 3 goes to managed cloud agents." Whether to apply that rule strictly is David's call. See "Decision needed" below.
+The spec's rule is: "FAIL, or a marginal pass on check 6 or 7 → step 3 goes to managed cloud agents." **David chose to apply it strictly (option A): the spike counts as a FAIL.** See "Decision" below.
 
 ## Pass/fail checks
 
@@ -69,7 +69,11 @@ The CodexQC cost per build (`model_costs`) was $0.065, $0.016 and $0.013. Builde
 - **CodexQC on pipeline PRs** is run by David, because the script reads a key file.
 - **Everything runs on one home PC** shared with dev work. The spec says an acquirer can't take this over, whatever the result.
 
-## Decision needed (David)
+## Decision (David, 2026-11-24): A
+
+The stop-loss is applied strictly, so the spike counts as a **FAIL**. Step 3 moves to evaluating managed cloud agents (Claude Code cloud sessions or Codex cloud). The hardening built here (trusted reader, export guard, QC record) carries over. The dispatcher stays off per 2026-10-17, and the rig is not a step 3 dependency.
+
+The options as written before the call:
 
 - **A. Apply the stop-loss strictly: FAIL → evaluate managed cloud agents for step 3** (Claude Code cloud sessions or Codex cloud).
   - Keep the hardening built here; the trusted reader, export guard and QC record all port.
