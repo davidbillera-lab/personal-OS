@@ -27,49 +27,8 @@ The operator has roughly 10 distinct projects in motion. Without a central comma
 
 ---
 
-## The Three Core Surfaces (v1)
-
-### 1. Project Status Dashboard
-
-Tiered view of all portfolio projects. Each project card shows:
-
-- Stage (idea / spec / build / ship / scale / kill)
-- Blockers
-- Last update
-- Next action
-- Kill criteria status (pass / warning / fail)
-- Tier badge (1 = protect/accelerate, 2 = active, 3 = personal)
-
-VZT and College Climb are pinned as priority/protected.
-
-### 2. Brain Dump Inbox
-
-Single capture point. Text first; voice later. Every entry gets:
-
-- **Auto-classified by Haiku** (idea, task, bug, decision, kill-candidate)
-- Routed to the right project context (or flagged as new project)
-- Surfaced in the dashboard until acted on
-
-Nothing dies in a notebook. Nothing requires the operator to remember where it goes.
-
-### 3. Build Orchestration
-
-When an idea graduates from inbox to build:
-
-- OS generates a context-loaded spec (project CLAUDE.md + decisions.md + idea + relevant code refs)
-- OS recommends which runtime harness to hand it to based on job type
-- OS recommends which model tier (1–4) for the work
-- One-click handoff: spec ready, context bundled
-
----
-
 ## Tech Stack (v1)
 
-- **Frontend:** Next.js → Vercel
-- **Backend:** Supabase (Postgres, auth, edge functions for routing logic)
-- **Model APIs:** Anthropic SDK + OpenAI SDK + Gemini SDK behind a single `/api/route-task` endpoint that picks the model by `complexity_tier`
-- **GitHub API:** for repo context loading and project file sync
-- **Auth:** Supabase auth (operator + Vinnie roles eventually)
 - **Vault:** `vault_items` table — cross-session memory. Stores decisions, specs, agent sessions, brain dumps. OpenAI `text-embedding-3-small` for semantic search. Auto-captured via `captureToVault()` in `lib/vault.ts`. Queried via `mc_get_vault_context` (semantic, 200-char previews) or `mc_browse_vault` (browse by type/recency), with `mc_get_vault_item` for full single-item fetch.
 - **MCP server:** `/api/mcp` endpoint deployed on Vercel. Agents connect via `Bearer MCP_API_KEY` (token in `.mcp.json` + `.claude/settings.local.json`). Exposes: project context, tasks, vault, credentials, skills. The server validates keys only against hashed rows in `mcp_api_keys` (no env-var fallback since M2, 2026-10-11). On Windows, always source MCP_API_KEY from `settings.local.json` — OS env propagation is unreliable.
 
@@ -108,31 +67,7 @@ Portfolio-wide subagents, callable from any project — via the active agent env
 
 **Source of truth:** `agents/*.md` in this repo (canonical agent format: YAML frontmatter + system prompt). **Distribution:** `npm run sync:agents` upserts each into the vault (`vault_items` type `agent`, tagged by crew, embedded for semantic search) and installs to `~/.claude/agents/` (global — all projects). The active agent environment discovers installed agents at session start, so new agents need a restart before they're dispatchable by name.
 
-| Agent | Crew | Job |
-|---|---|---|
-| `code-reviewer` | Build | Second-opinion diff/branch review before merge; reports, never fixes |
-| `qa-verifier` | Build | Runs tests + smoke checks; pass/fail with evidence |
-| `session-auditor` | Build | Reads session transcripts; reports token waste, re-reads, compaction causes |
-| `spec-writer` | Build | Brain dump/idea → agent-ready build spec with context bundled |
-| `doc-writer` | Build | Generates `docs/operator/` (JJ-tier) + `docs/runbooks/` (Vinnie-tier) |
-| `researcher` | Revenue | Market signal, comps, competitor scans → findings brief |
-| `copywriter` | Revenue | Human-voice pass on customer-facing copy; no AI-template feel |
-| `seo-geo-auditor` | Revenue | SEO + AI-answer-engine readiness audits (Marblism clients) |
-| `kill-criteria-examiner` | Holdco | Runs the 4 kill criteria; verdict first, no rescuing |
-| `exit-readiness-scorer` | Holdco | Scores against acquirer due-diligence dimensions /100 |
-
 Crew assignment lives in the `CREWS` map in `scripts/sync-agents.mjs`, not in frontmatter — agent files stay canonical Claude Code format.
-
----
-
-## Core Data Model (initial sketch — refine in build)
-
-- `projects` — id, name, tier, stage, status, kill_criteria_status, last_update, repo_url, claude_md_url
-- `brain_dumps` — id, raw_text, classified_type, project_id (nullable), status, created_at
-- `decisions` — id, project_id, decision, reasoning, date, made_by
-- `tasks` — id, project_id, title, complexity_tier, recommended_tool, recommended_model, status
-- `model_costs` — id, project_id, task_id, model, tokens_in, tokens_out, cost_usd, timestamp
-- `kill_criteria_checks` — id, project_id, check_date, functionality, efficiency, scalability, time_to_revenue, verdict, notes
 
 ---
 
@@ -172,24 +107,7 @@ The OS reads these files to power the dashboard and to bundle context for agent 
 
 ## Open Questions
 
-None currently open. Formerly-open items, both LOCKED 2026-05-02 — full detail in `decisions.md`:
-
-- **A. VZT Protection Level** — Medium now (Codex review before merge, staging Supabase env, critical-path tests on listing + image pipelines, mandatory `decisions.md`); escalates to Heavy before first paying tenant (feature flags, deploy approval gate, daily health monitoring, tenant isolation testing, incident playbook). Succession: JJ = tier-1 emergency maintainer (`docs/operator/`), Vinnie = tier-2 execution-only recovery (`docs/runbooks/`); both doc tiers must exist before first paying tenant.
-- **B. College Climb Ship Workflow** — Light workflow, validation-gated: Phase 1 JJ real-data smoke test (screen + voice recorded) → Phase 2 beta cohort (5–10 students + 2–3 parents, 2 weeks) → Phase 3 iteration → Phase 4 ship checklist activates. Runs on JJ/beta bandwidth, not operator bandwidth, until Phase 3. **Status: Phase 1 — pending JJ kickoff.**
-
----
-
-## Decisions Log (so far)
-
-See `decisions.md` for the canonical log. Summary of pre-build decisions:
-
-- **2026-05-02** — OS built in Next.js + Supabase, deployed on Vercel. Lovable rejected for core OS.
-- **2026-05-02** — Three core surfaces for v1. Email/calendar deferred to v2.
-- **2026-05-02** — Model routing tiers (1–4) defined globally. OS implements via `/api/route-task`.
-- **2026-05-02** — Project context lives in repos. OS database reflects state but does not own it.
-- **2026-05-02** — VZT protection LOCKED at Medium now, Heavy before first paying tenant.
-- **2026-05-02** — VZT bus factor succession plan adopted (JJ tier 1, Vinnie tier 2).
-- **2026-05-02** — College Climb workflow LOCKED at Light, validation-gated.
+None currently open. VZT protection (Medium now, Heavy before first paying tenant) and the College Climb Light ship workflow were LOCKED 2026-05-02. The canonical decision log is `decisions.md`.
 
 ---
 
