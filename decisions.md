@@ -927,3 +927,15 @@ Containment confirmed end to end: new key generated client-side via CSPRNG and n
 - Lesson: check a column in prod (`information_schema`) before a spec says "already exists".
 
 **Made by:** David / Claude
+
+### 2026-11-24 — Step 3 spike: stop-loss applied, rig path shelved, step 3 goes to managed cloud agents
+
+**Decision:** The step 3 spike (`specs/2026-11-24-step3-spike-report.md`) counts as a FAIL. Step 3 ("execution that doesn't need a human to open a window") will be built on managed cloud agents (Claude Code cloud sessions or Codex cloud), not on the home-PC Docker rig. The dispatcher stays off per 2026-10-17. The hardening from PRs #40–#42 (trusted git reader, export guard, QC record, provisioning fixes) stays in the repo and carries over where it applies.
+
+**Reasoning:**
+- The path works end to end: a sandbox build against personal-OS opened draft PR #43, which was correct and is now merged. But check 3 failed (the tests never ran inside the box on the passing run) and check 6 (the rig sleeps on its own) was never tested.
+- It took 3 run attempts against a stop-loss of 2. The first two exposed real pipeline bugs, which were fixed. Running more is exactly the "debug the rig for a week" pattern the stop-loss exists to prevent.
+- The rig is founder-dependent no matter what. The report lists 8 manual steps that only David can do today (his `gh` identity, SQL-queued requests, an uncommitted pm2 allowlist edit, manual wake, sleep and restart, a CLI reject, a hand-run export, and one shared home PC). An acquirer can't take that over.
+- What we give up: per-run cloud spend and some control over the sandbox.
+
+**Made by:** David (option A, on Claude's recommendation)
