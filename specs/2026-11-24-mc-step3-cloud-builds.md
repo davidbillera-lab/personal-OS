@@ -1,10 +1,16 @@
 # Mission Control step 3: approved plans build themselves on Managed Agents
 
-**Status:** DRAFT r2, 2026-11-25. Approved in outline by David 2026-11-24.
+**Status:** DRAFT r3, 2026-11-25. Approved in outline by David 2026-11-24.
+- **CodexQC round 2** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-25T15-49-25-196Z.md`). All 4 findings were confirmed and folded in:
+  - one attempt per request;
+  - the cost row written with a fixed id;
+  - the ping sent before the final status;
+  - the protected-file check and QC bound to one sha.
+- **r3 also fixes** the bot token: classic, because fine-grained tokens can't write to a personal-account repo.
 - **CodexQC round 1** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-25T05-12-42-970Z.md`). All 4 blockers, both should-fixes and the nit were confirmed and are folded in below.
 - **Gap Codex missed:** `queue/dispatch` is not in the `vercel.json` cron list. The only crons are the daily digest and the twice-daily `stuck-jobs`, so a 10-minute backup check doesn't exist. Recovery is redesigned around that (§ Finishing).
 
-**Gates:** David runs CodexQC round 2 on this spec. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
+**Gates:** David runs CodexQC round 3 on this spec. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
 **Step 3 of 3** toward running Mission Control from the dashboard (`decisions.md` 2026-11-06). Steps 1 and 2 shipped in PRs #29, #32 and #33.
 **Why this path:** the home-rig spike failed its stop-loss (`specs/2026-11-24-step3-spike-report.md`). David chose Claude Managed Agents over Claude Code routines and GitHub Actions on 2026-11-24 (`decisions.md`). Codex cloud and Claude Code web sessions were ruled out, because neither can be started by a server.
 
@@ -35,6 +41,10 @@ David clicks **Approve plan** on a project card and picks **Claude (cloud)**. Fr
    - **Start claim.** The same conditional update (it already checks `expectedStatus` + `expectedUpdatedAt`, so a double click loses) also sets `status: 'in_progress'` and `cloud_start_claimed_at: now()`. This intent is saved *before* any call to Anthropic.
    - The action then calls `startCloudBuild(requestId)`.
    - A request counts as a cloud build when `cloud_start_claimed_at` is set. No new status is added.
+   - **One attempt per request (v1).** Once `cloud_start_claimed_at` is set, `approvePlan` refuses any further approval of that request, with any builder. The message reads "cloud builds are one attempt per request; submit a new request to retry".
+     - This means session, branch, idempotency key, cost, PR, notification and cleanup state never have to be told apart by attempt, because there is only one.
+     - It also stops a Codex re-approval from putting a cloud row back into `in_progress`, where finish recovery would pick it up.
+     - `minimal:` retrying costs David a new request. The upgrade path is a `cloud_build_attempts` table keyed (request, attempt n), with branch `mc-build-<id>-<n>` and key `mc-start-<id>-<n>`. Build it if retries turn out to be common.
 2. **Start.** `startCloudBuild` does the following:
    - **Repo check.** Reads the project's `repo_url` and refuses unless it is in `CLOUD_BUILD_REPOS`. v1 allows `davidbillera-lab/personal-OS` only.
    - **Idempotency.** If the SDK or API accepts an idempotency key on session create, send `mc-start-<request id>`. Piece 1 verifies this in the SDK source; it doesn't assume it.
@@ -177,6 +187,7 @@ Under the credential rule, Claude never creates, reads or pastes these.
   - `cloud_start_claimed_at TIMESTAMPTZ`;
   - `cloud_session_id TEXT UNIQUE`;
   - `cloud_branch TEXT`;
+  - `cloud_head_sha TEXT`, the commit the protected-file check and QC are bound to;
   - `cloud_finish_requested_at TIMESTAMPTZ`, the durable "finish needed" marker;
   - `cloud_finish_lease_id UUID` and `cloud_finish_lease_at TIMESTAMPTZ`, the finishing claim;
   - `cloud_cost_cents INTEGER`;
@@ -235,12 +246,14 @@ Under the credential rule, Claude never creates, reads or pastes these.
 |---|---|---|
 | a | Fetch the session and its events, and read the last `session.status_idle` `stop_reason`. `budget_reached` → `blocked` ("hit the $5 cap"). `requires_action` → `blocked`. Still `running` → clear the marker and return; a later idle event re-sets it. Terminated with an error → `failed` | Read-only |
 | b | `parseCloudSummary` → outcomes per the summary contract | Pure |
-| c | Record cost: `update … set cloud_cost_cents = X where cloud_cost_cents is null returning`. Insert the `model_costs` row (`purpose: 'cloud_build'`) **only if that update returned a row** | Write-once column gates the insert |
-| d | GitHub compare `main...mc-build-<id>`, then `alwaysRefused` on each changed path. Any hit → `blocked` with the paths. No branch or no diff → `blocked` ("agent pushed nothing") | Read-only |
+| c | Record cost. Insert the `model_costs` row (`purpose: 'cloud_build'`) with a **fixed id**: a UUIDv5 of the session id, `on conflict (id) do nothing`. Then set `cloud_cost_cents` for display. The two writes don't depend on each other, so a crash between them loses nothing; the re-run repeats both | Fixed primary key (`model_costs.id` is a plain uuid PK, checked 2026-11-25; no migration needed) |
+| d | GitHub compare `main...mc-build-<id>`. Save the branch's head sha as `cloud_head_sha` (first run only; a re-run compares against the saved sha). Run `alwaysRefused` on each changed path **at that sha**. Any hit → `blocked` with the paths. No branch or no diff → `blocked` ("agent pushed nothing") | Read-only plus a write-once sha |
 | e | PR: if `cloud_pr_url` is set, skip. Otherwise first look up an existing PR with head `mc-build-<id>` (any state) and adopt it. Only if none exists, open a draft PR with `GITHUB_PAT`. Save `cloud_pr_url` | Lookup before create |
-| f | QC: `runCodexQCCore` on the PR diff with `reviewedSha` = PR head. Skip if the task already has a verdict for that sha. Migration 031's lease stops a parallel run | Existing QC lease plus a sha check |
-| g | Final status `awaiting_approval` (or the blocked/failed status from earlier) with `result_summary`. Clear the lease in the same update | Lease-guarded |
-| h | Telegram ping only if `cloud_notified_at` is null, then set it | `minimal:` a crash between send and mark can send twice; acceptable for a ping |
+| f | QC. **Sha gate:** the PR head must equal `cloud_head_sha`, otherwise `blocked` ("branch changed after the protected-file check"). Run `runCodexQCCore` with `reviewedSha = cloud_head_sha`. Re-check the PR head after QC returns; a change means the same `blocked`. Skip if the task already has a verdict for that sha. Migration 031's lease stops a parallel run | Existing QC lease plus a sha check |
+| g | Telegram ping only if `cloud_notified_at` is null, then set it. The outcome is already decided by this point, so the ping can go out before the status write | `minimal:` a crash between send and mark can send twice; acceptable for a ping |
+| h | Final status `awaiting_approval` (or the blocked/failed status from earlier) with `result_summary`. Clear the lease in the same update. Because the ping goes first, a crash here leaves the row `in_progress` with the marker set, recovery re-runs it, and the ping isn't lost | Lease-guarded |
+
+**Why the sha gate:** the bot can update any `mc-build-*` branch, so in principle a concurrent session could push to this one. The gate ties the protected-file check, the PR and QC to the same commit. Anything that moves the branch mid-finish blocks the build instead of publishing a review of code nobody checked.
 
 #### Recovery: `reconcileCloudBuilds()`
 
@@ -249,7 +262,7 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
 1. **Start recovery.** Targets rows that are `in_progress`, have `cloud_start_claimed_at` older than 5 minutes, and have no `cloud_session_id`.
    - Look for a session tagged `metadata.mc_request_id` = row id, created after the claim.
    - **Found:** adopt it.
-   - **Not found:** `blocked` ("start didn't happen; re-approve to retry").
+   - **Not found:** `blocked` ("start didn't happen; submit a new request to retry").
    - **Never create.**
 2. **Finish recovery.** Targets rows that are `in_progress` with a session ID and either a stale marker (no lease, or an expired lease) or no marker but a session that is now idle or terminated.
    - Set the marker if it's missing, then call `finishCloudBuild`.
@@ -275,8 +288,10 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
   - protected-file hit;
   - nothing pushed;
   - each summary-contract outcome;
-  - a re-run after a crash at each of steps c, e and f, with no duplicate cost row, PR or QC;
+  - a re-run after a crash at each of steps c, e, f and g, with no duplicate cost row, PR or QC, and no lost cost row or ping;
+  - the branch head moving between d and f, and during QC → `blocked`;
   - an already-finished row (no-op).
+- **One attempt:** `approvePlan` refuses any builder on a row with `cloud_start_claimed_at` set.
 - **Recovery:**
   - start recovery: adopt vs blocked, and never create;
   - finish recovery selection;
