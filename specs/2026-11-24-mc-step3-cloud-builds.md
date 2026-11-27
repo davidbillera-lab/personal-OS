@@ -1,6 +1,16 @@
 # Mission Control step 3: approved plans build themselves on Managed Agents
 
-**Status:** DRAFT r5, 2026-11-27. Approved in outline by David 2026-11-24.
+**Status:** DRAFT r6, 2026-11-27. Approved in outline by David 2026-11-24.
+- **CodexQC round 5** (gpt-6.2-sol) returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-27T20-14-24-750Z.md`). All 8 findings were confirmed and folded in:
+  - the PR head is a server-created `mc-review-<id>` branch that the bot can't move, and QC reviews a diff pinned by sha;
+  - the protected-file check diffs complete trees, so it has no 300-file cap, catches both sides of a rename, and fails closed on truncation;
+  - the outcome is persisted before the ping and replayed, never recomputed;
+  - "not found" only becomes terminal after 30 minutes, and a 48-hour orphan scan catches late sessions;
+  - a clear 4xx goes through the tail;
+  - the marker is versioned;
+  - reconcile has per-call timeouts, time reserved per pass, and obligations first;
+  - the duplicate index is dropped;
+  - the runbook gets a cutover procedure.
 - **CodexQC round 4** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-27T20-10-03-256Z.md`). Both findings were confirmed and folded in:
   - a `cloud_sessions` ledger that owns the end and cost obligations for every session;
   - one shared terminal tail that every outcome goes through, including recovery's "not found" and stall cases.
@@ -18,7 +28,7 @@
 - **CodexQC round 1** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-25T05-12-42-970Z.md`). All 4 blockers, both should-fixes and the nit were confirmed and are folded in below.
 - **Gap Codex missed:** `queue/dispatch` is not in the `vercel.json` cron list. The only crons are the daily digest and the twice-daily `stuck-jobs`, so a 10-minute backup check doesn't exist. Recovery is redesigned around that (§ Finishing).
 
-**Gates:** David runs CodexQC round 5 on this spec. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
+**Gates:** David runs CodexQC round 6 on this spec. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
 **Step 3 of 3** toward running Mission Control from the dashboard (`decisions.md` 2026-11-06). Steps 1 and 2 shipped in PRs #29, #32 and #33.
 **Why this path:** the home-rig spike failed its stop-loss (`specs/2026-11-24-step3-spike-report.md`). David chose Claude Managed Agents over Claude Code routines and GitHub Actions on 2026-11-24 (`decisions.md`). Codex cloud and Claude Code web sessions were ruled out, because neither can be started by a server.
 
@@ -31,7 +41,7 @@ David clicks **Approve plan** on a project card and picks **Claude (cloud)**. Fr
 | Capability | Where |
 |---|---|
 | Approve a plan and pick a builder | `planOwnerApprovePlan()` `lib/owner-requests.ts:163`, `approvePlan()` `app/(app)/projects/[id]/actions.ts:253` |
-| The real reviewer (GPT-6.1 Sol) | `runCodexQCCore()` `lib/codex-qc.ts:131` |
+| The real reviewer (GPT-6.x Sol) | `runCodexQCCore()` `lib/codex-qc.ts:131` |
 | PR diff fetch | `fetchGitHubPrDiff()` `lib/github.ts:14`, using `GITHUB_PAT` (already set on Vercel prod) |
 | Protected-file check | `alwaysRefused(path)` `scripts/lib/build-patch.mjs:61` |
 | No preview deploys of build branches | `vercel.json` `git.deploymentEnabled` `mc-build-*: false` |
@@ -64,8 +74,8 @@ David clicks **Approve plan** on a project card and picks **Claude (cloud)**. Fr
      - `metadata: {mc_request_id}`;
      - `initial_events` holding a single `user.message` with the build prompt. A non-empty `initial_events` creates the session already running.
    - **Write back.** First insert the `cloud_sessions` ledger row (`is_primary: true`). Then write `cloud_session_id`, `cloud_branch` and `latest_progress` on the request. If either write fails, it's treated as an unclear failure (below), and start recovery finds the session by metadata.
-   - **Clear failure.** The API returns a 4xx before any session exists. The row goes to `blocked` with the error.
-   - **Unclear failure.** This covers a timeout, a 5xx, or a successful create whose write-back then fails. Don't assume no session exists. Leave the row `in_progress` with `cloud_session_id` null and let **start recovery** (§ Finishing) settle it.
+   - **Clear failure.** Only a 400, 401, 403, 404 or 422 counts. Each is a refusal the API returns before creating anything. Set the marker, claim the finishing lease, and run the **terminal tail** with outcome `blocked` and the error. That means it gets a ping like every other outcome.
+   - **Unclear failure.** Everything else: a timeout, a connection error, 408/409/429, a 5xx, or a successful create whose write-back then fails. Don't assume no session exists. Leave the row `in_progress` with `cloud_session_id` null and let **start recovery** (§ Finishing) settle it.
    - **Never re-create automatically.** A retry could start a second paid builder. Only start recovery or David may decide a new start is needed.
 3. **Build** (inside the Anthropic sandbox). The agent:
    - works in `/workspace/personal-OS`;
@@ -75,7 +85,7 @@ David clicks **Approve plan** on a project card and picks **Claude (cloud)**. Fr
    - ends with a fixed-format summary covering what changed, the test command and its result, and anything it couldn't do.
    - Git push goes through Anthropic's git proxy, so the token never enters the box.
 4. **Report back.** Anthropic POSTs to `/api/cloud-builds/webhook` on `session.status_idled` and `session.status_terminated`. See piece 2.
-5. **David decides.** He merges or closes the draft PR. CodexQC has already run on it.
+5. **David decides.** He merges or closes the draft PR. CodexQC has already run on it. The PR's head is `mc-review-<id>`, a branch the server creates at the checked commit. The bot can't update it (§ Git containment), so what David merges is exactly what was checked and reviewed.
 
 ### The build prompt (`buildCloudPrompt` in `lib/cloud-build.ts`)
 
@@ -158,6 +168,7 @@ A fine-grained token can't be limited to some branches. A token on David's accou
 **Containment proof is a prerequisite** (piece 0a, step 4). Before the first build, David checks each of these with the bot's token from his own shell. Each must be refused by GitHub:
 - push to `main`;
 - push to a branch named `not-mc-build-x`;
+- push to `mc-review-proof`, which David creates first. This proves the bot can't move a review branch, and the merge gate depends on it;
 - push a tag;
 - push a commit touching `.github/workflows/`;
 - delete a branch that isn't `mc-build-*`, for example a throwaway `proof-delete-me` that David creates first.
@@ -201,7 +212,7 @@ Under the credential rule, Claude never creates, reads or pastes these.
   - `cloud_finish_lease_id UUID` and `cloud_finish_lease_at TIMESTAMPTZ`, the finishing claim;
   - `cloud_pr_url TEXT`;
   - `cloud_notified_at TIMESTAMPTZ`.
-  - Index `cloud_session_id`.
+  - `cloud_outcome JSONB`, the decided terminal outcome: `{status, reason, verdict, ping_text}`. It's written once, before the ping, and replayed afterwards (§ terminal tail). `cloud_session_id UNIQUE` already creates its index, so no extra index is needed.
   - **Session ledger table `cloud_sessions`.** Every session we create or discover gets a row here **before** anything else refers to it. Ending a session and recording its cost are obligations on the ledger row, not on the request, so they survive crashes, duplicate sessions and terminal requests.
     - Columns:
       - `session_id TEXT PRIMARY KEY`;
@@ -243,7 +254,8 @@ Under the credential rule, Claude never creates, reads or pastes these.
 1. **Verify the HMAC signature** with `CLOUD_BUILD_WEBHOOK_SECRET`. Use the SDK's helper if 0.95.1 has one, otherwise standard-webhooks verification. Fail closed: no secret or a bad signature gets a 401.
 2. **Persist before acknowledging.** In this order:
    - insert the event `id` into `cloud_build_events`. A conflict means a duplicate; carry on, because the marker below is idempotent;
-   - set `cloud_finish_requested_at = coalesce(cloud_finish_requested_at, now())` on the row whose `cloud_session_id` matches `data.id`. Only rows still `in_progress` are touched.
+   - set `cloud_finish_requested_at = now()` on the row. This deliberately isn't a coalesce: every idle signal bumps the marker, so a finisher that saw an older one can't erase it (step a);
+   - the match is on the row whose `cloud_session_id` matches `data.id`. Only rows still `in_progress` are touched.
    - Only after both writes succeed, return 2xx. If either fails, return 500 so Anthropic retries. Never return a 3xx, because a redirect auto-disables the endpoint.
 3. **Process after responding.** Call `finishCloudBuild(requestId)` from Next's `after()`. That's best-effort; the saved marker is what makes it durable. If the function dies mid-way, recovery picks the row up.
 
@@ -270,12 +282,24 @@ In those cases finishing releases its lease and returns, leaving the row `in_pro
 
 | # | Step | Safe to repeat because |
 |---|---|---|
-| a | Fetch the session and its events, and read the last `session.status_idle` `stop_reason`. `budget_reached` → `blocked` ("hit the $5 cap"). `requires_action` → `blocked`. Still `running` → clear the marker and return; a later idle event re-sets it. Terminated with an error → `failed` | Read-only |
+| a | Fetch the session and its events, and read the last `session.status_idle` `stop_reason`. `budget_reached` → `blocked` ("hit the $5 cap"). `requires_action` → `blocked`. Still `running` → clear the marker **only if it still equals the value read at claim** (`… where cloud_finish_requested_at = <seen>`), release the lease and return. A newer idle signal that arrived meanwhile keeps its marker. Terminated with an error → `failed` | Read-only |
 | b | `parseCloudSummary` → outcomes per the summary contract | Pure |
 | c | Close out: run `closeOutSession` (below) on every ledger row for this request. If it fails, the tail carries on and the ledger row stays open for the cleanup pass. The ping says "cost pending" when a cost isn't recorded yet | Each obligation is guarded by its own ledger column |
-| d | GitHub compare `main...mc-build-<id>`. Save the branch's head sha as `cloud_head_sha` (first run only; a re-run compares against the saved sha). Run `alwaysRefused` on each changed path **at that sha**. Any hit → `blocked` with the paths. No branch or no diff → `blocked` ("agent pushed nothing") | Read-only plus a write-once sha |
-| e | PR: if `cloud_pr_url` is set, skip. Otherwise first look up an existing PR with head `mc-build-<id>` (any state) and adopt it. Only if none exists, open a draft PR with `GITHUB_PAT`. Save `cloud_pr_url` | Lookup before create |
-| f | QC. **Sha gate:** the PR head must equal `cloud_head_sha`, otherwise `blocked` ("branch changed after the protected-file check"). Run `runCodexQCCore` with `reviewedSha = cloud_head_sha`. Re-check the PR head after QC returns; a change means the same `blocked`. Skip if the task already has a verdict for that sha.
+| d | **Pin the commit, then check every changed path.**
+1. Read the head sha of `mc-build-<id>` and save it as `cloud_head_sha`. This happens on the first run only; a re-run uses the saved sha. Also save the merge-base with `main` as the fixed base.
+2. Build the **complete** change set by diffing two full trees, `git/trees/<base>?recursive=1` against `git/trees/<head>?recursive=1`, by path, blob sha and mode. Don't use the compare API's file list, which stops at 300 files. A rename shows up as a removed old path plus an added new path, so both sides get checked; so do mode and symlink changes.
+3. If either tree response has `truncated: true`, block ("change set too large to verify"). It fails closed.
+4. Run `alwaysRefused` on every path in the set. Any hit → `blocked` with the paths.
+5. An empty set or a missing branch → `blocked` ("agent pushed nothing").
+
+| Read-only plus a write-once sha |
+| e | **Review branch and PR.**
+- Create `mc-review-<id>` at `cloud_head_sha` with `GITHUB_PAT`. That's David's identity, which bypasses the ruleset. If the branch already exists at the same sha, adopt it. If it exists at any other sha, block.
+- If `cloud_pr_url` is set, skip the PR. Otherwise look up an existing PR with head `mc-review-<id>` (any state) and adopt it. Only if none exists, open a draft PR from `mc-review-<id>`. Save `cloud_pr_url`.
+- The bot can't create, update or delete `mc-review-*`, because the branch ruleset restricts everything outside `mc-build-*`. So the PR's head is frozen at the checked commit through to merge.
+
+| Lookup before create; adopt only at the same sha |
+| f | **QC.** **Sha gate:** the PR head must equal `cloud_head_sha`, otherwise `blocked`. Run `runCodexQCCore` on the diff of the fixed base against `cloud_head_sha`, fetched by sha rather than as the PR's live diff, with `reviewedSha = cloud_head_sha`. The fetch is `compare/<base>...<cloud_head_sha>` with the diff media type; piece 2 adds it beside `fetchGitHubPrDiff`. If GitHub refuses a diff as too large, that counts as a reviewer error, so it fails closed. Skip if the task already has a verdict for that sha.
 
 **Results:**
 - **Lease held by another run:** non-terminal. Release the finishing lease, keep the marker and return; recovery or the next call retries.
@@ -285,8 +309,14 @@ In those cases finishing releases its lease and returns, leaving the row `in_pro
   - `RECONSIDER` → `blocked`, matching the existing rule in `claude-executor-adapter.mjs:333`.
 
 A row reaches `awaiting_approval` only with a saved, completed verdict for `cloud_head_sha` | Existing QC lease plus a sha check |
-| g | Telegram ping only if `cloud_notified_at` is null, then set it. The outcome is already decided by this point, so the ping can go out before the status write | `minimal:` a crash between send and mark can send twice; acceptable for a ping |
-| h | Final status `awaiting_approval` (or the blocked/failed status from earlier) with `result_summary`. Clear the lease in the same update. Because the ping goes first, a crash here leaves the row `in_progress` with the marker set, recovery re-runs it, and the ping isn't lost | Lease-guarded |
+| g | **Persist the decision, then ping.**
+1. Write `cloud_outcome` (status, reason, verdict, ping text) `where cloud_outcome is null`, guarded by the lease.
+2. Send the Telegram ping from the **stored** `ping_text`, only if `cloud_notified_at` is null, then set it.
+
+| Write-once outcome; `minimal:` a crash between send and mark can send twice, which is acceptable for a ping |
+| h | Final status = `cloud_outcome.status` with `result_summary`, and clear the lease in the same update. A crash here leaves the row `in_progress` with the marker set, so recovery re-runs it. | Lease-guarded |
+
+**Replay, never recompute.** Once `cloud_outcome` is set, a re-run of `finishCloudBuild` or the tail skips steps a–f and replays g (no-op if already pinged) and h from the stored outcome. A transient error therefore can't ping "blocked" and then later save `awaiting_approval` silently. Re-evaluating a decided outcome is not in v1; David submits a new request.
 
 **The terminal tail (`finalizeCloudRequest(requestId, leaseId, outcome)`).** Steps c, g and h are one shared function. **Every** terminal outcome goes through it, whether it comes from finishing, the start-recovery "not found" case, or the stall rule. The caller must hold the finishing lease. Recovery paths take it the same way: set the marker, then claim.
 
@@ -314,8 +344,15 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
      - **then** adopt the oldest by setting `cloud_session_id`;
      - extras get ended and costed by the cleanup pass, and their ids are listed in `result_summary`.
      - A crash at any point loses nothing. Before adoption the row still qualifies for start recovery; after it, the extras are already on the ledger.
-   - **Not found:** run the terminal tail with outcome `blocked` ("start didn't happen; no session found, nothing spent; submit a new request to retry"). That means a ping, a status change, and no ledger rows to close out.
+   - **Not found:** a negative lookup is only authoritative after **30 minutes** from the claim. That gives several lookups across reconcile runs and Retry clicks, and it outlasts any late create.
+     - Before 30 minutes: leave the row as it is.
+     - After: run the terminal tail with outcome `blocked`. The message is "start didn't happen; no session found after 30 min. The orphan scan keeps watching for 48 h, so the card shows any late spend. Submit a new request to retry".
+     - It never says "nothing spent", because that isn't known yet.
    - **Never create.**
+0. **Orphan scan (runs first, every invocation).** List the sessions created by `CLOUD_BUILD_AGENT_ID` in the last 48 hours. Any session id that isn't in the ledger and carries `metadata.mc_request_id` gets inserted, with `is_primary: false` unless its request is still `in_progress` with no `cloud_session_id`; then it's start recovery's to adopt. The ledger sweep then ends it and records its cost, whatever state its request is in. This is the one catch-all for a create that landed late or was never written back.
+   - Bounded to 5 list pages per invocation. At v1 volume, a handful of sessions a day, that's one page.
+   - If 48 hours of sessions doesn't fit in 5 pages, the scan logs a `stuck-jobs` alert line rather than silently skipping.
+   - Piece 1 verifies how `sessions.list` filters (by agent, by date) and pages.
 2. **Finish recovery.** Targets rows that are `in_progress` with a session ID and either a stale marker (no lease, or an expired lease) or no marker but a session that is now idle or terminated.
    - Set the marker if it's missing, then call `finishCloudBuild`.
    - **Stall rule:** for a session still `running` 2 hours after the claim, set the marker, claim the lease, and run the terminal tail with outcome `blocked` ("cloud build stalled"). The tail's close-out ends the running session and records its cost, and the ping goes out.
@@ -328,11 +365,15 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
 **Where it runs:**
 - **Scheduled:** the existing `stuck-jobs` cron (22:00 and 05:59 UTC) calls it, **after** its alert work, so a backlog can never starve the alerts.
 - **Bounded work per call:**
-  - each pass works oldest first (`cloud_finish_requested_at`, then `cloud_start_claimed_at`);
-  - at most 3 finishes per invocation, because QC is the slow step;
-  - stop picking up new rows once 200 s have passed since the invocation started, leaving room inside the 300 s limit.
+  - **Order:** orphan scan, then ledger sweep, then start recovery, then finishes. Obligations to end and cost sessions go first, so they never depend on time QC leaves over.
+  - Each pass works oldest first (`cloud_finish_requested_at`, then `cloud_start_claimed_at`).
+  - **Every external call has a timeout:** 20 s for Anthropic and GitHub calls, 120 s for the QC call. A QC timeout counts as a reviewer error (`blocked`).
+  - **Budget, against a 280 s hard stop inside the 300 s limit:**
+    - the orphan scan and ledger sweep stop taking new rows at 60 s;
+    - start recovery stops at 90 s;
+    - a finish starts only if at least 170 s remain, which covers its worst case of a few 20 s calls plus 120 s of QC;
+    - at most 3 finishes per invocation.
   - Unprocessed rows stay eligible, because selection is by row state, not a queue. A run cut off mid-row leaves a lease that expires in 6 minutes.
-  - Cleanup and start recovery are cheap (one or two API calls per row) and get the time left over.
   - `minimal:` at 3 finishes per cron run, twice a day, a backlog of more than 6 finished builds takes more than a day to clear without Retry clicks. That's fine at v1 volume; the `pg_cron` upgrade below fixes it.
 - **On demand:** a **Retry finish** owner action on the card, behind the same owner check as the others.
 - `minimal:` with a healthy webhook a build finishes within seconds. If the webhook fails, recovery can take up to ~16 hours unless David clicks Retry. The upgrade path is Supabase `pg_cron` + `pg_net` hitting a `CRON_SECRET`-gated reconcile route every 10 minutes. That needs a secret stored in Supabase Vault, so it's David's step.
@@ -355,9 +396,20 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
   - `sessions.create` is called with `maxRetries: 0`; a create timeout leaves the row for start recovery; start recovery with two matching sessions adopts the oldest and ends and costs the other;
   - reconcile stops picking up rows past the time cutoff and processes oldest first.
   - an already-finished row (no-op).
+- **Pinning and completeness:**
+  - a protected path that sorts beyond the first 300 changed files is caught;
+  - a rename *from* a protected path is caught, and so is a rename *to* one;
+  - a mode-only or symlink change on a protected path is caught;
+  - `truncated: true` → `blocked`;
+  - a bot push to `mc-build-<id>` after QC doesn't change the PR head, which stays `mc-review-<id>` at `cloud_head_sha`;
+  - QC reviews the compare diff by sha, not the live PR diff;
+  - `mc-review-<id>` already existing at another sha → `blocked`.
+- **Durable outcome:** a crash after `cloud_notified_at` is saved but before the status write replays the **same** stored outcome on re-run, with no second ping and no recomputation. A transient QC error that was pinged as `blocked` stays `blocked`.
+- **Marker versioning:** the finisher reads `running`, then an idle webhook bumps the marker, then the finisher's clear does nothing and the newer marker survives.
+- **Clear 4xx on create** → the terminal tail runs: a ping is sent and the status is `blocked`. A 5xx, 408/409/429 or timeout → the row is left for start recovery.
 - **One attempt:** `approvePlan` refuses any builder on a row with `cloud_start_claimed_at` set.
 - **Recovery:**
-  - start recovery: adopt vs blocked, and never create;
+  - start recovery: adopt vs blocked, and never create. "Not found" only becomes terminal after 30 minutes. A session that appears after the first negative lookup, or after the request is already blocked, is picked up by the orphan scan, then ended and costed;
   - start recovery with two matches, crashing after the ledger insert and before adoption, then again after adoption: both sessions end up ended and costed, with no duplicate cost row;
   - "not found" and the stall rule both go through the terminal tail: a ping is sent, the status is set, and (for a stall) the session is ended and its cost recorded;
   - finish recovery selection;
@@ -373,7 +425,12 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
   - recovering a failed or stuck run (Retry finish, then the Console session viewer);
   - confirming a session ended;
   - re-running the containment proof;
-  - handing the bot account and workspace to a new owner.
+  - handing the bot account and workspace to a new owner, **with a cutover** so nothing is stranded under the old owner:
+    1. pause approvals (no new `claude_cloud` approvals);
+    2. drain: wait until no request is `in_progress` and the ledger has no open rows (`ended_at` or `cost_recorded_at` null), then merge or close the open `mc-review-*` PRs;
+    3. switch the credentials and run the setup script against the new workspace;
+    4. re-run the containment proof and the smoke check;
+    5. only then revoke the old credentials.
 - **Smoke check first:** before live run 1, a trivial request that changes one line. It settles the `allowed_hosts` question and proves webhook → PR end to end.
 - **Live run 1:** a real small request on personal-OS (for example the flaky `trusted-git` temp-dir test, already on the next-action list). End to end: no window opened, draft PR, QC ran, tests actually ran.
 - **Live run 2:** a second, different request.
