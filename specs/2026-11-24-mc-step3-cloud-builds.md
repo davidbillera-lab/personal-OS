@@ -1,6 +1,9 @@
 # Mission Control step 3: approved plans build themselves on Managed Agents
 
-**Status:** DRAFT r4, 2026-11-26. Approved in outline by David 2026-11-24.
+**Status:** DRAFT r5, 2026-11-27. Approved in outline by David 2026-11-24.
+- **CodexQC round 4** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-27T20-10-03-256Z.md`). Both findings were confirmed and folded in:
+  - a `cloud_sessions` ledger that owns the end and cost obligations for every session;
+  - one shared terminal tail that every outcome goes through, including recovery's "not found" and stall cases.
 - **CodexQC round 3** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-27T04-51-16-629Z.md`). All 4 findings were confirmed and folded in:
   - `maxRetries: 0` on session create, and recovery when several sessions match;
   - a defined result for every QC outcome;
@@ -15,7 +18,7 @@
 - **CodexQC round 1** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-25T05-12-42-970Z.md`). All 4 blockers, both should-fixes and the nit were confirmed and are folded in below.
 - **Gap Codex missed:** `queue/dispatch` is not in the `vercel.json` cron list. The only crons are the daily digest and the twice-daily `stuck-jobs`, so a 10-minute backup check doesn't exist. Recovery is redesigned around that (§ Finishing).
 
-**Gates:** David runs CodexQC round 4 on this spec. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
+**Gates:** David runs CodexQC round 5 on this spec. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
 **Step 3 of 3** toward running Mission Control from the dashboard (`decisions.md` 2026-11-06). Steps 1 and 2 shipped in PRs #29, #32 and #33.
 **Why this path:** the home-rig spike failed its stop-loss (`specs/2026-11-24-step3-spike-report.md`). David chose Claude Managed Agents over Claude Code routines and GitHub Actions on 2026-11-24 (`decisions.md`). Codex cloud and Claude Code web sessions were ruled out, because neither can be started by a server.
 
@@ -60,7 +63,7 @@ David clicks **Approve plan** on a project card and picks **Claude (cloud)**. Fr
      - `budget: {type: 'limit', max_list_cost: {amount: '500', currency: 'USD'}}`, a $5 hard cap;
      - `metadata: {mc_request_id}`;
      - `initial_events` holding a single `user.message` with the build prompt. A non-empty `initial_events` creates the session already running.
-   - **Write back.** Writes `cloud_session_id`, `cloud_branch` and `latest_progress`.
+   - **Write back.** First insert the `cloud_sessions` ledger row (`is_primary: true`). Then write `cloud_session_id`, `cloud_branch` and `latest_progress` on the request. If either write fails, it's treated as an unclear failure (below), and start recovery finds the session by metadata.
    - **Clear failure.** The API returns a 4xx before any session exists. The row goes to `blocked` with the error.
    - **Unclear failure.** This covers a timeout, a 5xx, or a successful create whose write-back then fails. Don't assume no session exists. Leave the row `in_progress` with `cloud_session_id` null and let **start recovery** (§ Finishing) settle it.
    - **Never re-create automatically.** A retry could start a second paid builder. Only start recovery or David may decide a new start is needed.
@@ -196,11 +199,20 @@ Under the credential rule, Claude never creates, reads or pastes these.
   - `cloud_head_sha TEXT`, the commit the protected-file check and QC are bound to;
   - `cloud_finish_requested_at TIMESTAMPTZ`, the durable "finish needed" marker;
   - `cloud_finish_lease_id UUID` and `cloud_finish_lease_at TIMESTAMPTZ`, the finishing claim;
-  - `cloud_cost_cents INTEGER`;
   - `cloud_pr_url TEXT`;
-  - `cloud_notified_at TIMESTAMPTZ`;
-  - `cloud_session_ended_at TIMESTAMPTZ`, set only once Anthropic confirms the session stopped.
-  - Index `cloud_session_id`, plus a partial index on rows where `cloud_start_claimed_at IS NOT NULL AND cloud_session_ended_at IS NULL`.
+  - `cloud_notified_at TIMESTAMPTZ`.
+  - Index `cloud_session_id`.
+  - **Session ledger table `cloud_sessions`.** Every session we create or discover gets a row here **before** anything else refers to it. Ending a session and recording its cost are obligations on the ledger row, not on the request, so they survive crashes, duplicate sessions and terminal requests.
+    - Columns:
+      - `session_id TEXT PRIMARY KEY`;
+      - `request_id UUID NOT NULL REFERENCES mc_requests`;
+      - `is_primary BOOLEAN NOT NULL`;
+      - `discovered_at TIMESTAMPTZ DEFAULT now()`;
+      - `ended_at TIMESTAMPTZ`, set only once Anthropic confirms the session stopped;
+      - `cost_cents INTEGER`;
+      - `cost_recorded_at TIMESTAMPTZ`.
+    - A partial index on `ended_at IS NULL OR cost_recorded_at IS NULL`.
+    - The card shows cost as the sum of `cost_cents` for the request.
   - Add a `cloud_build_events` table (`event_id TEXT PRIMARY KEY`, `session_id`, `received_at`) for webhook dedupe, unless migration 026's ledger fits exactly.
   - Check prod `information_schema` before and after. Prod has drifted before (memory: mc-prod-schema-drift).
 - **`scripts/setup-cloud-builder.mjs`:** as described above.
@@ -260,7 +272,7 @@ In those cases finishing releases its lease and returns, leaving the row `in_pro
 |---|---|---|
 | a | Fetch the session and its events, and read the last `session.status_idle` `stop_reason`. `budget_reached` → `blocked` ("hit the $5 cap"). `requires_action` → `blocked`. Still `running` → clear the marker and return; a later idle event re-sets it. Terminated with an error → `failed` | Read-only |
 | b | `parseCloudSummary` → outcomes per the summary contract | Pure |
-| c | Record cost. Insert the `model_costs` row (`purpose: 'cloud_build'`) with a **fixed id**: a UUIDv5 of the session id, `on conflict (id) do nothing`. Then set `cloud_cost_cents` for display. The two writes don't depend on each other, so a crash between them loses nothing; the re-run repeats both | Fixed primary key (`model_costs.id` is a plain uuid PK, checked 2026-11-25; no migration needed) |
+| c | Close out: run `closeOutSession` (below) on every ledger row for this request. If it fails, the tail carries on and the ledger row stays open for the cleanup pass. The ping says "cost pending" when a cost isn't recorded yet | Each obligation is guarded by its own ledger column |
 | d | GitHub compare `main...mc-build-<id>`. Save the branch's head sha as `cloud_head_sha` (first run only; a re-run compares against the saved sha). Run `alwaysRefused` on each changed path **at that sha**. Any hit → `blocked` with the paths. No branch or no diff → `blocked` ("agent pushed nothing") | Read-only plus a write-once sha |
 | e | PR: if `cloud_pr_url` is set, skip. Otherwise first look up an existing PR with head `mc-build-<id>` (any state) and adopt it. Only if none exists, open a draft PR with `GITHUB_PAT`. Save `cloud_pr_url` | Lookup before create |
 | f | QC. **Sha gate:** the PR head must equal `cloud_head_sha`, otherwise `blocked` ("branch changed after the protected-file check"). Run `runCodexQCCore` with `reviewedSha = cloud_head_sha`. Re-check the PR head after QC returns; a change means the same `blocked`. Skip if the task already has a verdict for that sha.
@@ -276,6 +288,19 @@ A row reaches `awaiting_approval` only with a saved, completed verdict for `clou
 | g | Telegram ping only if `cloud_notified_at` is null, then set it. The outcome is already decided by this point, so the ping can go out before the status write | `minimal:` a crash between send and mark can send twice; acceptable for a ping |
 | h | Final status `awaiting_approval` (or the blocked/failed status from earlier) with `result_summary`. Clear the lease in the same update. Because the ping goes first, a crash here leaves the row `in_progress` with the marker set, recovery re-runs it, and the ping isn't lost | Lease-guarded |
 
+**The terminal tail (`finalizeCloudRequest(requestId, leaseId, outcome)`).** Steps c, g and h are one shared function. **Every** terminal outcome goes through it, whether it comes from finishing, the start-recovery "not found" case, or the stall rule. The caller must hold the finishing lease. Recovery paths take it the same way: set the marker, then claim.
+
+**`closeOutSession(sessionId)`.** Two obligations, each guarded by its own column, so it's safe to repeat:
+1. **End.** If `ended_at` is null:
+   - call the ending call, unless the session is already terminated;
+   - re-fetch it;
+   - set `ended_at` only once Anthropic reports it ended.
+2. **Cost.** Only once `ended_at` is set (so usage is final) and `cost_recorded_at` is null:
+   - read the session's usage and compute the cost;
+   - insert the `model_costs` row (`purpose: 'cloud_build'`) with a **fixed id**, a UUIDv5 of the session id, `on conflict (id) do nothing`;
+   - set `cost_cents` and `cost_recorded_at`.
+   - A crash between the insert and the ledger update re-runs as a no-op insert, then the update. `model_costs.id` is a plain uuid PK (checked 2026-11-25), so no migration is needed.
+
 **Why the sha gate:** the bot can update any `mc-build-*` branch, so in principle a concurrent session could push to this one. The gate ties the protected-file check, the PR and QC to the same commit. Anything that moves the branch mid-finish blocks the build instead of publishing a review of code nobody checked.
 
 #### Recovery: `reconcileCloudBuilds()`
@@ -284,17 +309,21 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
 
 1. **Start recovery.** Targets rows that are `in_progress`, have `cloud_start_claimed_at` older than 5 minutes, and have no `cloud_session_id`.
    - Look for a session tagged `metadata.mc_request_id` = row id, created after the claim.
-   - **Found one:** adopt it.
-   - **Found several** (shouldn't happen with retries off, but handled anyway): adopt the oldest. End the others straight away with the ending call and list their ids in `result_summary`. The cleanup pass doesn't see them, because only the adopted id is on the row, so their cost is recorded here with the same fixed-id insert (UUIDv5 of each session id).
-   - **Not found:** `blocked` ("start didn't happen; submit a new request to retry").
+   - **Found any:**
+     - **first**, insert a ledger row for **every** match (`on conflict do nothing`): the oldest gets `is_primary: true`, the rest `false`;
+     - **then** adopt the oldest by setting `cloud_session_id`;
+     - extras get ended and costed by the cleanup pass, and their ids are listed in `result_summary`.
+     - A crash at any point loses nothing. Before adoption the row still qualifies for start recovery; after it, the extras are already on the ledger.
+   - **Not found:** run the terminal tail with outcome `blocked` ("start didn't happen; no session found, nothing spent; submit a new request to retry"). That means a ping, a status change, and no ledger rows to close out.
    - **Never create.**
 2. **Finish recovery.** Targets rows that are `in_progress` with a session ID and either a stale marker (no lease, or an expired lease) or no marker but a session that is now idle or terminated.
    - Set the marker if it's missing, then call `finishCloudBuild`.
-   - **Stall rule:** a session still `running` 2 hours after the claim goes to `blocked` ("cloud build stalled").
-3. **Cleanup.** Targets every row with a `cloud_session_id`, `cloud_session_ended_at IS NULL`, and a status other than `in_progress`.
-   - End the session with the documented ending call. It never archives or deletes.
-   - Re-fetch it, and set `cloud_session_ended_at` only once Anthropic reports it ended.
-   - A failure leaves the column null, so the next pass retries.
+   - **Stall rule:** for a session still `running` 2 hours after the claim, set the marker, claim the lease, and run the terminal tail with outcome `blocked` ("cloud build stalled"). The tail's close-out ends the running session and records its cost, and the ping goes out.
+3. **Cleanup (ledger sweep).** Runs `closeOutSession` on every ledger row with `ended_at IS NULL OR cost_recorded_at IS NULL`, where either:
+   - the row is not primary (an extra), so it's ended even while its request is still building; or
+   - its request is no longer `in_progress`.
+   - It never archives or deletes. A failure leaves the columns null, so the next pass retries.
+   - This works independently of the request's status or `cloud_session_id`, which is what closes the orphaning gap.
 
 **Where it runs:**
 - **Scheduled:** the existing `stuck-jobs` cron (22:00 and 05:59 UTC) calls it, **after** its alert work, so a backlog can never starve the alerts.
@@ -329,9 +358,10 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
 - **One attempt:** `approvePlan` refuses any builder on a row with `cloud_start_claimed_at` set.
 - **Recovery:**
   - start recovery: adopt vs blocked, and never create;
+  - start recovery with two matches, crashing after the ledger insert and before adoption, then again after adoption: both sessions end up ended and costed, with no duplicate cost row;
+  - "not found" and the stall rule both go through the terminal tail: a ping is sent, the status is set, and (for a stall) the session is ended and its cost recorded;
   - finish recovery selection;
-  - the stall rule;
-  - cleanup sets `cloud_session_ended_at` only after confirmation, and retries when the end call fails.
+  - the ledger sweep: sets `ended_at` only after confirmation, records cost only after `ended_at`, retries when the end call fails, and ends extras while the primary is still `in_progress` but never ends a primary that's still building.
 
 ### Piece 3: show it on the card, then the live runs
 
@@ -389,7 +419,7 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
 - Each run cost under $5, and the cost is recorded.
 - A forced protected-file edit (a test request that asks to touch `vercel.json`) ends `blocked` with no PR.
 - The containment proof (piece 0a) passed, and is re-run after the live runs.
-- Every live-run session has `cloud_session_ended_at` set.
+- Every live-run session's ledger row has `ended_at` and `cost_recorded_at` set.
 - The runbook exists.
 
 ## Stop-loss
