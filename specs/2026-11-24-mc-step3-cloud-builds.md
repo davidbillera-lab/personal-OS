@@ -1,6 +1,11 @@
 # Mission Control step 3: approved plans build themselves on Managed Agents
 
-**Status:** DRAFT r3, 2026-11-25. Approved in outline by David 2026-11-24.
+**Status:** DRAFT r4, 2026-11-26. Approved in outline by David 2026-11-24.
+- **CodexQC round 3** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-27T04-51-16-629Z.md`). All 4 findings were confirmed and folded in:
+  - `maxRetries: 0` on session create, and recovery when several sessions match;
+  - a defined result for every QC outcome;
+  - cost and ping on every outcome;
+  - bounded, oldest-first reconcile.
 - **CodexQC round 2** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-25T15-49-25-196Z.md`). All 4 findings were confirmed and folded in:
   - one attempt per request;
   - the cost row written with a fixed id;
@@ -10,7 +15,7 @@
 - **CodexQC round 1** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-25T05-12-42-970Z.md`). All 4 blockers, both should-fixes and the nit were confirmed and are folded in below.
 - **Gap Codex missed:** `queue/dispatch` is not in the `vercel.json` cron list. The only crons are the daily digest and the twice-daily `stuck-jobs`, so a 10-minute backup check doesn't exist. Recovery is redesigned around that (§ Finishing).
 
-**Gates:** David runs CodexQC round 3 on this spec. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
+**Gates:** David runs CodexQC round 4 on this spec. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
 **Step 3 of 3** toward running Mission Control from the dashboard (`decisions.md` 2026-11-06). Steps 1 and 2 shipped in PRs #29, #32 and #33.
 **Why this path:** the home-rig spike failed its stop-loss (`specs/2026-11-24-step3-spike-report.md`). David chose Claude Managed Agents over Claude Code routines and GitHub Actions on 2026-11-24 (`decisions.md`). Codex cloud and Claude Code web sessions were ruled out, because neither can be started by a server.
 
@@ -48,6 +53,7 @@ David clicks **Approve plan** on a project card and picks **Claude (cloud)**. Fr
 2. **Start.** `startCloudBuild` does the following:
    - **Repo check.** Reads the project's `repo_url` and refuses unless it is in `CLOUD_BUILD_REPOS`. v1 allows `davidbillera-lab/personal-OS` only.
    - **Idempotency.** If the SDK or API accepts an idempotency key on session create, send `mc-start-<request id>`. Piece 1 verifies this in the SDK source; it doesn't assume it.
+   - **No SDK retries on create.** The SDK retries connection errors, 408, 409, 429 and 5xx by default. Without server-side idempotency, one `sessions.create()` call could start several paid sessions. So this call passes `maxRetries: 0` as a per-request option, whatever piece 1 finds about idempotency. Every other call keeps the default retries, because reads and session ends are safe to repeat.
    - **Session create.** Calls `client.beta.sessions.create` with:
      - the stored agent ID and environment ID;
      - a `github_repository` resource (`url`, `authorization_token: CLOUD_BUILD_GITHUB_TOKEN`, `checkout` = default branch);
@@ -240,7 +246,15 @@ Under the credential rule, Claude never creates, reads or pastes these.
 - **No row returned:** someone else holds the claim, or the row is already finished. Return.
 - **Every later write** filters on `cloud_finish_lease_id = <mine>`, so a stale run can't overwrite a newer one.
 
-**2. Steps, each safe to repeat:**
+**2. Steps, each safe to repeat.**
+
+**Outcome rule:** steps a, b, d, e and f never finalize the row or return early on a bad result. Each one sets a pending outcome (`blocked`/`failed` plus a reason). Once an outcome is set, the remaining checks in d–f are skipped, but **c (cost), g (ping) and h (status) always run** for every outcome. So a build that hit the budget, wrote a bad summary or failed its tests still has its spend logged and still pings David.
+
+There are two exceptions, and both are non-terminal:
+- a session that is still `running` (step a);
+- a held QC lease (step f).
+
+In those cases finishing releases its lease and returns, leaving the row `in_progress` to be picked up later.
 
 | # | Step | Safe to repeat because |
 |---|---|---|
@@ -249,7 +263,16 @@ Under the credential rule, Claude never creates, reads or pastes these.
 | c | Record cost. Insert the `model_costs` row (`purpose: 'cloud_build'`) with a **fixed id**: a UUIDv5 of the session id, `on conflict (id) do nothing`. Then set `cloud_cost_cents` for display. The two writes don't depend on each other, so a crash between them loses nothing; the re-run repeats both | Fixed primary key (`model_costs.id` is a plain uuid PK, checked 2026-11-25; no migration needed) |
 | d | GitHub compare `main...mc-build-<id>`. Save the branch's head sha as `cloud_head_sha` (first run only; a re-run compares against the saved sha). Run `alwaysRefused` on each changed path **at that sha**. Any hit → `blocked` with the paths. No branch or no diff → `blocked` ("agent pushed nothing") | Read-only plus a write-once sha |
 | e | PR: if `cloud_pr_url` is set, skip. Otherwise first look up an existing PR with head `mc-build-<id>` (any state) and adopt it. Only if none exists, open a draft PR with `GITHUB_PAT`. Save `cloud_pr_url` | Lookup before create |
-| f | QC. **Sha gate:** the PR head must equal `cloud_head_sha`, otherwise `blocked` ("branch changed after the protected-file check"). Run `runCodexQCCore` with `reviewedSha = cloud_head_sha`. Re-check the PR head after QC returns; a change means the same `blocked`. Skip if the task already has a verdict for that sha. Migration 031's lease stops a parallel run | Existing QC lease plus a sha check |
+| f | QC. **Sha gate:** the PR head must equal `cloud_head_sha`, otherwise `blocked` ("branch changed after the protected-file check"). Run `runCodexQCCore` with `reviewedSha = cloud_head_sha`. Re-check the PR head after QC returns; a change means the same `blocked`. Skip if the task already has a verdict for that sha.
+
+**Results:**
+- **Lease held by another run:** non-terminal. Release the finishing lease, keep the marker and return; recovery or the next call retries.
+- **Reviewer error, or no parseable verdict** (`parseQcVerdict` returns null): `blocked` ("QC didn't complete; PR is open, run CodexQC by hand").
+- **Completed verdict:**
+  - `SHIP` or `FIX-FIRST` → `awaiting_approval` with the verdict on the card and in the ping;
+  - `RECONSIDER` → `blocked`, matching the existing rule in `claude-executor-adapter.mjs:333`.
+
+A row reaches `awaiting_approval` only with a saved, completed verdict for `cloud_head_sha` | Existing QC lease plus a sha check |
 | g | Telegram ping only if `cloud_notified_at` is null, then set it. The outcome is already decided by this point, so the ping can go out before the status write | `minimal:` a crash between send and mark can send twice; acceptable for a ping |
 | h | Final status `awaiting_approval` (or the blocked/failed status from earlier) with `result_summary`. Clear the lease in the same update. Because the ping goes first, a crash here leaves the row `in_progress` with the marker set, recovery re-runs it, and the ping isn't lost | Lease-guarded |
 
@@ -261,7 +284,8 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
 
 1. **Start recovery.** Targets rows that are `in_progress`, have `cloud_start_claimed_at` older than 5 minutes, and have no `cloud_session_id`.
    - Look for a session tagged `metadata.mc_request_id` = row id, created after the claim.
-   - **Found:** adopt it.
+   - **Found one:** adopt it.
+   - **Found several** (shouldn't happen with retries off, but handled anyway): adopt the oldest. End the others straight away with the ending call and list their ids in `result_summary`. The cleanup pass doesn't see them, because only the adopted id is on the row, so their cost is recorded here with the same fixed-id insert (UUIDv5 of each session id).
    - **Not found:** `blocked` ("start didn't happen; submit a new request to retry").
    - **Never create.**
 2. **Finish recovery.** Targets rows that are `in_progress` with a session ID and either a stale marker (no lease, or an expired lease) or no marker but a session that is now idle or terminated.
@@ -273,7 +297,14 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
    - A failure leaves the column null, so the next pass retries.
 
 **Where it runs:**
-- **Scheduled:** the existing `stuck-jobs` cron (22:00 and 05:59 UTC) calls it.
+- **Scheduled:** the existing `stuck-jobs` cron (22:00 and 05:59 UTC) calls it, **after** its alert work, so a backlog can never starve the alerts.
+- **Bounded work per call:**
+  - each pass works oldest first (`cloud_finish_requested_at`, then `cloud_start_claimed_at`);
+  - at most 3 finishes per invocation, because QC is the slow step;
+  - stop picking up new rows once 200 s have passed since the invocation started, leaving room inside the 300 s limit.
+  - Unprocessed rows stay eligible, because selection is by row state, not a queue. A run cut off mid-row leaves a lease that expires in 6 minutes.
+  - Cleanup and start recovery are cheap (one or two API calls per row) and get the time left over.
+  - `minimal:` at 3 finishes per cron run, twice a day, a backlog of more than 6 finished builds takes more than a day to clear without Retry clicks. That's fine at v1 volume; the `pg_cron` upgrade below fixes it.
 - **On demand:** a **Retry finish** owner action on the card, behind the same owner check as the others.
 - `minimal:` with a healthy webhook a build finishes within seconds. If the webhook fails, recovery can take up to ~16 hours unless David clicks Retry. The upgrade path is Supabase `pg_cron` + `pg_net` hitting a `CRON_SECRET`-gated reconcile route every 10 minutes. That needs a secret stored in Supabase Vault, so it's David's step.
 
@@ -290,6 +321,10 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
   - each summary-contract outcome;
   - a re-run after a crash at each of steps c, e, f and g, with no duplicate cost row, PR or QC, and no lost cost row or ping;
   - the branch head moving between d and f, and during QC → `blocked`;
+  - every blocked/failed outcome (budget, bad summary, failed tests, protected file, nothing pushed, QC error, RECONSIDER) still writes the cost row and sends the ping;
+  - QC lease held → row stays `in_progress`, marker kept, no ping;
+  - `sessions.create` is called with `maxRetries: 0`; a create timeout leaves the row for start recovery; start recovery with two matching sessions adopts the oldest and ends and costs the other;
+  - reconcile stops picking up rows past the time cutoff and processes oldest first.
   - an already-finished row (no-op).
 - **One attempt:** `approvePlan` refuses any builder on a row with `cloud_start_claimed_at` set.
 - **Recovery:**
