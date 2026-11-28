@@ -12,6 +12,8 @@ import { join } from 'node:path'
 
 const BOT = 'bot'
 const OWNER = 'origin'
+const REPO = 'davidbillera-lab/personal-OS'
+const BOT_LOGIN = 'mc-builder-bot'
 const PROOF_REFS = [
   'refs/heads/mc-build-proof', 'refs/heads/mc-build-proof-wf', 'refs/heads/mc-review-proof',
   'refs/heads/proof-delete-me', 'refs/heads/not-mc-build-x', 'refs/tags/mc-proof-tag',
@@ -72,11 +74,17 @@ const stop = msg => { console.log(`\nSTOPPED: ${msg}`); process.exit(1) }
 const first = push(BOT, `${plain}:refs/heads/mc-build-proof`)
 report(first.ok, 'bot can push mc-build-proof', first.why)
 if (!first.ok) stop('the bot push failed. Check the bot remote and its token, then run again.')
+// ...and it must really be the bot. If git signed in as the owner instead, nothing below proves anything.
+const pusher = () => spawnSync('gh', ['api', `repos/${REPO}/activity?ref=refs/heads/mc-build-proof&per_page=1`, '-q', '.[0].actor.login'], { encoding: 'utf8' }).stdout.trim()
+let who = ''
+for (let i = 0; i < 5 && !who; i++) { who = pusher(); if (!who) spawnSync('node', ['-e', 'setTimeout(()=>{},2000)']) }
+report(who === BOT_LOGIN, `that push was made by ${BOT_LOGIN}`, `GitHub recorded: ${who || 'nothing yet'}`)
+if (who !== BOT_LOGIN) stop(`git pushed as "${who}", not the bot. Run with --cleanup, sign the bot remote in with the bot's token, and run again.`)
 
 // 2. Owner setup. These also prove the admin bypass still works.
 for (const ref of ['refs/heads/mc-review-proof', 'refs/heads/proof-delete-me']) {
   const r = push(OWNER, `${base}:${ref}`)
-  report(r.ok, `owner can create ${ref.replace('refs/heads/', '')}`, r.why)
+  report(r.ok, `owner can create ${ref.replace('refs/heads/', '')}`, r.ok ? '' : r.why)
   if (!r.ok) stop('the owner push failed, so the admin bypass is not working.')
 }
 
