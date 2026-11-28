@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Containment proof for cloud builds (spec: specs/2026-11-24-mc-step3-cloud-builds.md, "Git containment").
 // Pushes as the builder bot and reports what GitHub refused.
-// Asks once for the bot's token (hidden input), keeps it in memory only, and hands it to git through
+// Reads the bot's token from the clipboard, keeps it in memory only, and hands it to git through
 // the child process environment. It is never written to disk, printed, or put on a command line.
 // Git's saved sign-ins are bypassed for bot pushes: they silently pushed as the owner (2026-11-28).
 //
@@ -41,34 +41,15 @@ if (process.argv.includes('--cleanup')) {
   process.exit(0)
 }
 
-const askHidden = question => new Promise(resolve => {
-  process.stdout.write(question)
-  let typed = ''
-  process.stdin.setRawMode(true)
-  process.stdin.resume()
-  process.stdin.on('data', function onData(chunk) {
-    for (const ch of chunk.toString()) {
-      if (ch === '\u0003') process.exit(130)
-      if (ch === '\r' || ch === '\n') {
-        process.stdin.setRawMode(false)
-        process.stdin.pause()
-        process.stdin.off('data', onData)
-        process.stdout.write('\n')
-        return resolve(typed.trim())
-      }
-      typed = ch === '\b' || ch === '\u007f' ? typed.slice(0, -1) : typed + ch
-    }
-  })
-})
-if (!process.stdin.isTTY) {
-  console.error('Run this in a terminal: it needs to ask for the bot token.')
-  process.exit(2)
-}
-const pasted = await askHidden(`Paste the ${BOT_LOGIN} classic token (nothing will show), then press Enter: `)
+// The token comes from the clipboard: pasting into a hidden prompt froze the terminal (2026-11-28).
+const clip = cmd => spawnSync('powershell', ['-NoProfile', '-Command', cmd], { encoding: 'utf8' })
+const pasted = (clip('Get-Clipboard').stdout || '').trim()
 if (!pasted.startsWith('ghp_')) {
-  console.error('That is not a classic GitHub token (those start with ghp_). Nothing was pushed.')
+  console.error(`Copy the ${BOT_LOGIN} classic token first (it starts with ghp_), then run this again. Nothing was pushed.`)
   process.exit(2)
 }
+clip("Set-Clipboard -Value ' '")
+console.log('Token read from the clipboard and the clipboard cleared. Running the checks, about a minute...')
 botEnv = {
   ...process.env,
   GIT_TERMINAL_PROMPT: '0',
