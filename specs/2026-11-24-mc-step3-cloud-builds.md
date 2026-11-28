@@ -1,6 +1,11 @@
 # Mission Control step 3: approved plans build themselves on Managed Agents
 
-**Status:** DRAFT r8, 2026-11-27. Approved in outline by David 2026-11-24.
+**Status:** DRAFT r9, 2026-11-28. Approved in outline by David 2026-11-24.
+- **CodexQC round 8** (gpt-6.2-sol) returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-28T06-51-06-283Z.md`). All 7 findings were confirmed. Under § Review stop rule, the three blocking ones are fixed here and the rest are on the list in § Handle during the build:
+  - a Vercel deployment during the proof is now a hard stop, with no fallback, and the two build-branch checks move to piece 0a so a failure shows before any code is written;
+  - review branches get their own ruleset with no builder bypass, and the reviewed commit carries a `mc/codex-qc` status, so a PR whose head moved after review is visibly unreviewed;
+  - the reviewer's input is checked against the saved change set, file by file, and anything it can't see blocks;
+  - the nit ("only if the review passes") is corrected.
 - **CodexQC round 6** (gpt-6.2-sol) returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-28T04-04-00-729Z.md`). All 8 findings were confirmed. Seven are folded in and one is partly accepted:
   - `mc-review-*` is excluded from Vercel deploys, and the containment proof now covers what runs on a bot push and on the draft PR;
   - the summary names the tested commit, and a mismatch with the pinned head blocks;
@@ -60,13 +65,13 @@
 - **CodexQC round 1** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-25T05-12-42-970Z.md`). All 4 blockers, both should-fixes and the nit were confirmed and are folded in below.
 - **Gap Codex missed:** `queue/dispatch` is not in the `vercel.json` cron list. The only crons are the daily digest and the twice-daily `stuck-jobs`, so a 10-minute backup check doesn't exist. Recovery is redesigned around that (§ Finishing).
 
-**Gates:** CodexQC round 8 on this spec, merged under the rule in § Review stop rule. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
+**Gates:** CodexQC round 9 on this spec, merged under the rule in § Review stop rule. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
 **Step 3 of 3** toward running Mission Control from the dashboard (`decisions.md` 2026-11-06). Steps 1 and 2 shipped in PRs #29, #32 and #33.
 **Why this path:** the home-rig spike failed its stop-loss (`specs/2026-11-24-step3-spike-report.md`). David chose Claude Managed Agents over Claude Code routines and GitHub Actions on 2026-11-24 (`decisions.md`). Codex cloud and Claude Code web sessions were ruled out, because neither can be started by a server.
 
 ## What
 
-David clicks **Approve plan** on a project card and picks **Claude (cloud)**. From there, nobody opens a window. Anthropic runs the build in its own sandbox. The build pushes an `mc-build-<request id>` branch. Mission Control then checks it, runs the real QC, opens a draft PR only if the review passes, and pings David. David merges or closes the PR, which stays the human gate.
+David clicks **Approve plan** on a project card and picks **Claude (cloud)**. From there, nobody opens a window. Anthropic runs the build in its own sandbox. The build pushes an `mc-build-<request id>` branch. Mission Control then checks it, runs the real QC, opens a draft PR after a completed SHIP or FIX-FIRST verdict, and pings David. The draft is a place to read the result, not a recommendation to merge; the verdict says which. David merges or closes the PR, which stays the human gate.
 
 ## What already exists (reuse, don't rebuild)
 
@@ -196,23 +201,30 @@ A fine-grained token can't be limited to some branches. A token on David's accou
    - bypass list: Repository admin (David).
    - Effect: the bot can create and update only `mc-build-*`, and David's own pushes are unaffected.
    - **`main`:** the existing PR-only protection stays on top of this.
-3. **Tag ruleset** `mc-builder-tags`:
+3. **Review ruleset** `mc-review-refs`:
+   - target: `mc-review-*`;
+   - rules: restrict creations, restrict updates, restrict deletions, block force pushes;
+   - bypass list: Repository admin (David) and **nothing else, ever**. No builder app is added here.
+   - Rulesets stack, and a bypass counts only for the ruleset it is on. So a builder that was given bypass on `mc-builder-refs` is still refused on `mc-review-*`. Only David's identity (himself, or the server's review token) can create or move a review branch.
+4. **Tag ruleset** `mc-builder-tags`:
    - target: all tags;
    - rules: restrict creations, updates and deletions;
    - bypass list: Repository admin.
-4. **What runs agent-written code outside the sandbox: nothing, and the proof checks it.** Inventory, checked 2026-11-27:
+5. **What runs agent-written code outside the sandbox: nothing, and the proof checks it.** Inventory, checked 2026-11-27:
    - **GitHub Actions:** the only workflow is `secret-scan.yml`, on `push` and `pull_request`. It runs gitleaks with the default `GITHUB_TOKEN` and executes no repo code. The bot can't add or change a workflow (no `workflow` scope, and `.github/` is a protected path).
    - **Vercel, review branches:** `vercel.json` on `main` excludes `mc-build-*`, and piece 1 adds `mc-review-*`. Step 4 only passes a commit whose `vercel.json` blob is identical to **current** `main`'s, and whose `main` copy contains both exclusions. A branch built on an older `main` from before the exclusion is therefore blocked, not promoted. So every review branch carries the exclusion, whatever commit it was based on.
    - **Open question, settled by the proof:** Vercel reads `vercel.json` from the pushed commit. So the bot could push an `mc-build-*` commit whose `vercel.json` drops the exclusion, and that could build agent code with the Preview environment's variables before any check runs. The proof below tests exactly that. Vercel's docs don't say which commit's config applies, and they document no project setting that the repo can't override (checked 2026-11-27), so this is settled by test, not by reading.
-   - **Fallback that doesn't depend on the pushed tree:** if a deployment appears, the Preview environment must hold nothing worth stealing before cloud builds are enabled. David removes every secret from Vercel's Preview environment, or scopes each one to named branches that aren't `mc-*`, and confirms from the variable **names** list that none remains. Preview builds of agent code then run with no credentials.
-5. **The server's own writes are narrow, in the credential and in the code.**
-   - **Credential:** a dedicated fine-grained token, `CLOUD_BUILD_REVIEW_TOKEN`, owned by David, limited to `personal-OS`, with Contents read/write and Pull requests read/write and nothing else, 90-day expiry. David owns the repo, so a fine-grained token works here (the collaborator limit applies only to the bot). It acts as David, so it bypasses the rulesets; that bypass is what lets it create `mc-review-*`. The general `GITHUB_PAT` is not used for writes.
+   - **A deployment in the proof is a hard stop. There is no fallback.** If any proof push produces a Vercel deployment, cloud builds are not enabled on this repo. Removing secrets from the Preview environment is **not** accepted as a substitute: agent-written code would still run on Vercel before any check, with no credentials but outside the sandbox.
+     - The only way forward from a failed proof is a control the pushed tree can't change, proven by re-running the same three checks. Candidates, none verified: a Vercel team-level deployment policy on Git sources (the REST API lists one; whether it covers this case is unknown), or having the bot push to a repo Vercel isn't connected to, which is a spec revision.
+6. **The server's own writes are narrow, in the credential and in the code.**
+   - **Credential:** a dedicated fine-grained token, `CLOUD_BUILD_REVIEW_TOKEN`, owned by David, limited to `personal-OS`, with Contents read/write, Pull requests read/write and Commit statuses read/write and nothing else, 90-day expiry. David owns the repo, so a fine-grained token works here (the collaborator limit applies only to the bot). It acts as David, so it bypasses the rulesets; that bypass is what lets it create `mc-review-*`. The general `GITHUB_PAT` is not used for writes.
    - **Upgrade path:** a GitHub App installation identity, added to the ruleset bypass list, when a second repo joins.
    - **Code:** every write goes through a single helper in `lib/github.ts` that:
    - creates only the ref `refs/heads/mc-review-<request id>`, built from the row's uuid and never from agent or webhook input, and refuses anything else;
    - opens only a draft PR from that ref into `main` of the allowlisted repo;
+   - sets only the commit status `mc/codex-qc`, only on the row's `cloud_head_sha`;
    - never updates or deletes a ref, and never merges.
-6. **The `alwaysRefused` check after the push is defense in depth.** It decides whether a PR is opened. It is not the containment.
+7. **The `alwaysRefused` check after the push is defense in depth.** It decides whether a PR is opened. It is not the containment.
 
 **Containment proof is a prerequisite** (piece 0a, step 4). Before the first build, David checks each of these with the bot's token from his own shell. Each must be refused by GitHub:
 - push to `main`;
@@ -225,14 +237,14 @@ A fine-grained token can't be limited to some branches. A token on David's accou
 Two pushes must succeed:
 - a push to `mc-build-proof` with the bot's token;
 - David's own push of a new non-`mc-build-*` branch, which proves the admin bypass works on a personal-account repo.
-- **Other builders still work:** one push each from Codex and from Lovable (whichever are in use on this repo) still succeeds with the rulesets on. If one is refused, add that app to the ruleset bypass list and repeat the whole proof.
+- **Other builders still work:** one push each from Codex and from Lovable (whichever are in use on this repo) still succeeds with the rulesets on. If one is refused, add that app to the bypass list of `mc-builder-refs` only, never `mc-review-refs`, and repeat the whole proof. A builder with that bypass must then be refused on a push to `mc-review-proof`.
 
 **Nothing may deploy or run.** David checks these in the Vercel and GitHub dashboards:
 - the `mc-build-proof` push created no Vercel deployment;
 - a second bot push to `mc-build-proof`, with a commit that removes the `mc-build-*` line from `vercel.json`, also created no Vercel deployment;
 - a branch `mc-review-proof2` that David creates from `main` with one trivial commit, with a draft PR opened from it, created no Vercel deployment, and the only Actions run on it is `secret-scan`.
 
-The bot *can* delete other `mc-build-*` branches. That's accepted, because those are all its own work. If any refusal doesn't happen, or either push fails, stop. Don't start piece 1.
+The bot *can* delete other `mc-build-*` branches. That's accepted, because those are all its own work. If any refusal doesn't happen, either push fails, or any of the three checks shows a deployment, stop. The first two deployment checks run in piece 0a, so a failure there means don't start piece 1. The third runs in piece 0b, and a failure there means `CLOUD_BUILD_ENABLED` is never set.
 
 ## Scope: pieces 0a and 0b (David) + 3 code pieces, one commit each
 
@@ -243,8 +255,8 @@ Order: 0a → 1 → 2 → (merge, deploy) → 0b → 3.
 Under the credential rule, Claude never creates, reads or pastes these.
 1. **Console workspace** `mission-control-builds` with a monthly spend limit (suggest $50). Create an API key in it and set it as `CLOUD_BUILD_ANTHROPIC_API_KEY` on Vercel prod. Use a separate key, not the existing `ANTHROPIC_API_KEY`, so build spend shows up on its own line and can be capped.
 2. **Machine account and token.** Create the `mc-builder-bot` account and invite it as a collaborator. Then create the classic token described in § Git containment (`public_repo` only, no `workflow`), with a 90-day expiry. Set the token as `CLOUD_BUILD_GITHUB_TOKEN`.
-3. **Rulesets.** Create the two rulesets from § Git containment.
-4. **Containment proof.** Run the refusal checks from § Git containment and paste the results, not the token, into the build window. The three "nothing may deploy" checks need `mc-review-*: false` on `main`, so they run in piece 0b, after piece 1's `vercel.json` commit is merged and before `CLOUD_BUILD_ENABLED` is set.
+3. **Rulesets.** Create the three rulesets from § Git containment.
+4. **Containment proof.** Run the refusal checks from § Git containment and paste the results, not the token, into the build window. The two `mc-build-proof` deployment checks run here too, because `mc-build-*: false` is already on `main`; they are the ones most likely to fail, and failing now costs nothing. The third (`mc-review-proof2`) needs `mc-review-*: false` on `main`, so it runs in piece 0b, after piece 1's `vercel.json` commit is merged and before `CLOUD_BUILD_ENABLED` is set.
 5. **Allowlist:** set `CLOUD_BUILD_REPOS=davidbillera-lab/personal-OS`.
 6. **Review token.** Create `CLOUD_BUILD_REVIEW_TOKEN` as described in § Git containment and set it on Vercel prod. The token is never shown to Claude. Proof: with it, David creates and deletes a branch `mc-review-proof3` from his own shell, which shows both the permission and the ruleset bypass. A 403 at build time ends `blocked` with "server token can't create the review branch".
 
@@ -256,7 +268,7 @@ Under the credential rule, Claude never creates, reads or pastes these.
    - subscribe to `session.status_idled` and `session.status_terminated`;
    - set the `whsec_` secret (shown once) as `CLOUD_BUILD_WEBHOOK_SECRET`, then redeploy.
    - Subscribe *before* the first run, because events are not backfilled.
-3. **Finish the containment proof** (the "nothing may deploy" checks).
+3. **Finish the containment proof** (the `mc-review-proof2` check, and the two `mc-build-proof` checks again). Any deployment is a hard stop.
 4. **Turn it on:** set `CLOUD_BUILD_ENABLED=true` and redeploy. Until this step the card option is disabled and the server refuses cloud approvals.
 
 ### Piece 1: start a cloud build
@@ -270,6 +282,7 @@ Under the credential rule, Claude never creates, reads or pastes these.
   - `cloud_finish_requested_at TIMESTAMPTZ`, the durable "finish needed" marker;
   - `cloud_finish_lease_id UUID` and `cloud_finish_lease_at TIMESTAMPTZ`, the finishing claim;
   - `cloud_paths_checked_at TIMESTAMPTZ`, set only when the path check passed for the saved pair;
+  - `cloud_paths JSONB`, the checked change set (path, and whether the blob changed), saved in the same write;
   - `cloud_qc JSONB`, the saved review: `{repo, base_sha, head_sha, verdict, notes}`. Written once. It is the only record finishing reuses;
   - `cloud_pr_url TEXT`;
   - `cloud_notified_at TIMESTAMPTZ`.
@@ -377,10 +390,11 @@ Skipped entirely when `cloud_paths_checked_at` is set.
 2. **Complete change set.** Diff two full trees, `git/trees/<base>?recursive=1` against `git/trees/<head>?recursive=1`, by path, blob sha and mode. Don't use the compare API's file list, which stops at 300 files. A rename shows up as a removed path plus an added path, so both sides are checked.
    - Either response has `truncated: true` → `blocked` ("change set too large to verify").
    - Empty set → `blocked` ("agent pushed nothing").
+   - More than 300 changed paths → `blocked` ("too large to review").
 3. **Protected paths.** Run `alwaysRefused` on every path in the set. Any hit → `blocked` with the paths.
    - Any added or changed submodule entry (mode `160000`) or symlink (mode `120000`), or any change to `.gitmodules`, also blocks.
 4. **Vercel config matches current `main`.** The `vercel.json` blob sha in the head tree must equal the one in `main`'s tree right now, and `main`'s copy must list both `mc-build-*` and `mc-review-*` as `false`. Otherwise `blocked` ("branch is based on an older main; submit a new request"). This is what makes the exclusion hold for every commit the server promotes (§ Git containment).
-5. **Save the pass.** Set `cloud_paths_checked_at = now()`. A block writes no timestamp; it becomes the outcome.
+5. **Save the pass.** Set `cloud_paths_checked_at = now()` and `cloud_paths` to the change set, in one write. A block writes no timestamp; it becomes the outcome.
 
 - *Repeatable:* write-once shas, and a saved pass that later runs trust instead of redoing.
 
@@ -397,6 +411,10 @@ Skipped entirely when `cloud_paths_checked_at` is set.
 - **Reuse.** If `cloud_qc` is set, use it. It is only ever written for this request's saved repo, base and head, so nothing else can satisfy it. A verdict saved on the task by any other path is **not** reused.
 - **Admission.** Start the reviewer call only if at least 150 s remain before the invocation deadline (§ Bounded work). Otherwise release the finishing lease, keep the marker and return.
 - **Input.** Fetch `compare/<cloud_base_sha>...<cloud_head_sha>` with the diff media type (piece 2 adds this beside `fetchGitHubPrDiff`) and run `runCodexQCCore` on it with `reviewedSha = cloud_head_sha`. A diff GitHub refuses as too large counts as a reviewer error.
+- **The reviewer must receive the whole change.** A passing verdict covers only what the reviewer was sent, so before the reviewer call the diff text is checked against the saved `cloud_paths`, and any gap ends `blocked` ("review input incomplete"):
+  - the set of paths in the diff's file headers (both sides of a rename) must equal the set in `cloud_paths`. A header that can't be parsed blocks;
+  - every path whose blob changed must have at least one hunk. A binary change ("Binary files differ"), or a file GitHub left out of the diff, has none and blocks. Binary changes have no reviewer in v1;
+  - nothing is clipped on the way in: `runCodexQCCore` refuses a diff over 300,000 characters instead of trimming it (`lib/codex-qc.ts:58`), and that refusal is a reviewer error. The cloud path passes the diff through unchanged.
 - **Results:**
   - QC lease held by another run → non-terminal, as above.
   - Reviewer error, timeout, or no parseable verdict (`parseQcVerdict` returns null) → `blocked` ("QC didn't complete").
@@ -411,9 +429,12 @@ This is the merge gate. **No PR exists before a completed review, after `RECONSI
 - Look up the PR with head `mc-review-<id>` (any state). If none exists, open a draft PR from `mc-review-<id>` into `main` and save `cloud_pr_url`.
 - **Validate it:** allowlisted repo (not a fork), targets `main`, head ref `mc-review-<id>` at `cloud_head_sha`, open. A closed, merged or retargeted PR, or more than one PR for the head → `blocked`. Nothing is reopened or retargeted automatically.
 - **PR body.** The request id and title, the verdict, the agent-reported test line, and the agent's `CHANGED` and `NOTES` text inside a fenced code block capped at 2,000 characters, so no `@mention`, link or markdown from the agent takes effect. It never carries the request text or the plan. The ping uses the same cap for agent-derived text.
+- **Mark the reviewed commit.** Before opening the PR, set the commit status `mc/codex-qc` on `cloud_head_sha`: `success` for SHIP, `failure` with "FIX-FIRST, read the review" for FIX-FIRST. Re-posting on a re-run is harmless. The status belongs to the commit, so if the PR's head ever moves, the new head shows no `mc/codex-qc` status. The PR body states the reviewed sha.
+- **Merge rule.** Merge when the PR's head commit shows `mc/codex-qc` `success`. A `failure` means fix first or decide knowingly. **No `mc/codex-qc` status on the head means that commit was never reviewed**, and merging it is an owner override, not the normal path. The runbook says this in those words.
+  - `minimal:` the status is shown, not required. A required check on `main` would also apply to every hand-made PR. Upgrade path: a GitHub App that posts a check run, made required once all PRs into `main` come from builders.
 - Outcome: `awaiting_approval`, with the verdict on the card and in the ping.
 - **`main` moving before merge** is the ordinary PR case and isn't re-reviewed. The review covers what the branch changes, GitHub shows conflicts, and David merges.
-- **Human override.** David can always open a PR from a review branch himself, or merge by hand. That is his decision as owner and is outside the automation; the runbook says the card will still read `blocked`.
+- **Human override.** David can always open a PR from a review branch himself, push to a review branch, or merge by hand. That is his decision as owner and is outside the automation; the runbook says the card will still read `blocked`.
 - *Repeatable:* lookup before create.
 
 ##### Step 8: save the outcome, then ping
@@ -518,6 +539,10 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
   - `mc-build-<id>` moving after pinning changes nothing (the pinned sha is used); `mc-review-<id>` at another sha → `blocked`;
   - a submodule entry, a symlink entry, a `.gitmodules` change, and a branch with no merge-base each → `blocked`;
   - the write helper refuses any ref other than `refs/heads/mc-review-<request id>`;
+  - the write helper refuses a commit status with any other context, or on any sha other than `cloud_head_sha`;
+  - review input: a diff missing one path from `cloud_paths`, a diff with an extra path, a binary change, a changed path with no hunk, an unparseable header, and a diff over 300,000 characters each → `blocked` with no reviewer verdict saved and no PR;
+  - more than 300 changed paths → `blocked`;
+  - SHIP sets `mc/codex-qc` `success` on `cloud_head_sha` and FIX-FIRST sets `failure`; `RECONSIDER` and a reviewer error set no status;
   - the PR body fences and caps agent text (an `@name` in `NOTES` stays inside the code block) and omits the request text;
   - a webhook for an unknown session id returns 2xx and changes no row; a stale timestamp returns 401;
   - with `CLOUD_BUILD_ENABLED` off, the webhook, finishing and reconcile still run;
@@ -623,16 +648,25 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
 - A forced protected-file edit (a test request that asks to touch `vercel.json`) ends `blocked` with no PR.
 - The containment proof (piece 0a) passed, and is re-run after the live runs.
 - Every live-run session's ledger row has `ended_at` and `cost_recorded_at` set.
+- Each live-run PR's head commit shows the `mc/codex-qc` status.
 - The runbook exists.
 
 ## Review stop rule
 
-This spec has had seven CodexQC rounds, each on a longer document. A reviewer asked to find problems in a design this size will keep finding some, and this PR merges a document, not code. So the merge rule for round 8 onward is fixed in advance:
+This spec has had eight CodexQC rounds, each on a longer document. A reviewer asked to find problems in a design this size will keep finding some, and this PR merges a document, not code. So the merge rule for round 8 onward is fixed in advance:
 
 - **Fix before merge:** a finding that lets unreviewed code run or merge, or lets money be spent without David seeing it.
 - **Everything else** goes on a "handle during the build" list at the end of this file, and the builder of the relevant piece closes it with a test.
 
 The real gates come after the merge: the unit tests, the containment proof, the smoke check and the two live runs.
+
+## Handle during the build
+
+Findings that don't meet the stop rule. Each is closed by the builder of the named piece, with the test given.
+
+1. **A resumed finish must be able to reach review (round 8, piece 2).** After start recovery uses its full allocation, a resumed finish can be left with less than the 150 s the reviewer needs, and the next cron run can repeat that. Give a review-ready request a guaranteed slot, either by reserving the time or by running it first. *Test:* two consecutive cron runs with every earlier phase using its whole budget; a request waiting only for review has a saved verdict by the end of the second.
+2. **Agent text must be inert at each destination (round 8, piece 2).** A fence and a cap aren't enough: text containing backticks can close the fence, and Telegram and GitHub render differently. Escape per destination (a fence longer than any backtick run in the text for GitHub; plain text with no parse mode for Telegram). *Test:* `NOTES` containing a closing fence, an `@name`, a link and Telegram formatting characters renders as literal text in both.
+3. **Cutover registers the webhook in the new workspace (round 8, piece 3 runbook).** The handover checklist adds: register the webhook, deploy the new signing secret, and see one signed event arrive from the new workspace, all before the old credentials are revoked. A draft PR doesn't prove delivery, because recovery can also finish a request.
 
 ## Stop-loss
 
