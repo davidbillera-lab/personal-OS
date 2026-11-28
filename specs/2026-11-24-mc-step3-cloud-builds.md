@@ -1,6 +1,27 @@
 # Mission Control step 3: approved plans build themselves on Managed Agents
 
-**Status:** DRAFT r6, 2026-11-27. Approved in outline by David 2026-11-24.
+**Status:** DRAFT r7, 2026-11-27. Approved in outline by David 2026-11-24.
+- **CodexQC round 6** (gpt-6.2-sol) returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-28T04-04-00-729Z.md`). All 8 findings were confirmed. Seven are folded in and one is partly accepted:
+  - `mc-review-*` is excluded from Vercel deploys, and the containment proof now covers what runs on a bot push and on the draft PR;
+  - the summary names the tested commit, and a mismatch with the pinned head blocks;
+  - the base sha is saved (`cloud_base_sha`), and the PR is validated on every run (repo, target, head, state);
+  - one deadline per invocation, a QC admission check, and no restart of finished steps;
+  - a server-side readiness gate (`CLOUD_BUILD_ENABLED` plus all IDs) before the start claim;
+  - the ledger sweep runs before the orphan scan, each with its own time budget;
+  - the QC repeat-call window is stated and accepted;
+  - the cutover waits out the 48-hour orphan window on the old credentials.
+  - **Partly accepted:** a durable cursor for the orphan scan is not added. Overflow raises an alert instead (§ Recovery, `minimal:`).
+- **Self-audit, r7** (Claude, after round 6, looking for the next round's findings). Folded in:
+  - `GITHUB_PAT` is only used for reads today, so its write access is a piece 0a check;
+  - the server's write helper refuses any ref outside `mc-review-<request id>`;
+  - agent text in the PR body and ping is fenced and capped, and the PR body never carries the request text (the repo is public);
+  - submodule and symlink entries block; a branch with no common history blocks; the head is read first and the base is computed from that sha;
+  - the readiness flag only gates new approvals, never finishing or recovery;
+  - a webhook with no matching row is still accepted, and recovery covers it;
+  - route time limits are set explicitly, reconcile can't break the alert route, and ledger rows open for 24 hours raise an alert;
+  - the webhook URL must not redirect, and the signature check enforces a timestamp window;
+  - the proof checks that other builders (Codex, Lovable) can still push;
+  - two stale lines from before the review branch are corrected (the "branch moved" test and the sha-gate note).
 - **CodexQC round 5** (gpt-6.2-sol) returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-27T20-14-24-750Z.md`). All 8 findings were confirmed and folded in:
   - the PR head is a server-created `mc-review-<id>` branch that the bot can't move, and QC reviews a diff pinned by sha;
   - the protected-file check diffs complete trees, so it has no 300-file cap, catches both sides of a rename, and fails closed on truncation;
@@ -28,7 +49,7 @@
 - **CodexQC round 1** returned FIX-FIRST (`.codex-qc/codex-qc-2026-11-25T05-12-42-970Z.md`). All 4 blockers, both should-fixes and the nit were confirmed and are folded in below.
 - **Gap Codex missed:** `queue/dispatch` is not in the `vercel.json` cron list. The only crons are the daily digest and the twice-daily `stuck-jobs`, so a 10-minute backup check doesn't exist. Recovery is redesigned around that (§ Finishing).
 
-**Gates:** David runs CodexQC round 6 on this spec. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
+**Gates:** David runs CodexQC round 7 on this spec. Then piece 0a (David), pieces 1–2 in a fresh build window via `phase-relay`, piece 0b (David), then piece 3.
 **Step 3 of 3** toward running Mission Control from the dashboard (`decisions.md` 2026-11-06). Steps 1 and 2 shipped in PRs #29, #32 and #33.
 **Why this path:** the home-rig spike failed its stop-loss (`specs/2026-11-24-step3-spike-report.md`). David chose Claude Managed Agents over Claude Code routines and GitHub Actions on 2026-11-24 (`decisions.md`). Codex cloud and Claude Code web sessions were ruled out, because neither can be started by a server.
 
@@ -44,7 +65,7 @@ David clicks **Approve plan** on a project card and picks **Claude (cloud)**. Fr
 | The real reviewer (GPT-6.x Sol) | `runCodexQCCore()` `lib/codex-qc.ts:131` |
 | PR diff fetch | `fetchGitHubPrDiff()` `lib/github.ts:14`, using `GITHUB_PAT` (already set on Vercel prod) |
 | Protected-file check | `alwaysRefused(path)` `scripts/lib/build-patch.mjs:61` |
-| No preview deploys of build branches | `vercel.json` `git.deploymentEnabled` `mc-build-*: false` |
+| No preview deploys of build branches | `vercel.json` `git.deploymentEnabled` `mc-build-*: false`. Piece 1 adds `mc-review-*: false` |
 | Scheduled cron with `CRON_SECRET` auth + Telegram ping | `app/api/alerts/stuck-jobs/route.ts`, which runs at 22:00 and 05:59 UTC (`vercel.json`). `queue/dispatch` has the same auth but is **not** scheduled. |
 | One QC run per task at a time (lease) | `tasks.codex_qc_run_id` / `codex_qc_run_started_at`, migration 031 |
 | Owner audit rows | `recordOwnerAudit()` in the projects actions |
@@ -56,6 +77,8 @@ David clicks **Approve plan** on a project card and picks **Claude (cloud)**. Fr
 
 1. **Approve.**
    - `approvePlan` gets a third builder, `claude_cloud`. The row gets `assigned_to: 'claude'`, so the worker check constraints don't change.
+   - **Readiness gate, before anything is written.** `cloudBuildReady(env)` must be true: `CLOUD_BUILD_ENABLED=true`, and the key, bot token, agent ID, environment ID, webhook secret and repo allowlist are all present. If not, `approvePlan` refuses `claude_cloud` with "cloud builds aren't set up yet" and writes no start claim, so the request's one attempt isn't spent. The card disables the option on the same check. David sets `CLOUD_BUILD_ENABLED` last, in piece 0b, and unsets it to pause approvals (runbook cutover).
+     - The flag gates **new approvals only**. The webhook, finishing, recovery and Retry finish keep running with the flag off, so builds already started still get ended, costed and reported.
    - **Start claim.** The same conditional update (it already checks `expectedStatus` + `expectedUpdatedAt`, so a double click loses) also sets `status: 'in_progress'` and `cloud_start_claimed_at: now()`. This intent is saved *before* any call to Anthropic.
    - The action then calls `startCloudBuild(requestId)`.
    - A request counts as a cloud build when `cloud_start_claimed_at` is set. No new status is added.
@@ -99,6 +122,8 @@ It carries:
   - Run the tests that cover the change and report the exact command and result. "Tests not run" counts as a failure to report, not a pass. Spike check 3 failed exactly this way.
   - End with the summary block below.
 
+**Public repo.** `personal-OS` is public, so anything the agent commits is public the moment it pushes `mc-build-<id>`, before any check runs. The sandbox holds no secrets, but it does hold the request text and plan. The Approve dialog says so next to the cloud option: "the request and plan may end up in a public branch". Private material goes to a different builder.
+
 Request text and plan are wrapped as untrusted input. The agent's power is bounded by its tools and by GitHub, not by the prompt.
 
 ### The summary contract (`parseCloudSummary` in `lib/cloud-build.ts`, pure)
@@ -107,6 +132,7 @@ The agent's last message must contain this block:
 
 ```
 ## MC-BUILD-SUMMARY
+HEAD_SHA: <full sha of the commit that was tested and pushed>
 CHANGED: <one line per file, or "none">
 TESTS_COMMAND: <exact command>
 TESTS_RESULT: passed | failed | not_run
@@ -120,8 +146,9 @@ NOTES: <free text, may be empty>
 | `TESTS_RESULT: failed` or `not_run` | `blocked` ("tests failed / not run, per agent"). No PR; the branch is kept for inspection |
 | Block missing, malformed, or two blocks | `blocked` ("no valid summary"). No PR |
 | `CHANGED: none` | `blocked` ("agent reports no change") |
+| `HEAD_SHA` missing, not a 40-character sha, or not equal to the pinned branch head (step d) | `blocked` ("the tested commit is not the pushed commit"). No PR |
 
-The test result is **agent-reported**. Nothing on our side re-runs the tests. The PR body and the card label it "Tests (agent-reported): passed", and CodexQC is the independent check. Server-side CI on `mc-build-*` is out of scope.
+The test result is **agent-reported**. Nothing on our side re-runs the tests. `HEAD_SHA` is a consistency check, not independent evidence: it stops a report for commit A being shown beside a review of commit B, for example when another session's push moved the branch before pinning. The PR body and the card label it "Tests (agent-reported): passed", and CodexQC is the independent check. Server-side CI on `mc-build-*` is out of scope.
 
 ### Agent and environment (created once, by `scripts/setup-cloud-builder.mjs`)
 
@@ -162,8 +189,15 @@ A fine-grained token can't be limited to some branches. A token on David's accou
    - target: all tags;
    - rules: restrict creations, updates and deletions;
    - bypass list: Repository admin.
-4. **What still runs on a bot push:** `secret-scan.yml` (gitleaks, default `GITHUB_TOKEN`, runs no repo code). Vercel skips `mc-build-*`. Nothing else is triggered.
-5. **The `alwaysRefused` check after the push is defense in depth.** It decides whether a PR is opened. It is not the containment.
+4. **What runs agent-written code outside the sandbox: nothing, and the proof checks it.** Inventory, checked 2026-11-27:
+   - **GitHub Actions:** the only workflow is `secret-scan.yml`, on `push` and `pull_request`. It runs gitleaks with the default `GITHUB_TOKEN` and executes no repo code. The bot can't add or change a workflow (no `workflow` scope, and `.github/` is a protected path).
+   - **Vercel:** `vercel.json` on `main` excludes `mc-build-*`, and piece 1 adds `mc-review-*`. The review branch is created only after the protected-file check, and `vercel.json` is a protected path, so a review branch always carries the exclusion.
+   - **Open question, settled by the proof:** Vercel reads `vercel.json` from the pushed commit. So the bot could push an `mc-build-*` commit whose `vercel.json` drops the exclusion, and that could build agent code with the Preview environment's variables before any check runs. The proof below tests exactly that. If a deployment appears, David turns off automatic preview deployments for the project in Vercel's project settings, which the repo can't override, and repeats the proof before going further.
+5. **The server's own writes are narrow.** `GITHUB_PAT` is David's identity and bypasses the rulesets, so the code that uses it for writes is a single helper in `lib/github.ts` that:
+   - creates only the ref `refs/heads/mc-review-<request id>`, built from the row's uuid and never from agent or webhook input, and refuses anything else;
+   - opens only a draft PR from that ref into `main` of the allowlisted repo;
+   - never updates or deletes a ref, and never merges.
+6. **The `alwaysRefused` check after the push is defense in depth.** It decides whether a PR is opened. It is not the containment.
 
 **Containment proof is a prerequisite** (piece 0a, step 4). Before the first build, David checks each of these with the bot's token from his own shell. Each must be refused by GitHub:
 - push to `main`;
@@ -176,6 +210,12 @@ A fine-grained token can't be limited to some branches. A token on David's accou
 Two pushes must succeed:
 - a push to `mc-build-proof` with the bot's token;
 - David's own push of a new non-`mc-build-*` branch, which proves the admin bypass works on a personal-account repo.
+- **Other builders still work:** one push each from Codex and from Lovable (whichever are in use on this repo) still succeeds with the rulesets on. If one is refused, add that app to the ruleset bypass list and repeat the whole proof.
+
+**Nothing may deploy or run.** David checks these in the Vercel and GitHub dashboards:
+- the `mc-build-proof` push created no Vercel deployment;
+- a second bot push to `mc-build-proof`, with a commit that removes the `mc-build-*` line from `vercel.json`, also created no Vercel deployment;
+- a branch `mc-review-proof2` that David creates from `main` with one trivial commit, with a draft PR opened from it, created no Vercel deployment, and the only Actions run on it is `secret-scan`.
 
 The bot *can* delete other `mc-build-*` branches. That's accepted, because those are all its own work. If any refusal doesn't happen, or either push fails, stop. Don't start piece 1.
 
@@ -189,17 +229,20 @@ Under the credential rule, Claude never creates, reads or pastes these.
 1. **Console workspace** `mission-control-builds` with a monthly spend limit (suggest $50). Create an API key in it and set it as `CLOUD_BUILD_ANTHROPIC_API_KEY` on Vercel prod. Use a separate key, not the existing `ANTHROPIC_API_KEY`, so build spend shows up on its own line and can be capped.
 2. **Machine account and token.** Create the `mc-builder-bot` account and invite it as a collaborator. Then create the classic token described in § Git containment (`public_repo` only, no `workflow`), with a 90-day expiry. Set the token as `CLOUD_BUILD_GITHUB_TOKEN`.
 3. **Rulesets.** Create the two rulesets from § Git containment.
-4. **Containment proof.** Run the refusal checks from § Git containment and paste the results, not the token, into the build window.
+4. **Containment proof.** Run the refusal checks from § Git containment and paste the results, not the token, into the build window. The three "nothing may deploy" checks need `mc-review-*: false` on `main`, so they run in piece 0b, after piece 1's `vercel.json` commit is merged and before `CLOUD_BUILD_ENABLED` is set.
 5. **Allowlist:** set `CLOUD_BUILD_REPOS=davidbillera-lab/personal-OS`.
+6. **Server token can write.** The prod `GITHUB_PAT` has only been used for reads so far. David confirms in GitHub's token settings that it can write contents and pull requests on `personal-OS`, or issues one that can. The token is never shown to Claude. The smoke check is the live confirmation; a 403 there ends `blocked` with "server token can't create the review branch".
 
 ### Piece 0b: registration (David, after pieces 1–2 are merged and deployed)
 
 1. **Setup script:** run `node scripts/setup-cloud-builder.mjs` locally with the workspace key in his own shell. Put the two printed IDs into Vercel env as `CLOUD_BUILD_AGENT_ID` and `CLOUD_BUILD_ENVIRONMENT_ID`.
 2. **Webhook.** Console → Manage → Webhooks:
-   - URL: `https://<prod domain>/api/cloud-builds/webhook`;
+   - URL: `https://<prod domain>/api/cloud-builds/webhook`. Use the exact host that answers without a redirect (an apex-to-www redirect would auto-disable the endpoint), and confirm with the Console's test send before the first build;
    - subscribe to `session.status_idled` and `session.status_terminated`;
    - set the `whsec_` secret (shown once) as `CLOUD_BUILD_WEBHOOK_SECRET`, then redeploy.
    - Subscribe *before* the first run, because events are not backfilled.
+3. **Finish the containment proof** (the "nothing may deploy" checks).
+4. **Turn it on:** set `CLOUD_BUILD_ENABLED=true` and redeploy. Until this step the card option is disabled and the server refuses cloud approvals.
 
 ### Piece 1: start a cloud build
 
@@ -208,6 +251,7 @@ Under the credential rule, Claude never creates, reads or pastes these.
   - `cloud_session_id TEXT UNIQUE`;
   - `cloud_branch TEXT`;
   - `cloud_head_sha TEXT`, the commit the protected-file check and QC are bound to;
+  - `cloud_base_sha TEXT`, the merge-base with `main` at pinning time. It's written once, in the same update as `cloud_head_sha`, and every later step uses the saved pair;
   - `cloud_finish_requested_at TIMESTAMPTZ`, the durable "finish needed" marker;
   - `cloud_finish_lease_id UUID` and `cloud_finish_lease_at TIMESTAMPTZ`, the finishing claim;
   - `cloud_pr_url TEXT`;
@@ -235,27 +279,34 @@ Under the credential rule, Claude never creates, reads or pastes these.
   - It constructs the client with `CLOUD_BUILD_ANTHROPIC_API_KEY` explicitly, not the default env key.
 - **`planOwnerApprovePlan`:** accept `claude_cloud`, mapping to `assigned_to: 'claude'`.
 - **`approvePlan`:** after the update succeeds, call `startCloudBuild`. Add a `cloud` field to the audit row.
-- **Card:** add the third builder option.
+- **Card:** add the third builder option, disabled unless `cloudBuildReady`.
+- **`vercel.json`:** add `"mc-review-*": false` under `git.deploymentEnabled`. This is its own first commit, merged before the deploy checks in the containment proof.
+- **`cloudBuildReady(env)`** (pure) in `lib/cloud-build.ts`, called by `approvePlan` before the start claim and by the card.
 - **Tests:**
   - the pure functions (prompt contains the rules, branch, untrusted wrapping; allowlist accepts and refuses);
   - `planOwnerApprovePlan` with `claude_cloud`;
+  - `approvePlan` with `claude_cloud` while not ready (flag off, or any one value missing): refused, no start claim written, and the request can still be approved later;
   - `startCloudBuild` with a mocked client: the session gets the budget, resource, metadata and `initial_events`, and a create failure blocks the row.
 - **Cloud builds require a linked task.** QC records against `task_id` (migration 031's lease lives on `tasks`), so `approvePlan` refuses `claude_cloud` on a request with no `task_id`.
 - **Verify in the SDK source, don't assume:**
   - whether session create takes an idempotency key;
   - how `sessions.list` pages and orders, and whether it filters by metadata;
-  - the call that ends a session and how its confirmation reads.
+  - the call that ends a session and how its confirmation reads;
+  - where a session's final cost or token usage is read, and the full list of session statuses;
+  - the `mc_requests.status` check constraint in prod allows `blocked`, `failed` and `awaiting_approval`.
   - Record the answers in the piece 1 handoff.
 
 ### Piece 2: finishing (webhook, recovery, cleanup)
 
 #### The webhook: `app/api/cloud-builds/webhook/route.ts`
 
-1. **Verify the HMAC signature** with `CLOUD_BUILD_WEBHOOK_SECRET`. Use the SDK's helper if 0.95.1 has one, otherwise standard-webhooks verification. Fail closed: no secret or a bad signature gets a 401.
+1. **Verify the HMAC signature** with `CLOUD_BUILD_WEBHOOK_SECRET`. Use the SDK's helper if 0.95.1 has one, otherwise standard-webhooks verification. Fail closed: no secret, a bad signature, or a timestamp more than 5 minutes off gets a 401.
+   - The route exports `maxDuration = 300`, and so does `stuck-jobs`. Neither sets one today.
 2. **Persist before acknowledging.** In this order:
    - insert the event `id` into `cloud_build_events`. A conflict means a duplicate; carry on, because the marker below is idempotent;
    - set `cloud_finish_requested_at = now()` on the row. This deliberately isn't a coalesce: every idle signal bumps the marker, so a finisher that saw an older one can't erase it (step a);
    - the match is on the row whose `cloud_session_id` matches `data.id`. Only rows still `in_progress` are touched.
+   - **No matching row** (the session id isn't written back yet, or it's an extra session): still record the event and return 2xx. Finish recovery picks up any `in_progress` row whose session is idle with no marker, and the ledger sweep handles extras.
    - Only after both writes succeed, return 2xx. If either fails, return 500 so Anthropic retries. Never return a 3xx, because a redirect auto-disables the endpoint.
 3. **Process after responding.** Call `finishCloudBuild(requestId)` from Next's `after()`. That's best-effort; the saved marker is what makes it durable. If the function dies mid-way, recovery picks the row up.
 
@@ -282,24 +333,31 @@ In those cases finishing releases its lease and returns, leaving the row `in_pro
 
 | # | Step | Safe to repeat because |
 |---|---|---|
-| a | Fetch the session and its events, and read the last `session.status_idle` `stop_reason`. `budget_reached` → `blocked` ("hit the $5 cap"). `requires_action` → `blocked`. Still `running` → clear the marker **only if it still equals the value read at claim** (`… where cloud_finish_requested_at = <seen>`), release the lease and return. A newer idle signal that arrived meanwhile keeps its marker. Terminated with an error → `failed` | Read-only |
+| a | Fetch the session and its events, and read the last `session.status_idle` `stop_reason`. `budget_reached` → `blocked` ("hit the $5 cap"). `requires_action` → `blocked`. Still `running`, or any status that isn't idle or terminated → clear the marker **only if it still equals the value read at claim** (`… where cloud_finish_requested_at = <seen>`), release the lease and return. A newer idle signal that arrived meanwhile keeps its marker. Terminated with an error → `failed` | Read-only |
 | b | `parseCloudSummary` → outcomes per the summary contract | Pure |
 | c | Close out: run `closeOutSession` (below) on every ledger row for this request. If it fails, the tail carries on and the ledger row stays open for the cleanup pass. The ping says "cost pending" when a cost isn't recorded yet | Each obligation is guarded by its own ledger column |
 | d | **Pin the commit, then check every changed path.**
-1. Read the head sha of `mc-build-<id>` and save it as `cloud_head_sha`. This happens on the first run only; a re-run uses the saved sha. Also save the merge-base with `main` as the fixed base.
+1. Read the head sha of `mc-build-<id>` and its merge-base with `main`, and save them together as `cloud_head_sha` and `cloud_base_sha` in one write-once update. This happens on the first run only; a re-run uses the saved pair and never recomputes either. If the summary's `HEAD_SHA` doesn't equal `cloud_head_sha`, block.
+   - Order matters: read the head sha first, then compute the merge-base of `main` and **that sha**, so the pair is consistent even if the branch moves between the two calls.
+   - No common history with `main` → `blocked` ("branch doesn't descend from main").
 2. Build the **complete** change set by diffing two full trees, `git/trees/<base>?recursive=1` against `git/trees/<head>?recursive=1`, by path, blob sha and mode. Don't use the compare API's file list, which stops at 300 files. A rename shows up as a removed old path plus an added new path, so both sides get checked; so do mode and symlink changes.
 3. If either tree response has `truncated: true`, block ("change set too large to verify"). It fails closed.
 4. Run `alwaysRefused` on every path in the set. Any hit → `blocked` with the paths.
+   - Any added or changed entry that is a submodule (mode `160000`) or a symlink (mode `120000`), or any change to `.gitmodules`, also blocks. A link can point a harmless-looking path at a protected one, and none of these has a use in v1.
 5. An empty set or a missing branch → `blocked` ("agent pushed nothing").
 
 | Read-only plus a write-once sha |
 | e | **Review branch and PR.**
 - Create `mc-review-<id>` at `cloud_head_sha` with `GITHUB_PAT`. That's David's identity, which bypasses the ruleset. If the branch already exists at the same sha, adopt it. If it exists at any other sha, block.
-- If `cloud_pr_url` is set, skip the PR. Otherwise look up an existing PR with head `mc-review-<id>` (any state) and adopt it. Only if none exists, open a draft PR from `mc-review-<id>`. Save `cloud_pr_url`.
+- Look up the PR with head `mc-review-<id>` (any state). If none exists, open a draft PR from `mc-review-<id>` into `main` and save `cloud_pr_url`.
+- **Validate the PR on every run**, whether it was just opened, adopted, or already saved. It must be in the allowlisted repo (not a fork), target `main`, have head ref `mc-review-<id>` at `cloud_head_sha`, and be open. A closed, merged or retargeted PR, or more than one PR for the head → `blocked` with the reason. Nothing is reopened or retargeted automatically.
+- **PR body.** It carries the request id and title, the agent-reported test line, and the agent's `CHANGED` and `NOTES` text inside a fenced code block capped at 2,000 characters, so no `@mention`, link or markdown from the agent takes effect. It never carries the request text or the plan. The ping uses the same cap for any agent-derived text.
 - The bot can't create, update or delete `mc-review-*`, because the branch ruleset restricts everything outside `mc-build-*`. So the PR's head is frozen at the checked commit through to merge.
 
 | Lookup before create; adopt only at the same sha |
-| f | **QC.** **Sha gate:** the PR head must equal `cloud_head_sha`, otherwise `blocked`. Run `runCodexQCCore` on the diff of the fixed base against `cloud_head_sha`, fetched by sha rather than as the PR's live diff, with `reviewedSha = cloud_head_sha`. The fetch is `compare/<base>...<cloud_head_sha>` with the diff media type; piece 2 adds it beside `fetchGitHubPrDiff`. If GitHub refuses a diff as too large, that counts as a reviewer error, so it fails closed. Skip if the task already has a verdict for that sha.
+| f | **QC.** **Sha gate:** the PR head must equal `cloud_head_sha`, otherwise `blocked`. **Admission:** start the reviewer call only if at least 150 s remain before the invocation deadline (§ Bounded work); otherwise release the finishing lease, keep the marker and return. Run `runCodexQCCore` on the diff of `cloud_base_sha` against `cloud_head_sha`, fetched by sha rather than as the PR's live diff, with `reviewedSha = cloud_head_sha`. The fetch is `compare/<cloud_base_sha>...<cloud_head_sha>` with the diff media type; piece 2 adds it beside `fetchGitHubPrDiff`. If GitHub refuses a diff as too large, that counts as a reviewer error, so it fails closed. Skip if the task already has a verdict for that sha. The base can't differ, because the pair is saved once per request and a request has one attempt.
+- **`main` moving before merge** is the ordinary PR case and isn't re-reviewed. The review covers what the branch changes (`cloud_base_sha` → `cloud_head_sha`), GitHub shows conflicts, and David merges.
+- **Accepted repeat-call window:** the QC lease stops overlapping runs, and a saved verdict stops a replay. If the process dies after the reviewer answers and before the verdict is saved, the next run pays for one more review (about $0.05). No provider idempotency is assumed.
 
 **Results:**
 - **Lease held by another run:** non-terminal. Release the finishing lease, keep the marker and return; recovery or the next call retries.
@@ -331,7 +389,7 @@ A row reaches `awaiting_approval` only with a saved, completed verdict for `clou
    - set `cost_cents` and `cost_recorded_at`.
    - A crash between the insert and the ledger update re-runs as a no-op insert, then the update. `model_costs.id` is a plain uuid PK (checked 2026-11-25), so no migration is needed.
 
-**Why the sha gate:** the bot can update any `mc-build-*` branch, so in principle a concurrent session could push to this one. The gate ties the protected-file check, the PR and QC to the same commit. Anything that moves the branch mid-finish blocks the build instead of publishing a review of code nobody checked.
+**Why the sha gate:** the bot can update any `mc-build-*` branch, so in principle a concurrent session could push to this one. After pinning, that no longer matters: the check, the PR and QC all use `cloud_head_sha`, and the PR's head is the review branch. A later push to `mc-build-<id>` is simply ignored. The gate in step f covers the one remaining case, the review branch itself being moved (only David's identity can), which blocks.
 
 #### Recovery: `reconcileCloudBuilds()`
 
@@ -349,9 +407,10 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
      - After: run the terminal tail with outcome `blocked`. The message is "start didn't happen; no session found after 30 min. The orphan scan keeps watching for 48 h, so the card shows any late spend. Submit a new request to retry".
      - It never says "nothing spent", because that isn't known yet.
    - **Never create.**
-0. **Orphan scan (runs first, every invocation).** List the sessions created by `CLOUD_BUILD_AGENT_ID` in the last 48 hours. Any session id that isn't in the ledger and carries `metadata.mc_request_id` gets inserted, with `is_primary: false` unless its request is still `in_progress` with no `cloud_session_id`; then it's start recovery's to adopt. The ledger sweep then ends it and records its cost, whatever state its request is in. This is the one catch-all for a create that landed late or was never written back.
+0. **Orphan scan (every invocation, after the ledger sweep).** List the sessions created by `CLOUD_BUILD_AGENT_ID` in the last 48 hours. Any session id that isn't in the ledger and carries `metadata.mc_request_id` gets inserted, with `is_primary: false` unless its request is still `in_progress` with no `cloud_session_id`; then it's start recovery's to adopt. The ledger sweep then ends it and records its cost, whatever state its request is in. This is the one catch-all for a create that landed late or was never written back.
    - Bounded to 5 list pages per invocation. At v1 volume, a handful of sessions a day, that's one page.
-   - If 48 hours of sessions doesn't fit in 5 pages, the scan logs a `stuck-jobs` alert line rather than silently skipping.
+   - If 48 hours of sessions doesn't fit in 5 pages or 30 s, the scan sends a `stuck-jobs` alert rather than silently skipping.
+   - `minimal:` there is no saved cursor, so an overflowing scan re-reads the same newest pages each run. At v1 volume overflow means something is badly wrong (dozens of sessions a day against a $50 cap), and the alert is the response: David unsets `CLOUD_BUILD_ENABLED` and checks the Console. Upgrade path: a saved `created_at` watermark that the scan resumes from.
    - Piece 1 verifies how `sessions.list` filters (by agent, by date) and pages.
 2. **Finish recovery.** Targets rows that are `in_progress` with a session ID and either a stale marker (no lease, or an expired lease) or no marker but a session that is now idle or terminated.
    - Set the marker if it's missing, then call `finishCloudBuild`.
@@ -360,19 +419,22 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
    - the row is not primary (an extra), so it's ended even while its request is still building; or
    - its request is no longer `in_progress`.
    - It never archives or deletes. A failure leaves the columns null, so the next pass retries.
+   - **No silent permanent failure.** A ledger row still open 24 hours after `discovered_at` is listed in the `stuck-jobs` alert with its session id, so a session that won't end, or a cost that can't be read, reaches David.
    - This works independently of the request's status or `cloud_session_id`, which is what closes the orphaning gap.
 
 **Where it runs:**
-- **Scheduled:** the existing `stuck-jobs` cron (22:00 and 05:59 UTC) calls it, **after** its alert work, so a backlog can never starve the alerts.
+- **Scheduled:** the existing `stuck-jobs` cron (22:00 and 05:59 UTC) calls it, **after** its alert work, so a backlog can never starve the alerts. The call is wrapped: a reconcile error or missing cloud credential is logged and added to the alert text, and the route still returns its normal response.
 - **Bounded work per call:**
-  - **Order:** orphan scan, then ledger sweep, then start recovery, then finishes. Obligations to end and cost sessions go first, so they never depend on time QC leaves over.
+  - **One deadline.** Each invocation (cron, webhook `after()`, Retry click) sets a single deadline 280 s after the *route handler* started, so the cron's alert work counts against it. The deadline is passed down to every function.
+  - **Every external call is bounded by the time left:** its timeout is the smaller of its cap (20 s for Anthropic and GitHub, 120 s for QC) and the time remaining minus 10 s. Inside reconcile and finishing, Anthropic calls pass `maxRetries: 0`; the retry is the next run. A QC timeout counts as a reviewer error (`blocked`).
+  - **Out of time is never an outcome.** If the deadline is reached mid-finish, the run releases its lease, keeps the marker and returns. Only a decided result sets an outcome.
+  - **No restarts.** Each finished step leaves a saved result that the next run reads instead of redoing: ledger columns (c), `cloud_head_sha` + `cloud_base_sha` (d), the review branch and `cloud_pr_url` (e), the saved verdict (f), `cloud_outcome` (g). A resumed finish therefore starts at its first unfinished step.
+  - **Order and budgets:**
+    1. ledger sweep (known obligations), until 50 s into the invocation;
+    2. orphan scan, at most 30 s of its own, so it can't eat the sweep's time;
+    3. start recovery, until 110 s;
+    4. finishes, oldest first, at most 3. A finish starts only if 60 s remain. Its reviewer call starts only if 150 s remain (120 s of QC plus 30 s for the outcome, ping and status writes); otherwise it stops after step e and resumes next run.
   - Each pass works oldest first (`cloud_finish_requested_at`, then `cloud_start_claimed_at`).
-  - **Every external call has a timeout:** 20 s for Anthropic and GitHub calls, 120 s for the QC call. A QC timeout counts as a reviewer error (`blocked`).
-  - **Budget, against a 280 s hard stop inside the 300 s limit:**
-    - the orphan scan and ledger sweep stop taking new rows at 60 s;
-    - start recovery stops at 90 s;
-    - a finish starts only if at least 170 s remain, which covers its worst case of a few 20 s calls plus 120 s of QC;
-    - at most 3 finishes per invocation.
   - Unprocessed rows stay eligible, because selection is by row state, not a queue. A run cut off mid-row leaves a lease that expires in 6 minutes.
   - `minimal:` at 3 finishes per cron run, twice a day, a backlog of more than 6 finished builds takes more than a day to clear without Retry clicks. That's fine at v1 volume; the `pg_cron` upgrade below fixes it.
 - **On demand:** a **Retry finish** owner action on the card, behind the same owner check as the others.
@@ -389,8 +451,20 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
   - protected-file hit;
   - nothing pushed;
   - each summary-contract outcome;
-  - a re-run after a crash at each of steps c, e, f and g, with no duplicate cost row, PR or QC, and no lost cost row or ping;
-  - the branch head moving between d and f, and during QC → `blocked`;
+  - a re-run after a crash at each of steps c, e, f and g, with no duplicate cost row or PR, and no lost cost row or ping;
+  - QC crash window, both sides: a crash *after* the verdict is saved → no second reviewer call; a crash *before* it is saved → exactly one repeat call, and still one outcome and one ping;
+  - `HEAD_SHA` in the summary differs from the pinned head (another push landed before pinning) → `blocked`, no PR;
+  - the PR is closed, merged, retargeted off `main`, from a fork, or at another head sha → `blocked`;
+  - a re-run after pinning uses the saved `cloud_base_sha` even though `main` has moved;
+  - deadline: with under 150 s left the reviewer isn't called, the lease is released, the row stays `in_progress`, and steps c–e aren't repeated on the next run; an out-of-time run never writes `cloud_outcome`;
+  - the orphan scan overflowing its pages or its 30 s still lets the ledger sweep finish its known rows, and raises the alert;
+  - `mc-build-<id>` moving after pinning changes nothing (the pinned sha is used); `mc-review-<id>` at another sha in step f → `blocked`;
+  - a submodule entry, a symlink entry, a `.gitmodules` change, and a branch with no merge-base each → `blocked`;
+  - the write helper refuses any ref other than `refs/heads/mc-review-<request id>`;
+  - the PR body fences and caps agent text (an `@name` in `NOTES` stays inside the code block) and omits the request text;
+  - a webhook for an unknown session id returns 2xx and changes no row; a stale timestamp returns 401;
+  - with `CLOUD_BUILD_ENABLED` off, the webhook, finishing and reconcile still run;
+  - a reconcile throw doesn't change the `stuck-jobs` response, and a ledger row open for 24 hours appears in the alert;
   - every blocked/failed outcome (budget, bad summary, failed tests, protected file, nothing pushed, QC error, RECONSIDER) still writes the cost row and sends the ping;
   - QC lease held → row stays `in_progress`, marker kept, no ping;
   - `sessions.create` is called with `maxRetries: 0`; a create timeout leaves the row for start recovery; start recovery with two matching sessions adopts the oldest and ends and costs the other;
@@ -426,11 +500,12 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
   - confirming a session ended;
   - re-running the containment proof;
   - handing the bot account and workspace to a new owner, **with a cutover** so nothing is stranded under the old owner:
-    1. pause approvals (no new `claude_cloud` approvals);
+    1. pause approvals: unset `CLOUD_BUILD_ENABLED` and redeploy, so the server refuses new `claude_cloud` approvals;
     2. drain: wait until no request is `in_progress` and the ledger has no open rows (`ended_at` or `cost_recorded_at` null), then merge or close the open `mc-review-*` PRs;
-    3. switch the credentials and run the setup script against the new workspace;
-    4. re-run the containment proof and the smoke check;
-    5. only then revoke the old credentials.
+    3. wait out the orphan window: keep the **old** credentials and agent ID in place for 48 hours after the last cloud approval, so the orphan scan can still catch a late session. Then confirm in the old workspace's Console that no session is running and the ledger is still clean;
+    4. switch the credentials and run the setup script against the new workspace;
+    5. re-run the containment proof and the smoke check, then set `CLOUD_BUILD_ENABLED=true` again;
+    6. only then revoke the old credentials.
 - **Smoke check first:** before live run 1, a trivial request that changes one line. It settles the `allowed_hosts` question and proves webhook → PR end to end.
 - **Live run 1:** a real small request on personal-OS (for example the flaky `trusted-git` temp-dir test, already on the next-action list). End to end: no window opened, draft PR, QC ran, tests actually ran.
 - **Live run 2:** a second, different request.
@@ -457,7 +532,12 @@ Webhooks are dropped after 3 failed attempts, and `after()` isn't guaranteed. Re
 6. **Separate Console workspace and key.**
    - Gained: build spend is visible and hard-capped.
    - Given up: one more credential to rotate.
-7. **Beta dependence.**
+7. **Build branches are public immediately.**
+   - Gained: no private mirror or second repo to run.
+   - Given up: request and plan text can surface in a public branch before any check. The Approve dialog warns, and nothing secret is in the sandbox.
+8. **Branches are not cleaned up automatically.**
+   - `minimal:` `mc-build-<id>` and `mc-review-<id>` stay after merge or close. The server never deletes refs. David deletes them in GitHub, or turns on "delete head branches on merge" for the review branch. The runbook lists it.
+9. **Beta dependence.**
    - Given up: stability guarantees. Mitigated by keeping all Managed Agents calls in `lib/cloud-build.ts`, so a swap touches one file.
 
 ## Founder-dependence (for the exit story)
