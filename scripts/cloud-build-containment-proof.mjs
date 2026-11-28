@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Containment proof for cloud builds (spec: specs/2026-11-24-mc-step3-cloud-builds.md, "Git containment").
-// Pushes as the builder bot through a git remote named `bot` and reports what GitHub refused.
-// Holds no token: git's credential manager supplies the bot's token for the `bot` remote.
+// Pushes as the builder bot and reports what GitHub refused.
+// Asks once for the bot's token (hidden input), keeps it in memory only, and hands it to git through
+// the child process environment. It is never written to disk, printed, or put on a command line.
+// Git's saved sign-ins are bypassed for bot pushes: they silently pushed as the owner (2026-11-28).
 //
 //   node scripts/cloud-build-containment-proof.mjs            run the proof
 //   node scripts/cloud-build-containment-proof.mjs --cleanup  delete the proof branches afterwards
@@ -20,8 +22,12 @@ const PROOF_REFS = [
 ]
 
 const git = (args, opts = {}) => execFileSync('git', args, { encoding: 'utf8', ...opts }).trim()
+let botEnv = null
 const push = (remote, refspec) => {
-  const r = spawnSync('git', ['push', remote, refspec], { encoding: 'utf8' })
+  const r = remote === BOT
+    ? spawnSync('git', ['-c', 'credential.helper=', 'push', `https://github.com/${REPO}.git`, refspec],
+      { encoding: 'utf8', env: botEnv })
+    : spawnSync('git', ['push', remote, refspec], { encoding: 'utf8' })
   const why = (r.stderr || '').split('\n').map(l => l.trim())
     .filter(l => /^(remote: (- |error)|! |fatal:|error:)/.test(l)).slice(0, 2).join(' | ')
   return { ok: r.status === 0, why }
@@ -35,9 +41,40 @@ if (process.argv.includes('--cleanup')) {
   process.exit(0)
 }
 
-if (!git(['remote']).split('\n').includes(BOT)) {
-  console.error(`No "${BOT}" remote. Add it first:\n  git remote add bot https://mc-builder-bot@github.com/davidbillera-lab/personal-OS.git`)
+const askHidden = question => new Promise(resolve => {
+  process.stdout.write(question)
+  let typed = ''
+  process.stdin.setRawMode(true)
+  process.stdin.resume()
+  process.stdin.on('data', function onData(chunk) {
+    for (const ch of chunk.toString()) {
+      if (ch === '\u0003') process.exit(130)
+      if (ch === '\r' || ch === '\n') {
+        process.stdin.setRawMode(false)
+        process.stdin.pause()
+        process.stdin.off('data', onData)
+        process.stdout.write('\n')
+        return resolve(typed.trim())
+      }
+      typed = ch === '\b' || ch === '\u007f' ? typed.slice(0, -1) : typed + ch
+    }
+  })
+})
+if (!process.stdin.isTTY) {
+  console.error('Run this in a terminal: it needs to ask for the bot token.')
   process.exit(2)
+}
+const pasted = await askHidden(`Paste the ${BOT_LOGIN} classic token (nothing will show), then press Enter: `)
+if (!pasted.startsWith('ghp_')) {
+  console.error('That is not a classic GitHub token (those start with ghp_). Nothing was pushed.')
+  process.exit(2)
+}
+botEnv = {
+  ...process.env,
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: `http.https://github.com/${REPO}.git.extraheader`,
+  GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${pasted}`).toString('base64')}`,
 }
 
 git(['fetch', '-q', OWNER, 'main'])
@@ -73,13 +110,13 @@ const stop = msg => { console.log(`\nSTOPPED: ${msg}`); process.exit(1) }
 // 1. The bot credential must work at all, or every "refused" below would be meaningless.
 const first = push(BOT, `${plain}:refs/heads/mc-build-proof`)
 report(first.ok, 'bot can push mc-build-proof', first.why)
-if (!first.ok) stop('the bot push failed. Check the bot remote and its token, then run again.')
+if (!first.ok) stop('the bot push failed. The token was rejected or lacks the public_repo scope. Run again with the right one.')
 // ...and it must really be the bot. If git signed in as the owner instead, nothing below proves anything.
 const pusher = () => spawnSync('gh', ['api', `repos/${REPO}/activity?ref=refs/heads/mc-build-proof&per_page=1`, '-q', '.[0].actor.login'], { encoding: 'utf8' }).stdout.trim()
 let who = ''
 for (let i = 0; i < 5 && !who; i++) { who = pusher(); if (!who) spawnSync('node', ['-e', 'setTimeout(()=>{},2000)']) }
 report(who === BOT_LOGIN, `that push was made by ${BOT_LOGIN}`, `GitHub recorded: ${who || 'nothing yet'}`)
-if (who !== BOT_LOGIN) stop(`git pushed as "${who}", not the bot. Run with --cleanup, sign the bot remote in with the bot's token, and run again.`)
+if (who !== BOT_LOGIN) stop(`git pushed as "${who}", not the bot. Run with --cleanup, then run again with a token created while signed in to GitHub as the bot.`)
 
 // 2. Owner setup. These also prove the admin bypass still works.
 for (const ref of ['refs/heads/mc-review-proof', 'refs/heads/proof-delete-me']) {
